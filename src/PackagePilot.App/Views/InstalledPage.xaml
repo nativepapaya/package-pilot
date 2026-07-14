@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="PackagePilot.App.Views.InstalledPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:views="using:PackagePilot.App.Views"
+    Background="{ThemeResource PackagePilotPageBrush}">
+
+    <Page.Resources>
+        <DataTemplate x:Key="InstalledPackageTemplate" x:DataType="views:PackageListItem">
+            <views:PackageRow
+                Margin="0,0,0,8"
+                ActionInvoked="OnPackageActionInvoked"
+                ActionLabel="{x:Bind ActionLabel}"
+                IconGlyph="{x:Bind IconGlyph}"
+                IconUri="{x:Bind IconUri}"
+                PackageId="{x:Bind PackageId}"
+                PackageName="{x:Bind Name}"
+                Publisher="{x:Bind Publisher}"
+                Source="{x:Bind Source}"
+                Status="{x:Bind Status}"
+                Tag="{x:Bind PackageId}"
+                Version="{x:Bind VersionLabel}" />
+        </DataTemplate>
+    </Page.Resources>
+
+    <Grid x:Name="Root" Padding="24,20,24,24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Spacing="4">
+                <TextBlock AutomationProperties.HeadingLevel="Level1" Style="{StaticResource PackagePilotPageTitleStyle}" Text="Installed" />
+                <TextBlock Style="{StaticResource PackagePilotSubtitleStyle}" Text="Review software detected by WinGet on this PC." />
+            </StackPanel>
+            <Button
+                Grid.Column="1"
+                Style="{StaticResource PackagePilotIconButtonStyle}"
+                AutomationProperties.Name="Refresh installed packages"
+                Click="OnRefreshClick"
+                ToolTipService.ToolTip="Refresh (Ctrl+R)">
+                <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE72C;" />
+            </Button>
+        </Grid>
+
+        <InfoBar
+            x:Name="StatusBanner"
+            Grid.Row="1"
+            IsClosable="True"
+            IsOpen="False"
+            Severity="Informational" />
+
+        <Grid Grid.Row="2" ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition x:Name="DetailsColumn" Width="0" />
+            </Grid.ColumnDefinitions>
+            <Grid RowSpacing="14">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <AutoSuggestBox
+                        x:Name="InstalledSearchBox"
+                        AutomationProperties.Name="Filter installed packages"
+                        PlaceholderText="Filter installed apps"
+                        QueryIcon="Find">
+                        <AutoSuggestBox.KeyboardAccelerators>
+                            <KeyboardAccelerator Key="F" Modifiers="Control" Invoked="OnFocusSearchInvoked" />
+                        </AutoSuggestBox.KeyboardAccelerators>
+                    </AutoSuggestBox>
+                    <ComboBox
+                        x:Name="SortBox"
+                        Grid.Column="1"
+                        MinWidth="150"
+                        AutomationProperties.Name="Sort installed packages"
+                        Header="Sort by">
+                        <ComboBoxItem Content="Name" Tag="name" />
+                        <ComboBoxItem Content="Publisher" Tag="publisher" />
+                        <ComboBoxItem Content="Version" Tag="version" />
+                    </ComboBox>
+                </Grid>
+
+                <Grid Grid.Row="1">
+                    <ListView
+                        x:Name="InstalledList"
+                        Style="{StaticResource PackagePilotListViewStyle}"
+                        AutomationProperties.Name="Installed packages"
+                        ItemTemplate="{StaticResource InstalledPackageTemplate}"
+                        SelectionChanged="OnPackageSelectionChanged"
+                        Visibility="Collapsed">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Padding" Value="0" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                    </ListView>
+
+                    <StackPanel
+                        x:Name="EmptyState"
+                        MaxWidth="460"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="10">
+                        <Border
+                            Width="64"
+                            Height="64"
+                            HorizontalAlignment="Center"
+                            Background="{ThemeResource PackagePilotAccentSoftBrush}"
+                            CornerRadius="18">
+                            <FontIcon FontFamily="Segoe Fluent Icons" FontSize="28" Glyph="&#xE74C;" />
+                        </Border>
+                        <TextBlock HorizontalAlignment="Center" Style="{StaticResource PackagePilotSectionTitleStyle}" Text="No matching apps" />
+                        <TextBlock
+                            HorizontalAlignment="Center"
+                            Style="{StaticResource PackagePilotSubtitleStyle}"
+                            Text="Refresh to scan installed software, or clear the filter to see all detected packages."
+                            TextAlignment="Center" />
+                    </StackPanel>
+                </Grid>
+
+                <TextBlock
+                    x:Name="PackageCountText"
+                    Grid.Row="2"
+                    Style="{StaticResource PackagePilotCaptionStyle}"
+                    AutomationProperties.LiveSetting="Polite"
+                    Text="No packages loaded" />
+            </Grid>
+
+            <views:PackageDetailsPane
+                x:Name="DetailsPane"
+                Grid.Column="1"
+                MinWidth="340"
+                CloseRequested="OnDetailsCloseRequested"
+                PrimaryActionInvoked="OnDetailsPrimaryActionInvoked"
+                Visibility="Collapsed" />
+
+            <VisualStateManager.VisualStateGroups>
+                <VisualStateGroup>
+                    <VisualState x:Name="Narrow">
+                        <VisualState.StateTriggers>
+                            <AdaptiveTrigger MinWindowWidth="0" />
+                        </VisualState.StateTriggers>
+                        <VisualState.Setters>
+                            <Setter Target="Root.Padding" Value="16,16,16,20" />
+                        </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Wide">
+                        <VisualState.StateTriggers>
+                            <AdaptiveTrigger MinWindowWidth="900" />
+                        </VisualState.StateTriggers>
+                        <VisualState.Setters>
+                            <Setter Target="Root.Padding" Value="32,24,32,32" />
+                        </VisualState.Setters>
+                    </VisualState>
+                </VisualStateGroup>
+            </VisualStateManager.VisualStateGroups>
+        </Grid>
+    </Grid>
+</Page>

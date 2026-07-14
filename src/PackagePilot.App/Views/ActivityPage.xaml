@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="PackagePilot.App.Views.ActivityPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:views="using:PackagePilot.App.Views"
+    Background="{ThemeResource PackagePilotPageBrush}">
+
+    <Page.Resources>
+        <DataTemplate x:Key="OperationTemplate" x:DataType="views:OperationListItem">
+            <Border Margin="0,0,0,8" Style="{StaticResource PackagePilotRowCardStyle}">
+                <Grid ColumnSpacing="12" RowSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Border Style="{StaticResource PackagePilotIconTileStyle}">
+                        <FontIcon FontFamily="Segoe Fluent Icons" FontSize="20" Glyph="&#xE895;" />
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                        <TextBlock FontWeight="SemiBold" Text="{x:Bind PackageName}" TextTrimming="CharacterEllipsis" />
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Action}" />
+                            <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="•" />
+                            <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Status}" />
+                            <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="•" />
+                            <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Timestamp}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <Button
+                        Grid.Column="2"
+                        MinWidth="76"
+                        AutomationProperties.Name="Cancel package operation"
+                        Click="OnCancelOperationClick"
+                        Content="Cancel"
+                        IsEnabled="{x:Bind CanCancel}"
+                        Tag="{x:Bind OperationId}" />
+                    <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Spacing="5">
+                        <ProgressBar
+                            AutomationProperties.Name="Operation progress"
+                            IsIndeterminate="{x:Bind IsIndeterminate}"
+                            Maximum="100"
+                            Value="{x:Bind Progress}" />
+                        <TextBlock
+                            AutomationProperties.LiveSetting="Polite"
+                            Style="{StaticResource PackagePilotCaptionStyle}"
+                            Text="{x:Bind Detail}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+    </Page.Resources>
+
+    <Grid x:Name="Root" Padding="24,20,24,24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Spacing="4">
+                <TextBlock AutomationProperties.HeadingLevel="Level1" Style="{StaticResource PackagePilotPageTitleStyle}" Text="Activity" />
+                <TextBlock Style="{StaticResource PackagePilotSubtitleStyle}" Text="Follow active work and the 100 most recent package operations." />
+            </StackPanel>
+            <Button
+                x:Name="ClearHistoryButton"
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                AutomationProperties.Name="Clear completed activity"
+                Click="OnClearHistoryClick"
+                Content="Clear completed" />
+        </Grid>
+
+        <Border Grid.Row="1" Style="{StaticResource PackagePilotSubtleCardStyle}">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Border
+                    Width="40"
+                    Height="40"
+                    Background="{ThemeResource PackagePilotAccentSoftBrush}"
+                    CornerRadius="10">
+                    <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE8FD;" />
+                </Border>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                    <TextBlock x:Name="QueueSummaryText" FontWeight="SemiBold" Text="Queue is idle" />
+                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="Only one installer runs at a time to avoid overlapping prompts." />
+                </StackPanel>
+                <Button
+                    x:Name="CancelQueuedButton"
+                    Grid.Column="2"
+                    AutomationProperties.Name="Cancel queued operations"
+                    Click="OnCancelQueuedClick"
+                    Content="Cancel queued"
+                    IsEnabled="False" />
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="2">
+            <ListView
+                x:Name="ActivityList"
+                Style="{StaticResource PackagePilotListViewStyle}"
+                AutomationProperties.Name="Package activity"
+                IsItemClickEnabled="False"
+                ItemTemplate="{StaticResource OperationTemplate}"
+                ItemsSource="{x:Bind Operations}"
+                SelectionMode="None"
+                Visibility="Collapsed">
+                <ListView.ItemContainerStyle>
+                    <Style TargetType="ListViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="Padding" Value="0" />
+                    </Style>
+                </ListView.ItemContainerStyle>
+            </ListView>
+
+            <StackPanel
+                x:Name="EmptyState"
+                MaxWidth="440"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="10">
+                <Border
+                    Width="64"
+                    Height="64"
+                    HorizontalAlignment="Center"
+                    Background="{ThemeResource PackagePilotAccentSoftBrush}"
+                    CornerRadius="18">
+                    <FontIcon FontFamily="Segoe Fluent Icons" FontSize="28" Glyph="&#xE81C;" />
+                </Border>
+                <TextBlock HorizontalAlignment="Center" Style="{StaticResource PackagePilotSectionTitleStyle}" Text="No package activity yet" />
+                <TextBlock
+                    HorizontalAlignment="Center"
+                    Style="{StaticResource PackagePilotSubtitleStyle}"
+                    Text="Installs, updates, removals, failures, and reboot requirements will appear here."
+                    TextAlignment="Center" />
+            </StackPanel>
+        </Grid>
+
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup>
+                <VisualState x:Name="Narrow">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="0" />
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="Root.Padding" Value="16,16,16,20" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="Wide">
+                    <VisualState.StateTriggers>
+                        <AdaptiveTrigger MinWindowWidth="900" />
+                    </VisualState.StateTriggers>
+                    <VisualState.Setters>
+                        <Setter Target="Root.Padding" Value="32,24,32,32" />
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+    </Grid>
+</Page>

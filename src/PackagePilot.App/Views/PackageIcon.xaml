@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="PackagePilot.App.Views.PackageIcon"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    IsTabStop="False"
+    Loaded="OnLoaded"
+    Unloaded="OnUnloaded">
+
+    <Grid AutomationProperties.AccessibilityView="Raw">
+        <FontIcon
+            x:Name="FallbackIcon"
+            AutomationProperties.AccessibilityView="Raw"
+            FontFamily="Segoe Fluent Icons"
+            FontSize="20"
+            Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+            Glyph="{x:Bind FallbackGlyph, Mode=OneWay}" />
+        <Image
+            x:Name="IconImage"
+            AutomationProperties.AccessibilityView="Raw"
+            Stretch="Uniform"
+            Visibility="Collapsed" />
+    </Grid>
+</UserControl>

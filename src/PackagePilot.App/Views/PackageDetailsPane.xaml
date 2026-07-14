@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="PackagePilot.App.Views.PackageDetailsPane"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:views="using:PackagePilot.App.Views"
+    d:DesignHeight="720"
+    d:DesignWidth="380"
+    mc:Ignorable="d">
+
+    <Border Style="{StaticResource PackagePilotCardStyle}">
+        <Grid RowSpacing="16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border Width="52" Height="52" Style="{StaticResource PackagePilotIconTileStyle}">
+                    <views:PackageIcon
+                        FallbackGlyph="{x:Bind IconGlyph, Mode=OneWay}"
+                        IconUri="{x:Bind IconUri, Mode=OneWay}" />
+                </Border>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                    <TextBlock
+                        Style="{StaticResource PackagePilotSectionTitleStyle}"
+                        Text="{x:Bind PackageName, Mode=OneWay}"
+                        TextTrimming="CharacterEllipsis" />
+                    <TextBlock
+                        Style="{StaticResource PackagePilotSubtitleStyle}"
+                        Text="{x:Bind Publisher, Mode=OneWay}"
+                        TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+            </Grid>
+
+            <ScrollViewer
+                Grid.Row="1"
+                HorizontalScrollMode="Disabled"
+                HorizontalScrollBarVisibility="Disabled"
+                VerticalScrollBarVisibility="Auto">
+                <StackPanel Spacing="18">
+                    <StackPanel Spacing="6">
+                        <TextBlock FontWeight="SemiBold" Text="About" />
+                        <TextBlock
+                            Style="{StaticResource PackagePilotSubtitleStyle}"
+                            Text="{x:Bind Description, Mode=OneWay}" />
+                    </StackPanel>
+
+                    <Grid ColumnSpacing="16" RowSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Style="{StaticResource PackagePilotCaptionStyle}" Text="Package ID" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="{x:Bind PackageId, Mode=OneWay}" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="1" Style="{StaticResource PackagePilotCaptionStyle}" Text="Source" />
+                        <TextBlock Grid.Row="1" Grid.Column="1" Text="{x:Bind Source, Mode=OneWay}" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="2" Style="{StaticResource PackagePilotCaptionStyle}" Text="Version" />
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="{x:Bind Version, Mode=OneWay}" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="3" Style="{StaticResource PackagePilotCaptionStyle}" Text="License" />
+                        <TextBlock Grid.Row="3" Grid.Column="1" Text="{x:Bind License, Mode=OneWay}" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="4" Style="{StaticResource PackagePilotCaptionStyle}" Text="Architecture" />
+                        <TextBlock Grid.Row="4" Grid.Column="1" Text="{x:Bind Architecture, Mode=OneWay}" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="5" Style="{StaticResource PackagePilotCaptionStyle}" Text="Install scope" />
+                        <TextBlock Grid.Row="5" Grid.Column="1" Text="{x:Bind Scope, Mode=OneWay}" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="6" Style="{StaticResource PackagePilotCaptionStyle}" Text="Elevation" />
+                        <TextBlock Grid.Row="6" Grid.Column="1" Text="{x:Bind Elevation, Mode=OneWay}" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="7" Style="{StaticResource PackagePilotCaptionStyle}" Text="Tags" />
+                        <TextBlock Grid.Row="7" Grid.Column="1" Text="{x:Bind Tags, Mode=OneWay}" TextWrapping="Wrap" />
+                        <TextBlock Grid.Row="8" Style="{StaticResource PackagePilotCaptionStyle}" Text="Versions" />
+                        <TextBlock Grid.Row="8" Grid.Column="1" Text="{x:Bind Versions, Mode=OneWay}" TextWrapping="Wrap" />
+                    </Grid>
+
+                    <StackPanel x:Name="LinksPanel" Visibility="Collapsed" Spacing="2">
+                        <TextBlock Margin="0,0,0,4" FontWeight="SemiBold" Text="Links" />
+                        <HyperlinkButton x:Name="HomepageLink" Content="Package homepage" Visibility="Collapsed" />
+                        <HyperlinkButton x:Name="PublisherLink" Content="Publisher" Visibility="Collapsed" />
+                        <HyperlinkButton x:Name="SupportLink" Content="Support" Visibility="Collapsed" />
+                        <HyperlinkButton x:Name="LicenseLink" Content="License terms" Visibility="Collapsed" />
+                        <HyperlinkButton x:Name="ReleaseNotesLink" Content="Release notes" Visibility="Collapsed" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="ReleaseNotesPanel" Visibility="Collapsed" Spacing="6">
+                        <TextBlock FontWeight="SemiBold" Text="Release notes" />
+                        <TextBlock
+                            Style="{StaticResource PackagePilotSubtitleStyle}"
+                            Text="{x:Bind ReleaseNotes, Mode=OneWay}" />
+                    </StackPanel>
+
+                    <InfoBar
+                        x:Name="AgreementNotice"
+                        IsClosable="False"
+                        IsOpen="False"
+                        Message="Review and accept the package or source agreements before continuing."
+                        Severity="Informational"
+                        Title="Agreement required" />
+                </StackPanel>
+            </ScrollViewer>
+
+            <StackPanel Grid.Row="2" Spacing="8">
+                <Button
+                    HorizontalAlignment="Stretch"
+                    AutomationProperties.Name="{x:Bind PrimaryActionLabel, Mode=OneWay}"
+                    Click="OnPrimaryActionClick"
+                    Content="{x:Bind PrimaryActionLabel, Mode=OneWay}"
+                    Style="{StaticResource AccentButtonStyle}" />
+                <Button
+                    HorizontalAlignment="Stretch"
+                    AutomationProperties.Name="Close package details"
+                    Click="OnCloseClick"
+                    Content="Close" />
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>

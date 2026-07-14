@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="PackagePilot.App.Views.PackageRow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:views="using:PackagePilot.App.Views"
+    d:DesignHeight="64"
+    d:DesignWidth="860"
+    MinHeight="64"
+    mc:Ignorable="d">
+
+    <Border Style="{StaticResource PackagePilotRowCardStyle}">
+        <Grid ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Border Style="{StaticResource PackagePilotIconTileStyle}">
+                <views:PackageIcon
+                    FallbackGlyph="{x:Bind IconGlyph, Mode=OneWay}"
+                    IconUri="{x:Bind IconUri, Mode=OneWay}" />
+            </Border>
+
+            <StackPanel
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                Spacing="2">
+                <TextBlock
+                    FontFamily="{StaticResource PackagePilotContentFont}"
+                    FontSize="14"
+                    FontWeight="SemiBold"
+                    Foreground="{ThemeResource PackagePilotTextPrimaryBrush}"
+                    Text="{x:Bind PackageName, Mode=OneWay}"
+                    TextTrimming="CharacterEllipsis" />
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Publisher, Mode=OneWay}" />
+                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="•" />
+                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind PackageId, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+                    <TextBlock
+                        x:Name="SourceSeparator"
+                        Style="{StaticResource PackagePilotCaptionStyle}"
+                        Text="•" />
+                    <TextBlock
+                        x:Name="SourceText"
+                        Style="{StaticResource PackagePilotCaptionStyle}"
+                        Text="{x:Bind Source, Mode=OneWay}" />
+                </StackPanel>
+            </StackPanel>
+
+            <StackPanel
+                x:Name="MetadataPanel"
+                Grid.Column="2"
+                MinWidth="120"
+                VerticalAlignment="Center"
+                Spacing="2">
+                <TextBlock
+                    HorizontalAlignment="Right"
+                    FontSize="12"
+                    Foreground="{ThemeResource PackagePilotTextPrimaryBrush}"
+                    Text="{x:Bind Version, Mode=OneWay}" />
+                <TextBlock
+                    HorizontalAlignment="Right"
+                    FontSize="12"
+                    Foreground="{ThemeResource PackagePilotTextSecondaryBrush}"
+                    Text="{x:Bind Status, Mode=OneWay}" />
+            </StackPanel>
+
+            <Button
+                x:Name="ActionButton"
+                Grid.Column="3"
+                MinWidth="86"
+                VerticalAlignment="Center"
+                AutomationProperties.Name="{x:Bind ActionAutomationName}"
+                Click="OnActionClick"
+                Content="{x:Bind ActionLabel, Mode=OneWay}"
+                IsEnabled="{x:Bind IsActionEnabled, Mode=OneWay}" />
+
+            <VisualStateManager.VisualStateGroups>
+                <VisualStateGroup>
+                    <VisualState x:Name="Compact">
+                        <VisualState.StateTriggers>
+                            <AdaptiveTrigger MinWindowWidth="0" />
+                        </VisualState.StateTriggers>
+                        <VisualState.Setters>
+                            <Setter Target="MetadataPanel.Visibility" Value="Collapsed" />
+                            <Setter Target="SourceSeparator.Visibility" Value="Collapsed" />
+                            <Setter Target="SourceText.Visibility" Value="Collapsed" />
+                        </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Comfortable">
+                        <VisualState.StateTriggers>
+                            <AdaptiveTrigger MinWindowWidth="760" />
+                        </VisualState.StateTriggers>
+                        <VisualState.Setters>
+                            <Setter Target="MetadataPanel.Visibility" Value="Visible" />
+                            <Setter Target="SourceSeparator.Visibility" Value="Visible" />
+                            <Setter Target="SourceText.Visibility" Value="Visible" />
+                        </VisualState.Setters>
+                    </VisualState>
+                </VisualStateGroup>
+            </VisualStateManager.VisualStateGroups>
+        </Grid>
+    </Border>
+</UserControl>

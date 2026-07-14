@@ -1,0 +1,724 @@
+using System.Runtime.InteropServices;
+using System.Threading.Channels;
+using PackagePilot.Core.Abstractions;
+using PackagePilot.Core.Models;
+
+namespace PackagePilot.Core.Services;
+
+/// <summary>
+/// Executes package operations one at a time so installers and elevation prompts cannot overlap.
+/// </summary>
+public sealed class OperationQueue : IOperationQueue
+{
+    private const int MaximumHistory = 100;
+
+    private readonly object _gate = new();
+    private readonly object _persistenceScheduleGate = new();
+    private readonly IWingetClient _wingetClient;
+    private readonly IOperationHistoryStore? _historyStore;
+    private readonly TimeProvider _timeProvider;
+    private readonly Channel<QueueItem> _channel;
+    private readonly List<QueueItem> _pending = [];
+    private readonly List<OperationResult> _history = [];
+    private readonly Task _worker;
+    private TaskCompletionSource _idle = CompletedSource();
+    private QueueItem? _current;
+    private Exception? _lastPersistenceError;
+    private Task _persistenceTail = Task.CompletedTask;
+    private bool _historyWasCleared;
+    private bool _disposed;
+
+    public OperationQueue(
+        IWingetClient wingetClient,
+        IOperationHistoryStore? historyStore = null,
+        TimeProvider? timeProvider = null)
+    {
+        _wingetClient = wingetClient ?? throw new ArgumentNullException(nameof(wingetClient));
+        _historyStore = historyStore;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _channel = Channel.CreateUnbounded<QueueItem>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            AllowSynchronousContinuations = false
+        });
+
+        Initialization = LoadHistoryAsync();
+        _worker = ProcessQueueAsync();
+    }
+
+    public event EventHandler<OperationQueueChangedEventArgs>? Changed;
+
+    public Task Initialization { get; }
+
+    public OperationQueueSnapshot Snapshot
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return CreateSnapshotLocked();
+            }
+        }
+    }
+
+    public Guid Enqueue(PackageOperation operation, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (operation.Id == Guid.Empty)
+        {
+            throw new ArgumentException("An operation must have a non-empty ID.", nameof(operation));
+        }
+
+        if (operation.Package.IsEmpty)
+        {
+            throw new ArgumentException("An operation must identify a package.", nameof(operation));
+        }
+
+        // The external token is routed through TryCancel rather than linked directly. That keeps
+        // cancellation from reaching WinGet after an installer has crossed the cancellation boundary.
+        var item = new QueueItem(operation, new CancellationTokenSource());
+        if (cancellationToken.CanBeCanceled)
+        {
+            item.ExternalCancellationRegistration = cancellationToken.Register(
+                static state =>
+                {
+                    var registration = (CancellationRegistrationState)state!;
+                    registration.Queue.TryCancel(registration.OperationId);
+                },
+                new CancellationRegistrationState(this, operation.Id));
+        }
+
+        OperationQueueSnapshot snapshot;
+
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
+            if ((_current?.Operation.Id == operation.Id)
+                || _pending.Any(candidate => candidate.Operation.Id == operation.Id))
+            {
+                item.Dispose();
+                throw new ArgumentException($"Operation '{operation.Id}' is already queued.", nameof(operation));
+            }
+
+            if (_pending.Count == 0 && _current is null)
+            {
+                _idle = NewSource();
+            }
+
+            _pending.Add(item);
+            if (!_channel.Writer.TryWrite(item))
+            {
+                _pending.Remove(item);
+                item.Dispose();
+                throw new InvalidOperationException("The operation queue is no longer accepting work.");
+            }
+
+            snapshot = CreateSnapshotLocked();
+        }
+
+        RaiseChanged(snapshot);
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            TryCancel(operation.Id);
+        }
+
+        return operation.Id;
+    }
+
+    public bool TryCancel(Guid operationId)
+    {
+        QueueItem? item;
+        OperationQueueSnapshot? snapshot = null;
+
+        lock (_gate)
+        {
+            item = _pending.FirstOrDefault(candidate => candidate.Operation.Id == operationId);
+            if (item is not null)
+            {
+                if (item.IsFinalized)
+                {
+                    return false;
+                }
+
+                item.IsFinalized = true;
+                _pending.Remove(item);
+                item.Progress = NewProgress(item.Operation, PackageOperationState.Cancelled, "Cancelled before starting.");
+                AddHistoryLocked(CreateCancelledResult(item.Operation, _timeProvider.GetUtcNow()));
+                snapshot = CreateSnapshotLocked();
+            }
+            else if (_current?.Operation.Id == operationId)
+            {
+                item = _current;
+                if (item.IsFinalized || !item.Progress.CanCancel)
+                {
+                    return false;
+                }
+
+                item.Progress = item.Progress with
+                {
+                    Message = "Cancellation requested…",
+                    Timestamp = _timeProvider.GetUtcNow()
+                };
+                snapshot = CreateSnapshotLocked();
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        item.RequestCancellation();
+        RaiseChanged(snapshot!);
+        return true;
+    }
+
+    public void ClearHistory()
+    {
+        OperationQueueSnapshot snapshot;
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _history.Clear();
+            _historyWasCleared = true;
+            snapshot = CreateSnapshotLocked();
+        }
+
+        RaiseChanged(snapshot);
+        _ = ScheduleHistoryPersistence();
+    }
+
+    public async Task WaitForIdleAsync(CancellationToken cancellationToken = default)
+    {
+        await Initialization.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        while (true)
+        {
+            Task waitTask;
+            lock (_gate)
+            {
+                if (_pending.Count == 0 && _current is null && _idle.Task.IsCompleted)
+                {
+                    return;
+                }
+
+                waitTask = _idle.Task;
+            }
+
+            await waitTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            lock (_gate)
+            {
+                if (_pending.Count == 0 && _current is null)
+                {
+                    return;
+                }
+            }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        List<Guid> cancellableIds;
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            cancellableIds = _pending.Select(item => item.Operation.Id).ToList();
+            if (_current?.Progress.CanCancel == true)
+            {
+                cancellableIds.Add(_current.Operation.Id);
+            }
+
+            _channel.Writer.TryComplete();
+        }
+
+        foreach (var id in cancellableIds)
+        {
+            TryCancel(id);
+        }
+
+        await _worker.ConfigureAwait(false);
+
+        Task persistence;
+        lock (_persistenceScheduleGate)
+        {
+            persistence = _persistenceTail;
+        }
+
+        await persistence.ConfigureAwait(false);
+    }
+
+    private async Task LoadHistoryAsync()
+    {
+        if (_historyStore is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var loaded = await _historyStore.LoadAsync().ConfigureAwait(false);
+            OperationQueueSnapshot snapshot;
+            lock (_gate)
+            {
+                // Results completed during startup are newer than anything loaded from disk.
+                var existingIds = _history.Select(item => item.OperationId).ToHashSet();
+                if (!_historyWasCleared)
+                {
+                    _history.AddRange(loaded.Where(item => existingIds.Add(item.OperationId)));
+                }
+                TrimHistoryLocked();
+                _lastPersistenceError = null;
+                snapshot = CreateSnapshotLocked();
+            }
+
+            RaiseChanged(snapshot);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            lock (_gate)
+            {
+                _lastPersistenceError = exception;
+            }
+        }
+    }
+
+    private async Task ProcessQueueAsync()
+    {
+        await Initialization.ConfigureAwait(false);
+
+        await foreach (var item in _channel.Reader.ReadAllAsync().ConfigureAwait(false))
+        {
+            bool wasFinalized;
+            DateTimeOffset startedAt;
+            OperationQueueSnapshot? snapshot = null;
+            lock (_gate)
+            {
+                wasFinalized = item.IsFinalized;
+                if (wasFinalized)
+                {
+                    startedAt = default;
+                }
+                else
+                {
+                    _pending.Remove(item);
+
+                    if (item.Cancellation.IsCancellationRequested)
+                    {
+                        item.IsFinalized = true;
+                        wasFinalized = true;
+                        var now = _timeProvider.GetUtcNow();
+                        item.Progress = NewProgress(item.Operation, PackageOperationState.Cancelled, "Cancelled before starting.");
+                        AddHistoryLocked(CreateCancelledResult(item.Operation, now));
+                        snapshot = CreateSnapshotLocked();
+                        startedAt = default;
+                    }
+                    else
+                    {
+                        _current = item;
+                        startedAt = _timeProvider.GetUtcNow();
+                        item.StartedAt = startedAt;
+                        item.Progress = NewProgress(item.Operation, PackageOperationState.Resolving, "Resolving package…");
+                        snapshot = CreateSnapshotLocked();
+                    }
+                }
+            }
+
+            if (snapshot is not null)
+            {
+                RaiseChanged(snapshot);
+            }
+
+            if (wasFinalized)
+            {
+                await ScheduleHistoryPersistence().ConfigureAwait(false);
+                item.Dispose();
+                CompleteIdleIfAppropriate();
+                continue;
+            }
+
+            OperationResult result;
+            try
+            {
+                var progress = new InlineProgress<OperationProgress>(value => ReportProgress(item, value));
+                result = item.Operation.Kind switch
+                {
+                    PackageOperationKind.Install => await _wingetClient.InstallAsync(
+                        item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
+                    PackageOperationKind.Upgrade => await _wingetClient.UpgradeAsync(
+                        item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
+                    PackageOperationKind.Uninstall => await _wingetClient.UninstallAsync(
+                        item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
+                    _ => throw new InvalidOperationException($"Unsupported operation kind '{item.Operation.Kind}'.")
+                };
+
+                result = NormalizeResult(item.Operation, result, startedAt, _timeProvider.GetUtcNow());
+            }
+            catch (OperationCanceledException) when (item.Cancellation.IsCancellationRequested)
+            {
+                result = CreateCancelledResult(item.Operation, _timeProvider.GetUtcNow(), startedAt);
+            }
+            catch (WingetException exception)
+            {
+                result = CreateFailedResult(item.Operation, exception.Error, startedAt);
+            }
+            catch (Exception exception)
+            {
+                result = CreateFailedResult(item.Operation, CreateError(exception), startedAt);
+            }
+
+            lock (_gate)
+            {
+                item.IsFinalized = true;
+                item.Progress = NewProgress(item.Operation, result.State, result.Error?.Message);
+                _current = null;
+                AddHistoryLocked(result);
+                snapshot = CreateSnapshotLocked();
+            }
+
+            RaiseChanged(snapshot);
+            await ScheduleHistoryPersistence().ConfigureAwait(false);
+            item.Dispose();
+            CompleteIdleIfAppropriate();
+        }
+
+        CompleteIdleIfAppropriate(force: true);
+    }
+
+    private void ReportProgress(QueueItem item, OperationProgress reported)
+    {
+        OperationQueueSnapshot snapshot;
+        lock (_gate)
+        {
+            if (item.IsFinalized || !ReferenceEquals(_current, item))
+            {
+                return;
+            }
+
+            var state = NormalizeProgressState(item.Operation.Kind, item.Progress.State, reported.State);
+            double? percent = reported.Percent is null
+                ? null
+                : Math.Clamp(reported.Percent.Value, 0d, 100d);
+            item.Progress = reported with
+            {
+                OperationId = item.Operation.Id,
+                State = state,
+                Percent = percent,
+                Timestamp = reported.Timestamp == default ? _timeProvider.GetUtcNow() : reported.Timestamp
+            };
+            snapshot = CreateSnapshotLocked();
+        }
+
+        RaiseChanged(snapshot);
+    }
+
+    private async Task PersistHistorySafeAsync()
+    {
+        if (_historyStore is null)
+        {
+            return;
+        }
+
+        OperationResult[] history;
+        lock (_gate)
+        {
+            history = _history.ToArray();
+        }
+
+        try
+        {
+            await _historyStore.SaveAsync(history).ConfigureAwait(false);
+            lock (_gate)
+            {
+                _lastPersistenceError = null;
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            OperationQueueSnapshot snapshot;
+            lock (_gate)
+            {
+                _lastPersistenceError = exception;
+                snapshot = CreateSnapshotLocked();
+            }
+
+            RaiseChanged(snapshot);
+        }
+    }
+
+    private Task ScheduleHistoryPersistence()
+    {
+        lock (_persistenceScheduleGate)
+        {
+            var previous = _persistenceTail;
+            _persistenceTail = Task.Run(async () =>
+            {
+                await previous.ConfigureAwait(false);
+                await Initialization.ConfigureAwait(false);
+                await PersistHistorySafeAsync().ConfigureAwait(false);
+            });
+            return _persistenceTail;
+        }
+    }
+
+    private void CompleteIdleIfAppropriate(bool force = false)
+    {
+        lock (_gate)
+        {
+            if (force || (_pending.Count == 0 && _current is null))
+            {
+                _idle.TrySetResult();
+            }
+        }
+    }
+
+    private void AddHistoryLocked(OperationResult result)
+    {
+        _history.RemoveAll(item => item.OperationId == result.OperationId);
+        _history.Insert(0, result);
+        TrimHistoryLocked();
+    }
+
+    private void TrimHistoryLocked()
+    {
+        if (_history.Count > MaximumHistory)
+        {
+            _history.RemoveRange(MaximumHistory, _history.Count - MaximumHistory);
+        }
+    }
+
+    private OperationQueueSnapshot CreateSnapshotLocked() => new()
+    {
+        Pending = _pending
+            .Where(item => !item.IsFinalized)
+            .Select(item => new OperationQueueEntry(item.Operation, item.Progress))
+            .ToArray(),
+        Current = _current is null ? null : new OperationQueueEntry(_current.Operation, _current.Progress),
+        History = _history.ToArray(),
+        LastPersistenceError = _lastPersistenceError
+    };
+
+    private OperationProgress NewProgress(
+        PackageOperation operation,
+        PackageOperationState state,
+        string? message = null) =>
+        new()
+        {
+            OperationId = operation.Id,
+            State = state,
+            Message = message,
+            Timestamp = _timeProvider.GetUtcNow()
+        };
+
+    private OperationResult CreateCancelledResult(
+        PackageOperation operation,
+        DateTimeOffset completedAt,
+        DateTimeOffset? startedAt = null) =>
+        new()
+        {
+            OperationId = operation.Id,
+            Package = operation.Package,
+            Kind = operation.Kind,
+            State = PackageOperationState.Cancelled,
+            StartedAt = startedAt ?? completedAt,
+            CompletedAt = completedAt,
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.Cancelled,
+                Code = "Cancelled",
+                Message = "The operation was cancelled."
+            }
+        };
+
+    private OperationResult CreateFailedResult(
+        PackageOperation operation,
+        WingetError error,
+        DateTimeOffset startedAt) =>
+        new()
+        {
+            OperationId = operation.Id,
+            Package = operation.Package,
+            Kind = operation.Kind,
+            State = PackageOperationState.Failed,
+            StartedAt = startedAt,
+            CompletedAt = _timeProvider.GetUtcNow(),
+            Error = error
+        };
+
+    private static OperationResult NormalizeResult(
+        PackageOperation operation,
+        OperationResult result,
+        DateTimeOffset startedAt,
+        DateTimeOffset completedAt)
+    {
+        var state = result.State;
+        if (result.RebootRequired && state == PackageOperationState.Completed)
+        {
+            state = PackageOperationState.RebootRequired;
+        }
+
+        if (state is not (PackageOperationState.Completed
+            or PackageOperationState.Failed
+            or PackageOperationState.Cancelled
+            or PackageOperationState.RebootRequired))
+        {
+            state = PackageOperationState.Failed;
+            result = result with
+            {
+                Error = new WingetError
+                {
+                    Kind = WingetErrorKind.Unknown,
+                    Code = "InvalidResult",
+                    Message = "WinGet returned a non-terminal operation result."
+                }
+            };
+        }
+
+        return result with
+        {
+            OperationId = operation.Id,
+            Package = operation.Package,
+            Kind = operation.Kind,
+            State = state,
+            StartedAt = result.StartedAt == default ? startedAt : result.StartedAt,
+            CompletedAt = result.CompletedAt == default ? completedAt : result.CompletedAt,
+            RebootRequired = result.RebootRequired || state == PackageOperationState.RebootRequired
+        };
+    }
+
+    private static WingetError CreateError(Exception exception) => new()
+    {
+        Kind = exception is COMException ? WingetErrorKind.ComFailure : WingetErrorKind.Unknown,
+        Code = exception is COMException comException
+            ? $"0x{comException.HResult:X8}"
+            : exception.GetType().Name,
+        Message = string.IsNullOrWhiteSpace(exception.Message)
+            ? "The package operation failed."
+            : exception.Message,
+        HResult = exception.HResult
+    };
+
+    private static PackageOperationState NormalizeProgressState(
+        PackageOperationKind kind,
+        PackageOperationState current,
+        PackageOperationState reported)
+    {
+        if (reported is PackageOperationState.Completed
+            or PackageOperationState.Failed
+            or PackageOperationState.Cancelled
+            or PackageOperationState.RebootRequired
+            or PackageOperationState.Queued)
+        {
+            return current;
+        }
+
+        var expectedExecutingState = kind switch
+        {
+            PackageOperationKind.Install => PackageOperationState.Installing,
+            PackageOperationKind.Upgrade => PackageOperationState.Upgrading,
+            PackageOperationKind.Uninstall => PackageOperationState.Uninstalling,
+            _ => reported
+        };
+
+        if (reported is PackageOperationState.Installing
+            or PackageOperationState.Upgrading
+            or PackageOperationState.Uninstalling)
+        {
+            reported = expectedExecutingState;
+        }
+
+        return ProgressRank(reported) < ProgressRank(current) ? current : reported;
+    }
+
+    private static int ProgressRank(PackageOperationState state) => state switch
+    {
+        PackageOperationState.Queued => 0,
+        PackageOperationState.Resolving => 1,
+        PackageOperationState.Downloading => 2,
+        PackageOperationState.Installing
+            or PackageOperationState.Upgrading
+            or PackageOperationState.Uninstalling => 3,
+        _ => 4
+    };
+
+    private void RaiseChanged(OperationQueueSnapshot snapshot)
+    {
+        var handlers = Changed;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        var args = new OperationQueueChangedEventArgs(snapshot);
+        foreach (EventHandler<OperationQueueChangedEventArgs> handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(this, args);
+            }
+            catch
+            {
+                // Observers must not be able to terminate the package operation worker.
+            }
+        }
+    }
+
+    private static TaskCompletionSource NewSource() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static TaskCompletionSource CompletedSource()
+    {
+        var source = NewSource();
+        source.SetResult();
+        return source;
+    }
+
+    private sealed class QueueItem(PackageOperation operation, CancellationTokenSource cancellation) : IDisposable
+    {
+        public PackageOperation Operation { get; } = operation;
+        public CancellationTokenSource Cancellation { get; } = cancellation;
+        public OperationProgress Progress { get; set; } = new()
+        {
+            OperationId = operation.Id,
+            State = PackageOperationState.Queued,
+            Timestamp = operation.EnqueuedAt
+        };
+        public DateTimeOffset StartedAt { get; set; }
+        public bool IsFinalized { get; set; }
+        public CancellationTokenRegistration ExternalCancellationRegistration { get; set; }
+
+        public void Dispose()
+        {
+            ExternalCancellationRegistration.Dispose();
+            Cancellation.Dispose();
+        }
+
+        public void RequestCancellation()
+        {
+            try
+            {
+                Cancellation.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // A concurrently completed queue item no longer needs cancellation.
+            }
+        }
+    }
+
+    private sealed class InlineProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
+    }
+
+    private sealed record CancellationRegistrationState(OperationQueue Queue, Guid OperationId);
+}

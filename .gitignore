@@ -1,0 +1,48 @@
+# Local SDK and template bootstrap
+.dotnet/
+.dotnet-home/
+.nuget/
+.agents/
+.dotnet-install.ps1
+*.nupkg
+
+# .NET build output
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+AppPackages/
+BundleArtifacts/
+coverage/
+coverage.*
+
+# IDE and user state
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Local signing material and packages
+*.pfx
+*.p12
+*.cer
+*.crt
+*.pem
+*.key
+*.snk
+*.msix
+*.msixbundle
+*.msixupload
+*.appx
+*.appxbundle
+*.appxupload
+*.appxsym
+*.appinstaller
+*.snupkg
+
+# Runtime state
+*.user.json
+*.log
+.env
+.env.*
