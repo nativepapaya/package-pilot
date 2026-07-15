@@ -301,6 +301,7 @@ function Get-MsixBundleIdentity {
         if ($embeddedMsixEntries.Count -ne 2) {
             throw "'$Path' must contain exactly two embedded application MSIX files."
         }
+        $bundleHasSignature = $null -ne $archive.GetEntry('AppxSignature.p7x')
 
         $embeddedPackages = foreach ($package in $packages) {
             $fileName = $package.GetAttribute('FileName')
@@ -349,9 +350,11 @@ function Get-MsixBundleIdentity {
                 $embeddedIdentity.Publisher -ne 'CN=PackagePilot.Dev' -or
                 $embeddedIdentity.Version -ne $identity.GetAttribute('Version') -or
                 $embeddedIdentity.Version -ne $manifestVersion -or
-                $embeddedIdentity.ProcessorArchitecture -ne $manifestArchitecture -or
-                $embeddedIdentity.HasSignature) {
-                throw "'${Path}::$fileName' has an invalid identity, architecture, version, or nested signature state."
+                $embeddedIdentity.ProcessorArchitecture -ne $manifestArchitecture) {
+                throw "'${Path}::$fileName' has an invalid identity, architecture, or version."
+            }
+            if ([bool]$embeddedIdentity.HasSignature -ne $bundleHasSignature) {
+                throw "'${Path}::$fileName' has a signature state inconsistent with its bundle."
             }
 
             [pscustomobject]@{
@@ -360,6 +363,7 @@ function Get-MsixBundleIdentity {
                 Publisher = $embeddedIdentity.Publisher
                 Version = $embeddedIdentity.Version
                 Architecture = $embeddedIdentity.ProcessorArchitecture
+                HasSignature = [bool]$embeddedIdentity.HasSignature
             }
         }
 
@@ -377,11 +381,97 @@ function Get-MsixBundleIdentity {
             Version = $identity.GetAttribute('Version')
             Architectures = $architectures
             EmbeddedPackages = @($embeddedPackages)
-            HasSignature = $null -ne $archive.GetEntry('AppxSignature.p7x')
+            HasSignature = $bundleHasSignature
         }
     }
     finally {
         $archive.Dispose()
+    }
+}
+
+function Assert-MsixBundleEmbeddedSignatures {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [object]$Identity,
+
+        [Parameter(Mandatory)]
+        [Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
+    )
+
+    $embeddedPackages = @($Identity.EmbeddedPackages)
+    if (-not [bool]$Identity.HasSignature -or $embeddedPackages.Count -ne 2) {
+        throw 'The signed bundle does not expose exactly two signed embedded packages.'
+    }
+
+    $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+    $validationDirectory = [IO.Path]::GetFullPath((Join-Path `
+        $temporaryRoot `
+        "PackagePilot-BundleSignatureVerify-$([Guid]::NewGuid().ToString('N'))"))
+    if (-not $validationDirectory.StartsWith(
+            $temporaryRoot + '\',
+            [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($validationDirectory) -notmatch
+            '^PackagePilot-BundleSignatureVerify-[0-9a-f]{32}$') {
+        throw "The embedded-signature validation directory resolved outside the temporary directory."
+    }
+
+    [void][IO.Directory]::CreateDirectory($validationDirectory)
+    try {
+        $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+        try {
+            foreach ($package in $embeddedPackages) {
+                $fileName = [string]$package.FileName
+                if ([string]::IsNullOrWhiteSpace($fileName) -or
+                    [IO.Path]::GetFileName($fileName) -ne $fileName -or
+                    [IO.Path]::GetExtension($fileName) -ine '.msix') {
+                    throw "The signed bundle contains an unsafe embedded package name."
+                }
+
+                $entry = $archive.GetEntry($fileName)
+                if ($null -eq $entry) {
+                    throw "The signed bundle is missing embedded package '$fileName'."
+                }
+
+                [IO.Compression.ZipFileExtensions]::ExtractToFile(
+                    $entry,
+                    (Join-Path $validationDirectory $fileName),
+                    $false)
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+
+        foreach ($package in $embeddedPackages) {
+            $fileName = [string]$package.FileName
+            $signature = Get-AuthenticodeSignature `
+                -FilePath (Join-Path $validationDirectory $fileName)
+            if ($signature.Status -ne
+                    [System.Management.Automation.SignatureStatus]::Valid -or
+                $null -eq $signature.SignerCertificate -or
+                -not [string]::Equals(
+                    $signature.SignerCertificate.Thumbprint,
+                    $Certificate.Thumbprint,
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Embedded package '$fileName' failed signer verification: $($signature.StatusMessage)"
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $validationDirectory -PathType Container) {
+            $cleanupPath = [IO.Path]::GetFullPath($validationDirectory)
+            if (-not $cleanupPath.StartsWith(
+                    $temporaryRoot + '\',
+                    [StringComparison]::OrdinalIgnoreCase) -or
+                [IO.Path]::GetFileName($cleanupPath) -notmatch
+                    '^PackagePilot-BundleSignatureVerify-[0-9a-f]{32}$') {
+                throw "Refusing to clean unsafe embedded-signature validation path '$cleanupPath'."
+            }
+            Remove-Item -LiteralPath $cleanupPath -Recurse -Force
+        }
     }
 }
 
@@ -1373,8 +1463,12 @@ try {
         $signedIdentity.Publisher -ne $script:CertificateSubject -or
         $signedIdentity.Version -ne $expectedVersion -or
         ($signedIdentity.Architectures -join ',') -ne 'arm64,x64') {
-        throw 'Signing changed the bundle identity or architecture set, or did not add AppxSignature.p7x.'
+        throw 'Signing changed the bundle identity or architecture set, or did not sign the bundle and both embedded packages.'
     }
+    Assert-MsixBundleEmbeddedSignatures `
+        -Path $packagePath `
+        -Identity $signedIdentity `
+        -Certificate $certificate
 
     if ($Prepare) {
         $assetRecords = @($ReleaseAssetNames | ForEach-Object {
