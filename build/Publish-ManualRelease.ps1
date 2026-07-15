@@ -121,7 +121,7 @@ function Get-ReleaseCertificate {
 
     $enhancedKeyUsages = @(
         $certificate.EnhancedKeyUsageList |
-            ForEach-Object { $_.ObjectId.Value }
+            ForEach-Object { [string]$_.ObjectId }
     )
     if ($enhancedKeyUsages.Count -ne 1 -or
         $enhancedKeyUsages[0] -ne '1.3.6.1.5.5.7.3.3') {
