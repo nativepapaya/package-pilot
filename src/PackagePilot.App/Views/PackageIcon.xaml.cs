@@ -95,7 +95,7 @@ public sealed partial class PackageIcon : UserControl
                 return;
             }
 
-            using var stream = await cachedFile.OpenAsync(Windows.Storage.FileAccessMode.Read);
+            using var stream = await cachedFile.OpenAsync(global::Windows.Storage.FileAccessMode.Read);
             token.ThrowIfCancellationRequested();
             if (!IsCurrent(cancellation, generation))
             {

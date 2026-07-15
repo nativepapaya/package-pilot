@@ -1,12 +1,17 @@
 # Package Pilot
 
-Package Pilot is a native Windows 11 package center for WinGet. It provides a Fluent, normal-integrity interface for discovering, installing, updating, and removing applications while delegating package work to the official out-of-process `Microsoft.Management.Deployment` API.
+Package Pilot is a native Windows 11 application hub. It combines WinGet, current-user MSIX/Store packages, and visible legacy application records in a Fluent, normal-integrity interface while delegating supported package work to Windows APIs.
 
-## V1 behavior
+## Current behavior
 
-- Discover, Installed, Updates, Activity, and Settings destinations
+- Discover, Installed, Updates, Activity, Sources, and Settings destinations
+- Cached, page-local update state that never blocks startup; daily read-only background discovery by default, with six-hour and Manual options
+- One deduplicated update notification, taskbar/Start badge, Jump List tasks, protocol activation, execution alias, and single-instance redirection
+- Unified installed-app inventory from WinGet, MSIX/Store, and HKCU/HKLM 32/64-bit uninstall metadata, merged only by exact package identities
+- Safe routing to WinGet, current-user MSIX removal, Microsoft Store updates, or Windows Installed Apps according to provider capability
 - WinGet contract 6+ capability gate with friendly App Installer, policy, network, authentication, installer, elevation, cancellation, and reboot states
-- Explicit source and package agreement consent; terms are never accepted silently
+- Exact per-source and package agreement consent; changed terms invalidate prior source consent and are never accepted silently
+- Supported source refresh/add/remove/reset-one/explicit editing through WinGet COM and an allowlisted one-shot UAC helper
 - Sequential install/update/uninstall queue with a safe cancellation boundary
 - Confirmed uninstalls and staged multi-package update review
 - 100-result search cap, stale-search cancellation, partial-source health, and read-only source diagnostics
@@ -16,7 +21,7 @@ Package Pilot is a native Windows 11 package center for WinGet. It provides a Fl
 
 ## Requirements
 
-- Windows 11 x64, build 22000 or later
+- Windows 11 x64 or ARM64, build 22000 or later
 - .NET 10 SDK for development and the .NET 10 Desktop runtime for a framework-dependent install
 - Developer Mode for the supported `dotnet run` workflow
 - A current App Installer / WinGet with deployment API contract 6 or later
@@ -38,7 +43,7 @@ Import-Certificate `
   -CertStoreLocation Cert:\LocalMachine\TrustedPeople
 ```
 
-Then open `PackagePilot.appinstaller`. Installing through this file registers the public release feed with Windows App Installer. Installing `PackagePilot.msix` directly works only when its dependencies and certificate are already present, but does not register automatic update settings.
+Then open `PackagePilot.appinstaller`. Installing through this file selects the native x64 or ARM64 package from `PackagePilot.msixbundle`, installs the matching Windows App Runtime dependency, and registers the public release feed with Windows App Installer. Installing the bundle directly works only when its dependencies and certificate are already present, but does not register automatic update settings.
 
 ## Releases and automatic updates
 
@@ -60,11 +65,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 Failed or cancelled workflow runs may leave sequence gaps; the publisher safely chooses the oldest successful run newer than the current release. To deliberately skip an obsolete successful payload, pass its replacement as `-RunId <workflow-run-id>`. Publishing the newer run permanently prevents older versions from being released afterward.
 
-The publisher downloads and validates the GitHub artifact, signs `PackagePilot.msix` with the non-exportable local key, verifies both package signatures and identities, creates checksums, and publishes the matching `v1.0.<release-sequence>` release. It refuses to replace an existing release. Stable asset names let the App Installer feed follow the latest release without embedding credentials or GitHub API tokens in the app.
+The hosted workflow produces separate unsigned x64 and ARM64 packages, validates their identities, and combines them with the Windows SDK's `MakeAppx` tool. The publisher downloads and validates that artifact, signs `PackagePilot.msixbundle` with the non-exportable local key, verifies the bundle identity, both architecture entries, and both signed runtime dependencies, creates checksums, and publishes the matching `v1.0.<release-sequence>` release. It refuses to replace an existing release. Stable asset names let the App Installer feed follow the latest release without embedding credentials or GitHub API tokens in the app.
 
-Copies installed through `PackagePilot.appinstaller` check for updates at launch without blocking activation and also register a background check. Settings shows the installed version and can query the same App Installer association. If a copy was installed directly from an MSIX, use **Get update installer** once to connect it to the feed.
+Copies installed through `PackagePilot.appinstaller` perform a quiet launch check no more than once every 24 hours, never block activation, and also register App Installer's background check. Settings shows the installed version and can query the same App Installer association. If a copy was installed directly from the bundle, use **Get update installer** once to connect it to the feed.
 
-The certificate initializer sets `KeyExportPolicy` to `NonExportable`; neither a PFX nor a signing password is created or stored in GitHub. Losing the Windows profile or machine can permanently lose this release key unless a verified system-level backup preserves non-exportable keys. Before distributing Package Pilot beyond trusted testers, replace development signing with a publicly trusted signing service or Microsoft Store signing.
+The certificate initializer sets `KeyExportPolicy` to `NonExportable`; neither a PFX nor a signing password is created or stored in GitHub. Losing the Windows profile or machine can permanently lose this release key unless a verified system-level backup preserves non-exportable keys.
+
+The repository still uses the development identity `PackagePilot.Desktop` / `CN=PackagePilot.Dev`. Production publication is intentionally blocked until a permanent certificate-backed publisher is selected. Freeze the final package `Name` and certificate-matching `Publisher` together before distributing to users; changing the publisher later is a new package identity and requires installing the new trusted package rather than an in-place MSIX update. The retiring development build writes an atomic settings/history handoff under non-package LocalAppData; the replacement identity imports that handoff once and removes it only after a durable import. Before distributing Package Pilot beyond trusted testers, replace development signing with a publicly trusted signing service.
 
 ## Build and test
 
@@ -76,10 +83,11 @@ $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 
 .\.dotnet\dotnet.exe restore PackagePilot.slnx
 .\.dotnet\dotnet.exe build PackagePilot.slnx -c Release
+.\.dotnet\dotnet.exe build src\PackagePilot.App\PackagePilot.App.csproj -c Release -r win-arm64 -p:Platform=ARM64
 .\.dotnet\dotnet.exe test tests\PackagePilot.Tests\PackagePilot.Tests.csproj -c Release
 ```
 
-The six live integration tests are read-only and opt-in. They activate WinGet COM, enumerate sources, search, read installed inventory and metadata, and detect updates; they never install or remove packages.
+The eight live integration tests are read-only and opt-in. They activate WinGet COM, exercise the concurrent startup read model, enumerate sources, search, read installed inventory and metadata, detect updates, and compare combined-catalog results with the per-source reference path; they never install or remove packages.
 
 ```powershell
 $env:PACKAGEPILOT_RUN_LIVE_WINGET_TESTS = '1'
@@ -88,26 +96,45 @@ $env:PACKAGEPILOT_RUN_LIVE_WINGET_TESTS = '1'
 
 ## Create the MSIX
 
-Create an unsigned framework-dependent x64 package:
+Single-project MSIX creates one package at a time, so build unsigned framework-dependent packages for both architectures:
 
 ```powershell
-.\.dotnet\dotnet.exe publish src\PackagePilot.App\PackagePilot.App.csproj `
-  -c Release -p:Platform=x64 `
-  -p:GenerateAppxPackageOnBuild=true `
-  -p:AppxPackageSigningEnabled=false `
-  -p:AppxBundle=Never
+$packageRoots = @{}
+foreach ($build in @(
+  @{ Platform = 'x64'; Runtime = 'win-x64' }
+  @{ Platform = 'ARM64'; Runtime = 'win-arm64' }
+)) {
+  $packageRoots[$build.Platform] = Join-Path $PWD "artifacts\$($build.Platform)"
+  .\.dotnet\dotnet.exe publish src\PackagePilot.App\PackagePilot.App.csproj `
+    -c Release -r $build.Runtime --self-contained false `
+    -p:Platform=$($build.Platform) `
+    -p:GenerateAppxPackageOnBuild=true `
+    -p:AppxPackageSigningEnabled=false `
+    -p:AppxBundle=Never `
+    -p:AppxPackageDir="$($packageRoots[$build.Platform])\"
+}
 ```
 
-Output is written under `src\PackagePilot.App\AppPackages`.
+Then combine the two `PackagePilot.Desktop` MSIX files. The bundler validates that they are unsigned, have identical names, publishers, and versions, and contain exactly x64 and ARM64 architectures:
 
-For a local install, `build\New-DevelopmentCertificate.ps1` creates a non-exportable code-signing key in `Cert:\CurrentUser\My` and, from an elevated process, trusts its public certificate in `Cert:\LocalMachine\TrustedPeople`. App Installer requires the computer store for a self-signed MSIX. This is a machine-wide, persistent trust change intended only for local testing and should be run only after reviewing and explicitly approving it. Use the returned thumbprint as `PackageCertificateThumbprint` with `AppxPackageSigningEnabled=true`, and remove the development certificate when local testing is finished.
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\build\New-MsixBundle.ps1 `
+  -X64PackagePath (Get-ChildItem $packageRoots.x64 -Recurse -Filter '*.msix' | Where-Object Name -Like 'PackagePilot*').FullName `
+  -Arm64PackagePath (Get-ChildItem $packageRoots.ARM64 -Recurse -Filter '*.msix' | Where-Object Name -Like 'PackagePilot*').FullName `
+  -OutputPath .\artifacts\PackagePilot.msixbundle
+```
+
+The release workflow performs the same build and bundle validation automatically, but leaves the bundle unsigned for the offline manual publisher.
+
+For a local install, `build\New-DevelopmentCertificate.ps1` creates a non-exportable code-signing key in `Cert:\CurrentUser\My` and, from an elevated process, trusts its public certificate in `Cert:\LocalMachine\TrustedPeople`. App Installer requires the computer store for a self-signed MSIX bundle. This is a machine-wide, persistent trust change intended only for local testing and should be run only after reviewing and explicitly approving it. Sign the completed bundle with the returned certificate thumbprint, and remove the development certificate when local testing is finished.
 
 ## Keyboard
 
 - `Ctrl+F`: open Discover and focus search
-- `Ctrl+R`: refresh package state
-- `Ctrl+1` through `Ctrl+5`: Discover, Installed, Updates, Activity, Settings
+- `Ctrl+R`: refresh only the visible destination
+- `Ctrl+1` through `Ctrl+6`: Discover, Installed, Updates, Activity, Sources, Settings
 
 ## Safety notes
 
-Package Pilot starts at normal integrity and does not request administrator rights itself. WinGet or an installer can show UAC only when a selected package requires it. Queued, resolving, and downloading operations can be cancelled; after an installer takes control, cancellation is no longer guaranteed.
+Package Pilot starts at normal integrity. WinGet or an installer can show UAC when a reviewed package requires it; supported source mutations launch a short-lived, authenticated administrator helper that performs one allowlisted operation and exits. Queued, resolving, and downloading WinGet operations can be cancelled; after an installer or Windows deployment takes control, cancellation is no longer guaranteed. Registry uninstall commands are never read or executed.

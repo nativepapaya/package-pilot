@@ -20,7 +20,7 @@ param(
 
     [Parameter()]
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
-    [string]$PackageAssetName = 'PackagePilot.msix',
+    [string]$PackageAssetName = 'PackagePilot.msixbundle',
 
     [Parameter()]
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
@@ -28,7 +28,11 @@ param(
 
     [Parameter()]
     [ValidatePattern('^[A-Za-z0-9._-]+$')]
-    [string]$RuntimeAssetName = 'Microsoft.WindowsAppRuntime.2.msix'
+    [string]$X64RuntimeAssetName = 'Microsoft.WindowsAppRuntime.2.x64.msix',
+
+    [Parameter()]
+    [ValidatePattern('^[A-Za-z0-9._-]+$')]
+    [string]$Arm64RuntimeAssetName = 'Microsoft.WindowsAppRuntime.2.arm64.msix'
 )
 
 Set-StrictMode -Version Latest
@@ -83,7 +87,8 @@ if (-not [IO.Directory]::Exists($outputDirectory)) {
 
 $appInstallerUri = New-ReleaseAssetUri -RepositoryName $Repository -AssetName $AppInstallerAssetName
 $packageUri = New-ReleaseAssetUri -RepositoryName $Repository -AssetName $PackageAssetName
-$runtimeUri = New-ReleaseAssetUri -RepositoryName $Repository -AssetName $RuntimeAssetName
+$x64RuntimeUri = New-ReleaseAssetUri -RepositoryName $Repository -AssetName $X64RuntimeAssetName
+$arm64RuntimeUri = New-ReleaseAssetUri -RepositoryName $Repository -AssetName $Arm64RuntimeAssetName
 
 $schemaNamespace = 'http://schemas.microsoft.com/appx/appinstaller/2021'
 $document = [Xml.XmlDocument]::new()
@@ -94,30 +99,34 @@ $appInstaller.SetAttribute('Version', $Version)
 $appInstaller.SetAttribute('Uri', $appInstallerUri)
 [void]$document.AppendChild($appInstaller)
 
-$mainPackage = $document.CreateElement('MainPackage', $schemaNamespace)
-$mainPackage.SetAttribute('Name', 'PackagePilot.Desktop')
-$mainPackage.SetAttribute('Publisher', 'CN=PackagePilot.Dev')
-$mainPackage.SetAttribute('Version', $Version)
-$mainPackage.SetAttribute('ProcessorArchitecture', 'x64')
-$mainPackage.SetAttribute('Uri', $packageUri)
-[void]$appInstaller.AppendChild($mainPackage)
+$mainBundle = $document.CreateElement('MainBundle', $schemaNamespace)
+$mainBundle.SetAttribute('Name', 'PackagePilot.Desktop')
+$mainBundle.SetAttribute('Publisher', 'CN=PackagePilot.Dev')
+$mainBundle.SetAttribute('Version', $Version)
+$mainBundle.SetAttribute('Uri', $packageUri)
+[void]$appInstaller.AppendChild($mainBundle)
 
 $dependencies = $document.CreateElement('Dependencies', $schemaNamespace)
-$runtimePackage = $document.CreateElement('Package', $schemaNamespace)
-$runtimePackage.SetAttribute('Name', 'Microsoft.WindowsAppRuntime.2')
-$runtimePackage.SetAttribute(
-    'Publisher',
-    'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US')
-$runtimePackage.SetAttribute('Version', '2.2.0.0')
-$runtimePackage.SetAttribute('ProcessorArchitecture', 'x64')
-$runtimePackage.SetAttribute('Uri', $runtimeUri)
-[void]$dependencies.AppendChild($runtimePackage)
+foreach ($runtime in @(
+    @{ Architecture = 'x64'; Uri = $x64RuntimeUri }
+    @{ Architecture = 'arm64'; Uri = $arm64RuntimeUri }
+)) {
+    $runtimePackage = $document.CreateElement('Package', $schemaNamespace)
+    $runtimePackage.SetAttribute('Name', 'Microsoft.WindowsAppRuntime.2')
+    $runtimePackage.SetAttribute(
+        'Publisher',
+        'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US')
+    $runtimePackage.SetAttribute('Version', '2.2.0.0')
+    $runtimePackage.SetAttribute('ProcessorArchitecture', $runtime.Architecture)
+    $runtimePackage.SetAttribute('Uri', $runtime.Uri)
+    [void]$dependencies.AppendChild($runtimePackage)
+}
 [void]$appInstaller.AppendChild($dependencies)
 
 $updateSettings = $document.CreateElement('UpdateSettings', $schemaNamespace)
 $onLaunch = $document.CreateElement('OnLaunch', $schemaNamespace)
-$onLaunch.SetAttribute('HoursBetweenUpdateChecks', '0')
-$onLaunch.SetAttribute('ShowPrompt', 'true')
+$onLaunch.SetAttribute('HoursBetweenUpdateChecks', '24')
+$onLaunch.SetAttribute('ShowPrompt', 'false')
 $onLaunch.SetAttribute('UpdateBlocksActivation', 'false')
 [void]$updateSettings.AppendChild($onLaunch)
 [void]$updateSettings.AppendChild($document.CreateElement('AutomaticBackgroundTask', $schemaNamespace))

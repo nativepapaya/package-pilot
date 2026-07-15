@@ -11,10 +11,12 @@ namespace PackagePilot.Core.Services;
 public sealed class OperationQueue : IOperationQueue
 {
     private const int MaximumHistory = 100;
+    private static readonly TimeSpan ProgressNotificationInterval = TimeSpan.FromMilliseconds(100);
 
     private readonly object _gate = new();
     private readonly object _persistenceScheduleGate = new();
     private readonly IWingetClient _wingetClient;
+    private readonly IMsixPackageOperationClient? _msixClient;
     private readonly IOperationHistoryStore? _historyStore;
     private readonly TimeProvider _timeProvider;
     private readonly Channel<QueueItem> _channel;
@@ -31,11 +33,13 @@ public sealed class OperationQueue : IOperationQueue
     public OperationQueue(
         IWingetClient wingetClient,
         IOperationHistoryStore? historyStore = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IMsixPackageOperationClient? msixClient = null)
     {
         _wingetClient = wingetClient ?? throw new ArgumentNullException(nameof(wingetClient));
         _historyStore = historyStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _msixClient = msixClient;
         _channel = Channel.CreateUnbounded<QueueItem>(new UnboundedChannelOptions
         {
             SingleReader = true,
@@ -72,7 +76,7 @@ public sealed class OperationQueue : IOperationQueue
             throw new ArgumentException("An operation must have a non-empty ID.", nameof(operation));
         }
 
-        if (operation.Package.IsEmpty)
+        if (operation.EffectiveTarget is null || string.IsNullOrWhiteSpace(operation.EffectiveTarget.Id))
         {
             throw new ArgumentException("An operation must identify a package.", nameof(operation));
         }
@@ -350,15 +354,20 @@ public sealed class OperationQueue : IOperationQueue
             try
             {
                 var progress = new InlineProgress<OperationProgress>(value => ReportProgress(item, value));
-                result = item.Operation.Kind switch
+                result = item.Operation.EffectiveTarget switch
                 {
-                    PackageOperationKind.Install => await _wingetClient.InstallAsync(
-                        item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
-                    PackageOperationKind.Upgrade => await _wingetClient.UpgradeAsync(
-                        item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
-                    PackageOperationKind.Uninstall => await _wingetClient.UninstallAsync(
-                        item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
-                    _ => throw new InvalidOperationException($"Unsupported operation kind '{item.Operation.Kind}'.")
+                    MsixTarget => await ExecuteMsixOperationAsync(item, progress).ConfigureAwait(false),
+                    WingetTarget => item.Operation.Kind switch
+                    {
+                        PackageOperationKind.Install => await _wingetClient.InstallAsync(
+                            item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
+                        PackageOperationKind.Upgrade => await _wingetClient.UpgradeAsync(
+                            item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
+                        PackageOperationKind.Uninstall => await _wingetClient.UninstallAsync(
+                            item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
+                        _ => throw new InvalidOperationException($"Unsupported operation kind '{item.Operation.Kind}'.")
+                    },
+                    _ => throw new InvalidOperationException("The package operation target is not supported.")
                 };
 
                 result = NormalizeResult(item.Operation, result, startedAt, _timeProvider.GetUtcNow());
@@ -396,7 +405,7 @@ public sealed class OperationQueue : IOperationQueue
 
     private void ReportProgress(QueueItem item, OperationProgress reported)
     {
-        OperationQueueSnapshot snapshot;
+        OperationQueueSnapshot? snapshot = null;
         lock (_gate)
         {
             if (item.IsFinalized || !ReferenceEquals(_current, item))
@@ -404,22 +413,72 @@ public sealed class OperationQueue : IOperationQueue
                 return;
             }
 
+            var previous = item.Progress;
             var state = NormalizeProgressState(item.Operation.Kind, item.Progress.State, reported.State);
             double? percent = reported.Percent is null
                 ? null
                 : Math.Clamp(reported.Percent.Value, 0d, 100d);
-            item.Progress = reported with
+            var progress = reported with
             {
                 OperationId = item.Operation.Id,
                 State = state,
                 Percent = percent,
                 Timestamp = reported.Timestamp == default ? _timeProvider.GetUtcNow() : reported.Timestamp
             };
-            snapshot = CreateSnapshotLocked();
+            item.Progress = progress;
+
+            // Native WinGet callbacks can arrive much faster than the UI can render them.
+            // Keep the latest snapshot exact, publish whole-percent changes immediately,
+            // and limit smaller steady-state changes to 10 Hz.
+            var timestamp = _timeProvider.GetTimestamp();
+            if (ShouldPublishProgress(item, previous, progress, timestamp))
+            {
+                item.HasPublishedProgress = true;
+                item.LastProgressNotificationTimestamp = timestamp;
+                snapshot = CreateSnapshotLocked();
+            }
         }
 
-        RaiseChanged(snapshot);
+        if (snapshot is not null)
+        {
+            RaiseChanged(snapshot);
+        }
     }
+
+    private Task<OperationResult> ExecuteMsixOperationAsync(
+        QueueItem item,
+        IProgress<OperationProgress> progress)
+    {
+        if (item.Operation.Kind != PackageOperationKind.Uninstall)
+        {
+            throw new InvalidOperationException("MSIX targets currently support uninstall only.");
+        }
+
+        if (_msixClient is null)
+        {
+            throw new InvalidOperationException("MSIX package management is unavailable.");
+        }
+
+        // RemovePackageAsync cannot be cancelled once deployment begins. Do not pass the
+        // queue token through or imply that Windows can safely roll the operation back.
+        return _msixClient.UninstallAsync(item.Operation, progress, CancellationToken.None);
+    }
+
+    private bool ShouldPublishProgress(
+        QueueItem item,
+        OperationProgress previous,
+        OperationProgress current,
+        long timestamp) =>
+        !item.HasPublishedProgress
+        || previous.State != current.State
+        || previous.Percent.HasValue != current.Percent.HasValue
+        || ProgressPercentBucket(previous.Percent) != ProgressPercentBucket(current.Percent)
+        || !string.Equals(previous.Message, current.Message, StringComparison.Ordinal)
+        || _timeProvider.GetElapsedTime(item.LastProgressNotificationTimestamp, timestamp)
+            >= ProgressNotificationInterval;
+
+    private static int? ProgressPercentBucket(double? percent) =>
+        percent is null ? null : (int)Math.Floor(percent.Value);
 
     private async Task PersistHistorySafeAsync()
     {
@@ -516,7 +575,8 @@ public sealed class OperationQueue : IOperationQueue
             OperationId = operation.Id,
             State = state,
             Message = message,
-            Timestamp = _timeProvider.GetUtcNow()
+            Timestamp = _timeProvider.GetUtcNow(),
+            CancellationSupported = operation.EffectiveTarget is not MsixTarget
         };
 
     private OperationResult CreateCancelledResult(
@@ -527,6 +587,7 @@ public sealed class OperationQueue : IOperationQueue
         {
             OperationId = operation.Id,
             Package = operation.Package,
+            Target = operation.EffectiveTarget,
             Kind = operation.Kind,
             State = PackageOperationState.Cancelled,
             StartedAt = startedAt ?? completedAt,
@@ -547,6 +608,7 @@ public sealed class OperationQueue : IOperationQueue
         {
             OperationId = operation.Id,
             Package = operation.Package,
+            Target = operation.EffectiveTarget,
             Kind = operation.Kind,
             State = PackageOperationState.Failed,
             StartedAt = startedAt,
@@ -587,6 +649,7 @@ public sealed class OperationQueue : IOperationQueue
         {
             OperationId = operation.Id,
             Package = operation.Package,
+            Target = operation.EffectiveTarget,
             Kind = operation.Kind,
             State = state,
             StartedAt = result.StartedAt == default ? startedAt : result.StartedAt,
@@ -690,9 +753,12 @@ public sealed class OperationQueue : IOperationQueue
         {
             OperationId = operation.Id,
             State = PackageOperationState.Queued,
-            Timestamp = operation.EnqueuedAt
+            Timestamp = operation.EnqueuedAt,
+            CancellationSupported = operation.EffectiveTarget is not MsixTarget
         };
         public DateTimeOffset StartedAt { get; set; }
+        public long LastProgressNotificationTimestamp { get; set; }
+        public bool HasPublishedProgress { get; set; }
         public bool IsFinalized { get; set; }
         public CancellationTokenRegistration ExternalCancellationRegistration { get; set; }
 

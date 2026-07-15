@@ -1,11 +1,16 @@
-using PackagePilot.App.Services;
+using System.Diagnostics;
 using PackagePilot.Core.Models;
+using PackagePilot.Windows.Services;
+using Xunit.Abstractions;
 namespace PackagePilot.Tests.Integration;
 
 [Collection(LiveWingetCollection.Name)]
 public sealed class WingetClientLiveTests
 {
     public const string OptInEnvironmentVariable = "PACKAGEPILOT_RUN_LIVE_WINGET_TESTS";
+    private readonly ITestOutputHelper _output;
+
+    public WingetClientLiveTests(ITestOutputHelper output) => _output = output;
 
     [LiveWingetFact]
     public async Task ComActivation_ReportsSupportedCapabilities()
@@ -17,6 +22,27 @@ public sealed class WingetClientLiveTests
         Assert.True(capabilities.MeetsMinimumContract, capabilities.UnavailableReason);
         Assert.True(capabilities.ContractVersion >= WingetCapabilities.RequiredContractVersion);
         Assert.False(string.IsNullOrWhiteSpace(capabilities.Version));
+    }
+
+    [LiveWingetFact]
+    public async Task StartupReadModel_LoadsInventoriesAndSourcesConcurrently()
+    {
+        using var cancellation = CreateTimeout(TimeSpan.FromMinutes(2));
+        var client = CreateClient();
+        var elapsed = Stopwatch.StartNew();
+
+        var capabilities = await client.GetCapabilitiesAsync(cancellation.Token);
+        Assert.True(capabilities.MeetsMinimumContract, capabilities.UnavailableReason);
+
+        var installedTask = client.GetInstalledPackagesAsync(cancellation.Token);
+        var updatesTask = client.GetAvailableUpdatesAsync(cancellation.Token);
+        var sourcesTask = client.GetSourcesAsync(cancellation.Token);
+        await Task.WhenAll(installedTask, updatesTask, sourcesTask);
+
+        Assert.NotNull(await installedTask);
+        Assert.NotNull(await updatesTask);
+        Assert.NotEmpty(await sourcesTask);
+        _output.WriteLine($"Concurrent startup read model: {elapsed.Elapsed.TotalMilliseconds:F1} ms");
     }
 
     [LiveWingetFact]
@@ -89,7 +115,10 @@ public sealed class WingetClientLiveTests
     public async Task UpdateDetection_IsReadOnlyAndReturnsOnlyUpdates()
     {
         using var cancellation = CreateTimeout(TimeSpan.FromMinutes(2));
-        var updates = await CreateClient().GetAvailableUpdatesAsync(cancellation.Token);
+        var client = CreateClient();
+        var elapsed = Stopwatch.StartNew();
+        var updates = await client.GetAvailableUpdatesAsync(cancellation.Token);
+        elapsed.Stop();
 
         Assert.NotNull(updates);
         Assert.All(updates, package =>
@@ -98,6 +127,32 @@ public sealed class WingetClientLiveTests
             Assert.False(string.IsNullOrWhiteSpace(package.InstalledVersion));
             Assert.False(string.IsNullOrWhiteSpace(package.AvailableVersion));
         });
+        var sourceCount = (await client.GetSourcesAsync(cancellation.Token)).Count;
+        _output.WriteLine(
+            $"Update discovery: {elapsed.Elapsed.TotalMilliseconds:F1} ms "
+            + $"({updates.Count} updates, {sourceCount} sources)");
+    }
+
+    [LiveWingetFact]
+    public async Task CombinedUpdateDetection_MatchesPerSourceReference()
+    {
+        using var cancellation = CreateTimeout(TimeSpan.FromMinutes(3));
+        var client = CreateClient();
+        var sourceCount = (await client.GetSourcesAsync(cancellation.Token)).Count;
+
+        var combinedElapsed = Stopwatch.StartNew();
+        var combined = await client.GetAvailableUpdatesAsync(cancellation.Token);
+        combinedElapsed.Stop();
+
+        var perSourceElapsed = Stopwatch.StartNew();
+        var perSource = await client.GetAvailableUpdatesPerSourceAsync(cancellation.Token);
+        perSourceElapsed.Stop();
+
+        Assert.Equal(CreateUpdateSnapshot(perSource), CreateUpdateSnapshot(combined));
+        _output.WriteLine(
+            $"Combined: {combinedElapsed.Elapsed.TotalMilliseconds:F1} ms; "
+            + $"per-source: {perSourceElapsed.Elapsed.TotalMilliseconds:F1} ms "
+            + $"({combined.Count} updates, {sourceCount} sources)");
     }
 
     private static WingetClient CreateClient() => new();
@@ -128,6 +183,23 @@ public sealed class WingetClientLiveTests
 
     private static CancellationTokenSource CreateTimeout(TimeSpan? timeout = null) =>
         new(timeout ?? TimeSpan.FromSeconds(60));
+
+    private static IReadOnlyList<UpdateSnapshot> CreateUpdateSnapshot(
+        IEnumerable<PackageSummary> packages) => packages
+        .Select(package => new UpdateSnapshot(
+            package.Key,
+            package.InstalledVersion,
+            package.AvailableVersion))
+        .OrderBy(package => package.Key.Id, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(package => package.Key.SourceId, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(package => package.InstalledVersion, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(package => package.AvailableVersion, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    private sealed record UpdateSnapshot(
+        PackageKey Key,
+        string? InstalledVersion,
+        string? AvailableVersion);
 
 }
 

@@ -4,8 +4,11 @@
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap rescap">
+  IgnorableNamespaces="uap uap5 desktop com rescap">
 
   <Identity
     Name="PackagePilot.Desktop"
@@ -41,10 +44,70 @@
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
         <uap:SplashScreen Image="Assets\SplashScreen.png" />
       </uap:VisualElements>
+      <Extensions>
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="packagepilot">
+            <uap:DisplayName>Package Pilot</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+        <uap5:Extension
+          Category="windows.appExecutionAlias"
+          Executable="PackagePilot.App.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <uap5:AppExecutionAlias>
+            <uap5:ExecutionAlias Alias="packagepilot.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
+        <desktop:Extension Category="windows.toastNotificationActivation">
+          <desktop:ToastNotificationActivation ToastActivatorCLSID="B298CA11-E900-4713-AF52-0A9B104A01DA" />
+        </desktop:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer
+              Executable="PackagePilot.App.exe"
+              Arguments="----AppNotificationActivated:"
+              DisplayName="Package Pilot notifications">
+              <com:Class Id="B298CA11-E900-4713-AF52-0A9B104A01DA" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
+        <Extension
+          Category="windows.backgroundTasks"
+          EntryPoint="Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.Task">
+          <BackgroundTasks>
+            <Task Type="general" />
+          </BackgroundTasks>
+        </Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:ExeServer
+              Executable="PackagePilot.Background.exe"
+              Arguments="-RegisterForBGTaskServer"
+              DisplayName="Package Pilot update discovery"
+              LaunchAndActivationPermission="O:PSG:BUD:(A;;11;;;IU)(A;;11;;;S-1-15-2-1)S:(ML;;NX;;;LW)">
+              <com:Class
+                Id="5C2B2D42-64E7-47DC-B966-1E408555A39B"
+                DisplayName="Package Pilot update discovery" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
     </Application>
   </Applications>
 
+  <Extensions>
+    <Extension Category="windows.activatableClass.inProcessServer">
+      <InProcessServer>
+        <Path>Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.dll</Path>
+        <ActivatableClass
+          ActivatableClassId="Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.Task"
+          ThreadingModel="both" />
+      </InProcessServer>
+    </Extension>
+  </Extensions>
+
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="packageQuery" />
   </Capabilities>
 </Package>

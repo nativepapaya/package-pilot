@@ -6,9 +6,11 @@
     <RootNamespace>PackagePilot.App</RootNamespace>
     <AssemblyName>PackagePilot.App</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Platforms>x64</Platforms>
-    <PlatformTarget>x64</PlatformTarget>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Platforms>x64;ARM64</Platforms>
+    <PlatformTarget Condition="'$(Platform)' != 'ARM64'">x64</PlatformTarget>
+    <PlatformTarget Condition="'$(Platform)' == 'ARM64'">ARM64</PlatformTarget>
+    <RuntimeIdentifier Condition="'$(Platform)' != 'ARM64'">win-x64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(Platform)' == 'ARM64'">win-arm64</RuntimeIdentifier>
     <PublishProfile Condition="Exists('Properties\PublishProfiles\win-$(Platform).pubxml')">win-$(Platform).pubxml</PublishProfile>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
@@ -17,6 +19,14 @@
     <MicrosoftManagementDeployment-FactoryLinkage>static</MicrosoftManagementDeployment-FactoryLinkage>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- A solution build uses AnyCPU as its orchestration platform, while explicit
+         package builds use x64 or ARM64 and therefore gain a platform folder. -->
+    <CompanionPlatformDirectory Condition="'$(Platform)' == 'x64' or '$(Platform)' == 'ARM64'">$(Platform)\</CompanionPlatformDirectory>
+    <BackgroundOutputDirectory>$(MSBuildProjectDirectory)\..\PackagePilot.Background\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</BackgroundOutputDirectory>
+    <SourceAdminOutputDirectory>$(MSBuildProjectDirectory)\..\PackagePilot.SourceAdmin\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</SourceAdminOutputDirectory>
   </PropertyGroup>
 
   <ItemGroup>
@@ -61,6 +71,62 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\PackagePilot.Core\PackagePilot.Core.csproj" />
+    <ProjectReference Include="..\PackagePilot.Windows\PackagePilot.Windows.csproj" />
+    <ProjectReference Include="..\PackagePilot.Background\PackagePilot.Background.csproj"
+                      ReferenceOutputAssembly="false"
+                      Private="false" />
+    <ProjectReference Include="..\PackagePilot.SourceAdmin\PackagePilot.SourceAdmin.csproj"
+                      ReferenceOutputAssembly="false"
+                      Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="$(BackgroundOutputDirectory)PackagePilot.Background.exe"
+             Link="PackagePilot.Background.exe"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(BackgroundOutputDirectory)PackagePilot.Background.dll"
+             Link="PackagePilot.Background.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(BackgroundOutputDirectory)PackagePilot.Background.deps.json"
+             Link="PackagePilot.Background.deps.json"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(BackgroundOutputDirectory)PackagePilot.Background.runtimeconfig.json"
+             Link="PackagePilot.Background.runtimeconfig.json"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(BackgroundOutputDirectory)PackagePilot.Background.pri"
+             Link="PackagePilot.Background.pri"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+
+    <Content Include="$(SourceAdminOutputDirectory)PackagePilot.SourceAdmin.exe"
+             Link="PackagePilot.SourceAdmin.exe"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(SourceAdminOutputDirectory)PackagePilot.SourceAdmin.dll"
+             Link="PackagePilot.SourceAdmin.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(SourceAdminOutputDirectory)PackagePilot.SourceAdmin.deps.json"
+             Link="PackagePilot.SourceAdmin.deps.json"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(SourceAdminOutputDirectory)PackagePilot.SourceAdmin.runtimeconfig.json"
+             Link="PackagePilot.SourceAdmin.runtimeconfig.json"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
   </ItemGroup>
 
   <!--

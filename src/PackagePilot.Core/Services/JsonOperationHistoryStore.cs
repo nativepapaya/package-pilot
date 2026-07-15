@@ -50,7 +50,10 @@ public sealed class JsonOperationHistoryStore : IOperationHistoryStore
                 _options,
                 cancellationToken).ConfigureAwait(false);
 
-            return (results ?? []).Take(_historyLimit).ToArray();
+            return (results ?? [])
+                .Take(_historyLimit)
+                .Select(MigrateLegacyTarget)
+                .ToArray();
         }
         catch (JsonException exception)
         {
@@ -83,7 +86,7 @@ public sealed class JsonOperationHistoryStore : IOperationHistoryStore
             {
                 await JsonSerializer.SerializeAsync(
                     stream,
-                    results.Take(_historyLimit).ToArray(),
+                    results.Take(_historyLimit).Select(MigrateLegacyTarget).ToArray(),
                     _options,
                     cancellationToken).ConfigureAwait(false);
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -99,4 +102,9 @@ public sealed class JsonOperationHistoryStore : IOperationHistoryStore
             }
         }
     }
+
+    private static OperationResult MigrateLegacyTarget(OperationResult result) =>
+        result.Target is null && !result.Package.IsEmpty
+            ? result with { Target = new WingetTarget { Package = result.Package } }
+            : result;
 }

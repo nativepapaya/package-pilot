@@ -34,11 +34,23 @@ public sealed partial class DiscoverPage : Page
 
     public void FocusSearch() => PackageSearchBox.Focus(FocusState.Programmatic);
 
+    public void SetSearchQuery(string query)
+    {
+        PackageSearchBox.Text = query?.Trim() ?? string.Empty;
+        PackageSearchBox.Focus(FocusState.Programmatic);
+    }
+
     public void SetResults(IEnumerable<PackageListItem> results)
     {
+        var snapshot = results.ToArray();
+        if (PackageListItemComparer.HaveSameRows(Results, snapshot))
+        {
+            return;
+        }
+
         Results.CollectionChanged -= OnResultsChanged;
         Results.Clear();
-        foreach (var result in results)
+        foreach (var result in snapshot)
         {
             Results.Add(result);
         }
