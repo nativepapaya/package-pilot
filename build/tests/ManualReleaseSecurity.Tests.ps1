@@ -107,11 +107,22 @@ $assertCertificateFunction = $initializerAst.Find(
             $node.Name -eq 'Assert-ReleaseCertificate'
     },
     $true)
-Assert-True -Condition ($null -ne $nonExportableFunction -and $null -ne $assertCertificateFunction) `
+$getReleaseCertificateFunction = $publisherAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-ReleaseCertificate'
+    },
+    $true)
+Assert-True -Condition (
+    $null -ne $nonExportableFunction -and
+    $null -ne $assertCertificateFunction -and
+    $null -ne $getReleaseCertificateFunction) `
     -Message 'The certificate validation functions could not be loaded for a runtime compatibility test.'
 
 Invoke-Expression $nonExportableFunction.Extent.Text
 Invoke-Expression $assertCertificateFunction.Extent.Text
+Invoke-Expression $getReleaseCertificateFunction.Extent.Text
 $Subject = 'CN=PackagePilot.Dev'
 $testCertificate = $null
 try {
@@ -133,6 +144,20 @@ try {
         )
 
     Assert-ReleaseCertificate -Certificate $testCertificate
+
+    $script:CertificateSubject = $Subject
+    $script:CertificateFriendlyName = $testCertificate.FriendlyName
+    $CertificateThumbprint = $testCertificate.Thumbprint
+    $expectedTrustFailure = $null
+    try {
+        Get-ReleaseCertificate | Out-Null
+    }
+    catch {
+        $expectedTrustFailure = $_.Exception.Message
+    }
+    Assert-True `
+        -Condition ($expectedTrustFailure -like '*not trusted in LocalMachine\TrustedPeople*') `
+        -Message "Publisher certificate selection failed before its expected trust boundary: '$expectedTrustFailure'"
 }
 finally {
     if ($null -ne $testCertificate) {

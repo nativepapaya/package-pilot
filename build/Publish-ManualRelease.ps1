@@ -78,25 +78,23 @@ function Test-NonExportablePrivateKey {
 }
 
 function Get-ReleaseCertificate {
-    $matches = if ([string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
-        @(
+    $matches = @(
+        if ([string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
             Get-ChildItem 'Cert:\CurrentUser\My' |
                 Where-Object {
                     $_.FriendlyName -eq $script:CertificateFriendlyName -and
                     $_.Subject -eq $script:CertificateSubject -and
                     $_.HasPrivateKey
                 }
-        )
-    }
-    else {
-        @(
+        }
+        else {
             Get-ChildItem 'Cert:\CurrentUser\My' |
                 Where-Object {
                     $_.Thumbprint -eq $CertificateThumbprint -and
                     $_.FriendlyName -eq $script:CertificateFriendlyName
                 }
-        )
-    }
+        }
+    )
 
     if ($matches.Count -ne 1) {
         throw "Exactly one '$($script:CertificateFriendlyName)' private key is required. Run Initialize-ManualReleaseCertificate.ps1 from an elevated PowerShell window."
