@@ -168,6 +168,41 @@
                 </StackPanel>
 
                 <StackPanel Spacing="8">
+                    <TextBlock Style="{StaticResource PackagePilotSectionTitleStyle}" Text="Package Pilot updates" />
+                    <Border Style="{StaticResource PackagePilotCardStyle}">
+                        <StackPanel Spacing="16">
+                            <StackPanel Spacing="8">
+                                <StackPanel Spacing="2">
+                                    <TextBlock FontWeight="SemiBold" Text="Automatic updates" />
+                                    <TextBlock x:Name="VersionText" Style="{StaticResource PackagePilotCaptionStyle}" Text="Version unavailable" />
+                                    <TextBlock
+                                        Style="{StaticResource PackagePilotSubtitleStyle}"
+                                        Text="Copies installed through PackagePilot.appinstaller check the public GitHub release feed at launch and in the background."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <InfoBar
+                                    x:Name="UpdateInfoBar"
+                                    AutomationProperties.LiveSetting="Polite"
+                                    IsClosable="False"
+                                    IsOpen="False"
+                                    Severity="Informational" />
+                            </StackPanel>
+                            <StackPanel HorizontalAlignment="Left" Spacing="8">
+                                <Button
+                                    x:Name="CheckForUpdatesButton"
+                                    AutomationProperties.Name="Check for Package Pilot updates"
+                                    Click="OnCheckForUpdatesClick"
+                                    Content="Check for updates" />
+                                <HyperlinkButton
+                                    AutomationProperties.Name="Download Package Pilot update installer"
+                                    Content="Get update installer"
+                                    NavigateUri="https://github.com/nativepapaya/package-pilot/releases/latest/download/PackagePilot.appinstaller" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Spacing="8">
                     <TextBlock Style="{StaticResource PackagePilotSectionTitleStyle}" Text="About" />
                     <Border Style="{StaticResource PackagePilotCardStyle}">
                         <Grid ColumnSpacing="14">

@@ -1,0 +1,341 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build_release:
+    name: Build unsigned release
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      package_version: ${{ steps.version.outputs.package_version }}
+      release_sequence: ${{ steps.version.outputs.release_sequence }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "true"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          global-json-file: global.json
+
+      - name: Calculate release version
+        id: version
+        shell: pwsh
+        env:
+          WORKFLOW_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          [uint64]$runNumber = 0
+          if (-not [uint64]::TryParse($env:WORKFLOW_RUN_NUMBER, [ref]$runNumber) -or $runNumber -lt 1) {
+              throw "GitHub supplied an invalid workflow run number: '$env:WORKFLOW_RUN_NUMBER'."
+          }
+
+          # The repository's pre-automation development package is 1.0.0.4.
+          # Base-65536 encoding keeps every MSIX segment in its UInt16 range
+          # while preserving monotonically increasing package versions.
+          [uint64]$sequence = $runNumber + 4
+          [uint64]$build = [Math]::Floor($sequence / 65536)
+          [uint64]$revision = $sequence % 65536
+          if ($build -gt [uint16]::MaxValue) {
+              throw "Release sequence $sequence exceeds the MSIX version capacity."
+          }
+
+          $packageVersion = "1.0.$build.$revision"
+          $tagName = "v1.0.$sequence"
+
+          "package_version=$packageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "release_sequence=$sequence" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tag_name=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Release $tagName uses MSIX version $packageVersion."
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore PackagePilot.slnx
+
+      - name: Run deterministic tests
+        shell: pwsh
+        run: >-
+          dotnet test tests/PackagePilot.Tests/PackagePilot.Tests.csproj
+          --configuration Release
+          --no-restore
+          --logger "console;verbosity=normal"
+
+      - name: Test release scripts
+        shell: pwsh
+        run: |
+          ./build/tests/New-AppInstaller.Tests.ps1
+          ./build/tests/Set-PackageVersion.Tests.ps1
+
+      - name: Test manual release security on Windows PowerShell 5.1
+        shell: powershell
+        run: ./build/tests/ManualReleaseSecurity.Tests.ps1
+
+      - name: Set package version
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: ./build/Set-PackageVersion.ps1 -Version $env:PACKAGE_VERSION
+
+      - name: Build unsigned x64 MSIX
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packageOutput = Join-Path $env:RUNNER_TEMP 'AppPackages'
+          $packageOutputWithSeparator = $packageOutput + [IO.Path]::DirectorySeparatorChar
+          $arguments = @(
+              'publish'
+              'src/PackagePilot.App/PackagePilot.App.csproj'
+              '--configuration'
+              'Release'
+              '--runtime'
+              'win-x64'
+              '--self-contained'
+              'false'
+              '--no-restore'
+              '-p:Platform=x64'
+              '-p:GenerateAppxPackageOnBuild=true'
+              '-p:AppxPackageSigningEnabled=false'
+              '-p:AppxBundle=Never'
+              '-p:AppxSymbolPackageEnabled=false'
+              '-p:UapAppxPackageBuildMode=SideloadOnly'
+              '-p:WindowsAppSDKSelfContained=false'
+              "-p:AppxPackageDir=$packageOutputWithSeparator"
+          )
+
+          & dotnet @arguments
+          if ($LASTEXITCODE -ne 0) {
+              throw "dotnet publish failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Stage unsigned release assets
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          function Get-MsixIdentity {
+              param([Parameter(Mandatory)][string]$Path)
+
+              $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+              try {
+                  $manifestEntry = $archive.GetEntry('AppxManifest.xml')
+                  if ($null -eq $manifestEntry) {
+                      throw "'$Path' does not contain AppxManifest.xml."
+                  }
+
+                  $reader = [System.IO.StreamReader]::new($manifestEntry.Open())
+                  try {
+                      [xml]$manifest = $reader.ReadToEnd()
+                  }
+                  finally {
+                      $reader.Dispose()
+                  }
+
+                  $identity = $manifest.Package.Identity
+                  [pscustomobject]@{
+                      Name = [string]$identity.Name
+                      Publisher = [string]$identity.Publisher
+                      Version = [string]$identity.Version
+                      ProcessorArchitecture = [string]$identity.ProcessorArchitecture
+                      HasSignature = $null -ne $archive.GetEntry('AppxSignature.p7x')
+                  }
+              }
+              finally {
+                  $archive.Dispose()
+              }
+          }
+
+          $packageOutput = Join-Path $env:RUNNER_TEMP 'AppPackages'
+          $stagingDirectory = Join-Path $env:RUNNER_TEMP 'package-pilot-unsigned'
+          [IO.Directory]::CreateDirectory($stagingDirectory) | Out-Null
+
+          $mainPackage = $null
+          $runtimePackage = $null
+          foreach ($package in Get-ChildItem -LiteralPath $packageOutput -Recurse -File -Filter '*.msix') {
+              $identity = Get-MsixIdentity -Path $package.FullName
+              if ($identity.Name -eq 'PackagePilot.Desktop') {
+                  $mainPackage = [pscustomobject]@{ File = $package; Identity = $identity }
+              }
+              elseif ($identity.Name -eq 'Microsoft.WindowsAppRuntime.2' -and $identity.ProcessorArchitecture -eq 'x64') {
+                  $runtimePackage = [pscustomobject]@{ File = $package; Identity = $identity }
+              }
+          }
+
+          if ($null -eq $mainPackage) {
+              throw 'The PackagePilot.Desktop MSIX was not found in the package output.'
+          }
+          if ($null -eq $runtimePackage) {
+              throw 'The x64 Microsoft.WindowsAppRuntime.2 dependency MSIX was not found in the package output.'
+          }
+          if ($mainPackage.Identity.Version -ne $env:PACKAGE_VERSION) {
+              throw "Built package version '$($mainPackage.Identity.Version)' does not match '$env:PACKAGE_VERSION'."
+          }
+          if ($mainPackage.Identity.ProcessorArchitecture -ne 'x64') {
+              throw "Built package architecture '$($mainPackage.Identity.ProcessorArchitecture)' is not x64."
+          }
+          if ($mainPackage.Identity.Publisher -ne 'CN=PackagePilot.Dev') {
+              throw "Built package publisher '$($mainPackage.Identity.Publisher)' does not match CN=PackagePilot.Dev."
+          }
+          if ($mainPackage.Identity.HasSignature) {
+              throw 'The build job unexpectedly produced an already-signed Package Pilot MSIX.'
+          }
+          if ($runtimePackage.Identity.Version -ne '2.2.0.0') {
+              throw "Windows App Runtime package version '$($runtimePackage.Identity.Version)' does not match 2.2.0.0."
+          }
+          if ($runtimePackage.Identity.Publisher -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US') {
+              throw "The Windows App Runtime package publisher is unexpected: '$($runtimePackage.Identity.Publisher)'."
+          }
+          if (-not $runtimePackage.Identity.HasSignature) {
+              throw 'The Microsoft Windows App Runtime dependency is not signed.'
+          }
+
+          Copy-Item -LiteralPath $mainPackage.File.FullName -Destination (Join-Path $stagingDirectory 'PackagePilot.msix')
+          Copy-Item -LiteralPath $runtimePackage.File.FullName -Destination (Join-Path $stagingDirectory 'Microsoft.WindowsAppRuntime.2.msix')
+
+          & ./build/New-AppInstaller.ps1 `
+              -Version $env:PACKAGE_VERSION `
+              -OutputPath (Join-Path $stagingDirectory 'PackagePilot.appinstaller') `
+              -Repository $env:GITHUB_REPOSITORY | Out-Null
+
+      - name: Create release metadata
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          RELEASE_SEQUENCE: ${{ steps.version.outputs.release_sequence }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_COMMIT_SHA: ${{ github.sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_NUMBER: ${{ github.run_number }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          ARTIFACT_NAME: package-pilot-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          WORKFLOW_NAME: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          [uint64]$releaseSequence = 0
+          if (-not [uint64]::TryParse($env:RELEASE_SEQUENCE, [ref]$releaseSequence) -or $releaseSequence -lt 5) {
+              throw "The calculated release sequence '$env:RELEASE_SEQUENCE' is invalid."
+          }
+
+          $expectedBuild = [Math]::Floor($releaseSequence / 65536)
+          $expectedRevision = $releaseSequence % 65536
+          $expectedPackageVersion = "1.0.$expectedBuild.$expectedRevision"
+          if ($env:PACKAGE_VERSION -ne $expectedPackageVersion) {
+              throw "Package version '$env:PACKAGE_VERSION' does not match release sequence $releaseSequence."
+          }
+
+          $expectedTagName = "v1.0.$releaseSequence"
+          if ($env:TAG_NAME -ne $expectedTagName) {
+              throw "Tag name '$env:TAG_NAME' does not match release sequence $releaseSequence."
+          }
+          if ($env:SOURCE_REPOSITORY -notmatch '^[^/\s]+/[^/\s]+$') {
+              throw "GitHub supplied an invalid repository name: '$env:SOURCE_REPOSITORY'."
+          }
+          if ($env:SOURCE_COMMIT_SHA -notmatch '^[0-9a-fA-F]{40}$') {
+              throw "GitHub supplied an invalid commit SHA: '$env:SOURCE_COMMIT_SHA'."
+          }
+
+          [uint64]$runId = 0
+          if (-not [uint64]::TryParse($env:WORKFLOW_RUN_ID, [ref]$runId) -or $runId -lt 1) {
+              throw "GitHub supplied an invalid workflow run ID: '$env:WORKFLOW_RUN_ID'."
+          }
+          [uint64]$runNumber = 0
+          if (-not [uint64]::TryParse($env:WORKFLOW_RUN_NUMBER, [ref]$runNumber) -or $runNumber -lt 1) {
+              throw "GitHub supplied an invalid workflow run number: '$env:WORKFLOW_RUN_NUMBER'."
+          }
+          [uint64]$runAttempt = 0
+          if (-not [uint64]::TryParse($env:WORKFLOW_RUN_ATTEMPT, [ref]$runAttempt) -or $runAttempt -lt 1) {
+              throw "GitHub supplied an invalid workflow run attempt: '$env:WORKFLOW_RUN_ATTEMPT'."
+          }
+
+          $expectedArtifactName = "package-pilot-unsigned-$runId-$runAttempt"
+          if ($env:ARTIFACT_NAME -ne $expectedArtifactName) {
+              throw "Artifact name '$env:ARTIFACT_NAME' does not match '$expectedArtifactName'."
+          }
+          if ($env:WORKFLOW_NAME -ne 'Release') {
+              throw "Workflow name '$env:WORKFLOW_NAME' is invalid."
+          }
+
+          $stagingDirectory = Join-Path $env:RUNNER_TEMP 'package-pilot-unsigned'
+          foreach ($fileName in @(
+              'PackagePilot.msix'
+              'Microsoft.WindowsAppRuntime.2.msix'
+              'PackagePilot.appinstaller'
+          )) {
+              if (-not (Test-Path -LiteralPath (Join-Path $stagingDirectory $fileName) -PathType Leaf)) {
+                  throw "Unsigned release asset '$fileName' is missing."
+              }
+          }
+
+          $generatedAtUtc = [DateTimeOffset]::UtcNow.ToString(
+              'o',
+              [Globalization.CultureInfo]::InvariantCulture)
+          $metadata = [ordered]@{
+              schemaVersion = 1
+              packageVersion = $env:PACKAGE_VERSION
+              releaseSequence = $releaseSequence
+              tagName = $env:TAG_NAME
+              repository = $env:SOURCE_REPOSITORY
+              commitSha = $env:SOURCE_COMMIT_SHA.ToLowerInvariant()
+              runId = $runId
+              runNumber = $runNumber
+              runAttempt = $runAttempt
+              artifactName = $env:ARTIFACT_NAME
+              workflowName = $env:WORKFLOW_NAME
+              generatedAtUtc = $generatedAtUtc
+          }
+
+          $metadataPath = Join-Path $stagingDirectory 'release-metadata.json'
+          $metadataJson = $metadata | ConvertTo-Json -Depth 3
+          [IO.File]::WriteAllText(
+              $metadataPath,
+              $metadataJson + [Environment]::NewLine,
+              [Text.UTF8Encoding]::new($false))
+
+          $validatedMetadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+          if ($validatedMetadata.schemaVersion -ne 1 -or
+              $validatedMetadata.packageVersion -ne $env:PACKAGE_VERSION -or
+              $validatedMetadata.releaseSequence -ne $releaseSequence -or
+              $validatedMetadata.tagName -ne $env:TAG_NAME -or
+              $validatedMetadata.repository -ne $env:SOURCE_REPOSITORY -or
+              $validatedMetadata.commitSha -ne $env:SOURCE_COMMIT_SHA.ToLowerInvariant() -or
+              $validatedMetadata.runId -ne $runId -or
+              $validatedMetadata.runNumber -ne $runNumber -or
+              $validatedMetadata.runAttempt -ne $runAttempt -or
+              $validatedMetadata.artifactName -ne $env:ARTIFACT_NAME -or
+              $validatedMetadata.workflowName -ne $env:WORKFLOW_NAME -or
+              $validatedMetadata.generatedAtUtc -ne $generatedAtUtc) {
+              throw 'The generated release metadata failed validation.'
+          }
+
+      - name: Upload unsigned release payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-pilot-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\package-pilot-unsigned
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0

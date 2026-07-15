@@ -23,6 +23,49 @@ Package Pilot is a native Windows 11 package center for WinGet. It provides a Fl
 
 The repository pins Windows App SDK 2.2.0, CommunityToolkit.Mvvm 8.4.2, and Microsoft.WindowsPackageManager.ComInterop 1.28.240.
 
+## Install a development release
+
+Download `PackagePilot.cer`, `PackagePilot.appinstaller`, and `SHA256SUMS.txt` from the [latest GitHub release](https://github.com/nativepapaya/package-pilot/releases/latest). Compare the certificate and App Installer file hashes with their entries in `SHA256SUMS.txt` before opening them. Matching checksums detect an incomplete or corrupted download; because the checksum file is published with the release, it is not an independent guarantee if the GitHub repository or release itself is compromised.
+
+> [!WARNING]
+> Package Pilot releases currently use a self-signed development certificate. Trusting that certificate allows packages signed by its private key to install and update on the computer. Review the public repository, release checksums, and certificate before proceeding. This is suitable for development and personal testing, not broad production distribution.
+
+From an elevated PowerShell window, trust the reviewed public certificate once:
+
+```powershell
+Import-Certificate `
+  -FilePath .\PackagePilot.cer `
+  -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+```
+
+Then open `PackagePilot.appinstaller`. Installing through this file registers the public release feed with Windows App Installer. Installing `PackagePilot.msix` directly works only when its dependencies and certificate are already present, but does not register automatic update settings.
+
+## Releases and automatic updates
+
+Every successful push to `main` runs deterministic tests, assigns a monotonically increasing four-part MSIX version, and retains an unsigned release payload as a GitHub Actions artifact for 30 days. The release sequence is encoded across the MSIX build and revision fields so no individual field exceeds Windows' 65,535 limit.
+
+The signing key never leaves the release maintainer's Windows certificate store. Initialize it once from an elevated PowerShell window:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\build\Initialize-ManualReleaseCertificate.ps1
+```
+
+After a successful `Release` workflow run, review the trusted checkout and publish the oldest unpublished payload from a normal PowerShell window. The publisher requires an authenticated GitHub CLI session (`gh auth login`):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\build\Publish-ManualRelease.ps1
+```
+
+Failed or cancelled workflow runs may leave sequence gaps; the publisher safely chooses the oldest successful run newer than the current release. To deliberately skip an obsolete successful payload, pass its replacement as `-RunId <workflow-run-id>`. Publishing the newer run permanently prevents older versions from being released afterward.
+
+The publisher downloads and validates the GitHub artifact, signs `PackagePilot.msix` with the non-exportable local key, verifies both package signatures and identities, creates checksums, and publishes the matching `v1.0.<release-sequence>` release. It refuses to replace an existing release. Stable asset names let the App Installer feed follow the latest release without embedding credentials or GitHub API tokens in the app.
+
+Copies installed through `PackagePilot.appinstaller` check for updates at launch without blocking activation and also register a background check. Settings shows the installed version and can query the same App Installer association. If a copy was installed directly from an MSIX, use **Get update installer** once to connect it to the feed.
+
+The certificate initializer sets `KeyExportPolicy` to `NonExportable`; neither a PFX nor a signing password is created or stored in GitHub. Losing the Windows profile or machine can permanently lose this release key unless a verified system-level backup preserves non-exportable keys. Before distributing Package Pilot beyond trusted testers, replace development signing with a publicly trusted signing service or Microsoft Store signing.
+
 ## Build and test
 
 This workspace has a project-local SDK in `.dotnet`. If .NET 10 is installed system-wide, replace `.\.dotnet\dotnet.exe` with `dotnet`.
