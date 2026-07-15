@@ -14,6 +14,7 @@
                 ActionLabel="{x:Bind ActionLabel}"
                 IconGlyph="{x:Bind IconGlyph}"
                 IconUri="{x:Bind IconUri}"
+                IsActionEnabled="{x:Bind IsActionEnabled}"
                 PackageId="{x:Bind PackageId}"
                 PackageName="{x:Bind Name}"
                 Publisher="{x:Bind Publisher}"
@@ -38,7 +39,7 @@
             </Grid.ColumnDefinitions>
             <StackPanel Spacing="4">
                 <TextBlock AutomationProperties.HeadingLevel="Level1" Style="{StaticResource PackagePilotPageTitleStyle}" Text="Installed" />
-                <TextBlock Style="{StaticResource PackagePilotSubtitleStyle}" Text="Review software detected by WinGet on this PC." />
+                <TextBlock Style="{StaticResource PackagePilotSubtitleStyle}" Text="Review WinGet, Store/MSIX, and visible legacy applications on this PC." />
             </StackPanel>
             <Button
                 Grid.Column="1"

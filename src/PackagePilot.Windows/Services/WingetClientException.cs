@@ -1,6 +1,6 @@
 using PackagePilot.Core.Models;
 
-namespace PackagePilot.App.Services;
+namespace PackagePilot.Windows.Services;
 
 /// <summary>
 /// Carries a UI-safe WinGet failure without leaking COM or WinRT types outside the app adapter.

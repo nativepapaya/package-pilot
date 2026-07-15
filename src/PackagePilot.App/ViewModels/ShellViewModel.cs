@@ -4,6 +4,8 @@ using CommunityToolkit.Mvvm.Input;
 using Microsoft.UI.Dispatching;
 using PackagePilot.Core.Abstractions;
 using PackagePilot.Core.Models;
+using PackagePilot.Core.Services;
+using Windows.Storage;
 
 namespace PackagePilot.App.ViewModels;
 
@@ -11,9 +13,17 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
 {
     private readonly IWingetClient _wingetClient;
     private readonly IOperationQueue _operationQueue;
+    private readonly IUpdateCoordinator _updateCoordinator;
+    private readonly UpdateScanWorker _updateScanWorker;
+    private readonly IInstalledAppInventory? _installedAppInventory;
+    private readonly ISourceManagementService? _sourceManagementService;
     private readonly DispatcherQueue _dispatcher;
     private readonly HashSet<Guid> _observedCompletions = [];
+    private readonly Dictionary<string, string> _acceptedSourceAgreementFingerprints =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
     private CancellationTokenSource? _searchCancellation;
+    private UpdateSnapshot? _updateSnapshot;
     private WingetCapabilities _capabilities = WingetCapabilities.Unavailable("Checking Windows Package Manager…");
     private PackageSummary? _selectedPackage;
     private PackageDetails? _selectedDetails;
@@ -24,16 +34,47 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     private bool _isSearchTruncated;
     private bool _isDetailsLoading;
     private bool _hasAcceptedSourceAgreements;
+    private UpdateCheckState _updatesCheckState = UpdateCheckState.NotChecked;
+    private DateTimeOffset? _lastUpdateCheckAt;
+    private string? _updateCheckError;
+    private SourceManagementCapabilities _sourceManagementCapabilities = new();
+    private WindowsIntegrationCapabilities _windowsIntegrationCapabilities = new();
+    private bool _isManagingSources;
     private bool _disposed;
 
     public ShellViewModel(
         IWingetClient wingetClient,
         IOperationQueue operationQueue,
-        DispatcherQueue dispatcher)
+        DispatcherQueue dispatcher,
+        IUpdateCoordinator? updateCoordinator = null,
+        UpdateScanWorker? updateScanWorker = null,
+        IInstalledAppInventory? installedAppInventory = null,
+        ISourceManagementService? sourceManagementService = null,
+        bool notificationRegistrationSupported = false,
+        bool notificationRegistered = false,
+        BackgroundMonitoringState backgroundMonitoringState = BackgroundMonitoringState.Disabled)
     {
         _wingetClient = wingetClient;
         _operationQueue = operationQueue;
         _dispatcher = dispatcher;
+        _installedAppInventory = installedAppInventory;
+        _sourceManagementService = sourceManagementService;
+        _windowsIntegrationCapabilities = new WindowsIntegrationCapabilities
+        {
+            NotificationRegistrationSupported = notificationRegistrationSupported,
+            NotificationRegistered = notificationRegistered,
+            BackgroundMonitoringState = backgroundMonitoringState
+        };
+        LoadSourceAgreementConsents();
+        _updateCoordinator = updateCoordinator ?? new UpdateCoordinator(
+            wingetClient,
+            new JsonUpdateSnapshotStore(Path.Combine(
+                ApplicationData.Current.LocalFolder.Path,
+                "update-snapshot.json")));
+        _updateScanWorker = updateScanWorker ?? new UpdateScanWorker(
+            _updateCoordinator,
+            new UpdateNotificationPolicy(),
+            new NullUpdateNotificationSink());
         _operationQueue.Changed += OnOperationQueueChanged;
 
         InitializeCommand = new AsyncRelayCommand(InitializeAsync);
@@ -44,6 +85,9 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
 
     public ObservableCollection<PackageSummary> SearchResults { get; } = [];
     public ObservableCollection<PackageSummary> InstalledPackages { get; } = [];
+    public ObservableCollection<InstalledApp> InstalledApps { get; } = [];
+    public ObservableCollection<InstalledAppProviderStatus> InstalledAppProviders { get; } = [];
+    public ObservableCollection<PackageSourceInfo> ManagedSources { get; } = [];
     public ObservableCollection<PackageSummary> AvailableUpdates { get; } = [];
     public ObservableCollection<PackageSourceStatus> SourceStatuses { get; } = [];
     public ObservableCollection<OperationQueueEntry> PendingOperations { get; } = [];
@@ -64,6 +108,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                 OnPropertyChanged(nameof(IsReady));
                 OnPropertyChanged(nameof(HealthTitle));
                 OnPropertyChanged(nameof(HealthMessage));
+                UpdateWindowsIntegrationCapabilities();
                 RefreshCommand.NotifyCanExecuteChanged();
             }
         }
@@ -111,6 +156,91 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     {
         get => _isDetailsLoading;
         private set => SetProperty(ref _isDetailsLoading, value);
+    }
+
+    public UpdateCheckState UpdatesCheckState
+    {
+        get => _updatesCheckState;
+        private set
+        {
+            if (SetProperty(ref _updatesCheckState, value))
+            {
+                OnPropertyChanged(nameof(IsCheckingForUpdates));
+            }
+        }
+    }
+
+    public bool IsCheckingForUpdates => UpdatesCheckState == UpdateCheckState.Checking;
+
+    public DateTimeOffset? LastUpdateCheckAt
+    {
+        get => _lastUpdateCheckAt;
+        private set => SetProperty(ref _lastUpdateCheckAt, value);
+    }
+
+    public string? UpdateCheckError
+    {
+        get => _updateCheckError;
+        private set => SetProperty(ref _updateCheckError, value);
+    }
+
+    public SourceManagementCapabilities SourceManagementCapabilities
+    {
+        get => _sourceManagementCapabilities;
+        private set
+        {
+            if (SetProperty(ref _sourceManagementCapabilities, value))
+            {
+                UpdateWindowsIntegrationCapabilities();
+            }
+        }
+    }
+
+    public WindowsIntegrationCapabilities WindowsIntegrationCapabilities
+    {
+        get => _windowsIntegrationCapabilities;
+        private set
+        {
+            if (SetProperty(ref _windowsIntegrationCapabilities, value))
+            {
+                OnPropertyChanged(nameof(WindowsCapabilitySummary));
+            }
+        }
+    }
+
+    public string WindowsCapabilitySummary
+    {
+        get
+        {
+            var capabilities = WindowsIntegrationCapabilities;
+            var repair = capabilities.SupportsPackageRepair ? "repair available" : "repair unavailable";
+            var sources = capabilities.SupportsSourceMutation
+                ? capabilities.SupportsSourceExplicitEdit
+                    ? "source administration and explicit editing available"
+                    : "source administration available"
+                : capabilities.SupportsSourceRefresh
+                    ? "source refresh available"
+                    : "source administration unavailable";
+            var background = capabilities.BackgroundMonitoringState switch
+            {
+                BackgroundMonitoringState.Registered => "background monitoring registered",
+                BackgroundMonitoringState.Disabled => "background monitoring set to manual",
+                BackgroundMonitoringState.Denied => "background monitoring denied by Windows",
+                _ => "background monitoring unavailable"
+            };
+            var notifications = capabilities.NotificationRegistered
+                ? "notifications registered"
+                : capabilities.NotificationRegistrationSupported
+                    ? "notifications not registered"
+                    : "notifications unavailable";
+            return $"{HealthMessage} Package {repair}; {sources}; {background}; {notifications}.";
+        }
+    }
+
+    public bool IsManagingSources
+    {
+        get => _isManagingSources;
+        private set => SetProperty(ref _isManagingSources, value);
     }
 
     public PackageSummary? SelectedPackage
@@ -164,20 +294,33 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         IsBusy = true;
         StatusMessage = "Checking App Installer and WinGet…";
 
+        var scheduleAutomaticUpdateCheck = false;
         try
         {
+            _updateSnapshot = await _updateCoordinator.LoadAsync(_lifetimeCancellation.Token).ConfigureAwait(true);
+            ApplyUpdateSnapshot(_updateSnapshot, _updateCoordinator.GetState(_updateSnapshot));
+
             await _operationQueue.Initialization.ConfigureAwait(true);
             ApplyQueueSnapshot(_operationQueue.Snapshot);
 
-            Capabilities = await _wingetClient.GetCapabilitiesAsync().ConfigureAwait(true);
+            Capabilities = await _wingetClient.GetCapabilitiesAsync(_lifetimeCancellation.Token).ConfigureAwait(true);
             if (!IsReady)
             {
                 StatusMessage = Capabilities.UnavailableReason ?? "WinGet is unavailable.";
                 return;
             }
 
-            await RefreshAllCoreAsync().ConfigureAwait(true);
+            var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
+            var sourcesTask = _wingetClient.GetSourcesAsync(_lifetimeCancellation.Token);
+            await Task.WhenAll(installedTask, sourcesTask).ConfigureAwait(true);
+
+            ApplyInstalledApps(await installedTask.ConfigureAwait(true));
+            ReplaceAll(SourceStatuses, await sourcesTask.ConfigureAwait(true));
+            scheduleAutomaticUpdateCheck = _updateCoordinator.ShouldAutomaticallyCheck(_updateSnapshot);
             StatusMessage = "Ready";
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
         }
         catch (Exception ex)
         {
@@ -188,6 +331,11 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         {
             IsBusy = false;
         }
+
+        if (scheduleAutomaticUpdateCheck && !_disposed)
+        {
+            _ = RefreshUpdatesCoreAsync(UpdateCheckReason.Automatic);
+        }
     }
 
     public bool HasAcceptedSourceAgreements
@@ -196,12 +344,30 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _hasAcceptedSourceAgreements, value);
     }
 
-    public Task SearchAsync() => SearchCoreAsync(HasAcceptedSourceAgreements);
+    public Task SearchAsync() => SearchCoreAsync();
 
-    public Task SearchAcceptingSourceAgreementsAsync() =>
-        SearchCoreAsync(acceptSourceAgreements: true);
+    public Task SearchAcceptingSourceAgreementsAsync(
+        IEnumerable<PackageSourceStatus> acceptedSources)
+    {
+        ArgumentNullException.ThrowIfNull(acceptedSources);
+        foreach (var source in acceptedSources)
+        {
+            if (string.IsNullOrWhiteSpace(source.Id)
+                || string.IsNullOrWhiteSpace(source.AgreementFingerprint))
+            {
+                continue;
+            }
 
-    private async Task SearchCoreAsync(bool acceptSourceAgreements)
+            _acceptedSourceAgreementFingerprints[source.Id] = source.AgreementFingerprint;
+            ApplicationData.Current.LocalSettings.Values[
+                $"sourceAgreementConsent:{source.Id}"] = source.AgreementFingerprint;
+        }
+
+        HasAcceptedSourceAgreements = _acceptedSourceAgreementFingerprints.Count > 0;
+        return SearchCoreAsync();
+    }
+
+    private async Task SearchCoreAsync()
     {
         if (!IsReady)
         {
@@ -233,7 +399,8 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                 {
                     SearchText = searchText,
                     Limit = 100,
-                    AcceptSourceAgreements = acceptSourceAgreements
+                    AcceptedSourceAgreementFingerprints =
+                        new Dictionary<string, string>(_acceptedSourceAgreementFingerprints)
                 },
                 cancellationToken).ConfigureAwait(true);
 
@@ -241,10 +408,6 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
 
             ReplaceAll(SearchResults, result.Packages);
             ReplaceAll(SourceStatuses, result.Sources);
-            if (acceptSourceAgreements)
-            {
-                HasAcceptedSourceAgreements = true;
-            }
             IsSearchTruncated = result.IsTruncated;
             StatusMessage = result.Packages.Count == 0
                 ? "No packages matched this search."
@@ -278,7 +441,13 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         StatusMessage = "Refreshing installed packages and updates…";
         try
         {
-            await RefreshAllCoreAsync().ConfigureAwait(true);
+            var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
+            var sourcesTask = _wingetClient.GetSourcesAsync(_lifetimeCancellation.Token);
+            var updatesTask = RefreshUpdatesCoreAsync(UpdateCheckReason.Manual);
+            await Task.WhenAll(installedTask, sourcesTask).ConfigureAwait(true);
+            ApplyInstalledApps(await installedTask.ConfigureAwait(true));
+            ReplaceAll(SourceStatuses, await sourcesTask.ConfigureAwait(true));
+            await updatesTask.ConfigureAwait(true);
             StatusMessage = "Package information is up to date.";
         }
         catch (Exception ex)
@@ -291,11 +460,157 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         }
     }
 
+    public Task RefreshDiscoverAsync() => SearchAsync();
+
+    public async Task RefreshInstalledAsync()
+    {
+        if (!IsReady || IsBusy)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        StatusMessage = "Refreshing installed packages…";
+        try
+        {
+            ApplyInstalledApps(await LoadInstalledAppsAsync(_lifetimeCancellation.Token).ConfigureAwait(true));
+            StatusMessage = "Installed packages are up to date.";
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Installed package refresh failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    public Task RefreshUpdatesAsync() => RefreshUpdatesCoreAsync(UpdateCheckReason.Manual);
+
+    public async Task RefreshSourcesAsync()
+    {
+        if (!IsReady || IsBusy)
+        {
+            return;
+        }
+
+        IsBusy = true;
+        StatusMessage = "Refreshing package sources…";
+        try
+        {
+            ReplaceAll(
+                SourceStatuses,
+                await _wingetClient.GetSourcesAsync(_lifetimeCancellation.Token).ConfigureAwait(true));
+            StatusMessage = "Package sources are up to date.";
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Source refresh failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    public async Task RefreshManagedSourcesAsync()
+    {
+        if (_sourceManagementService is null || IsManagingSources)
+        {
+            return;
+        }
+
+        IsManagingSources = true;
+        try
+        {
+            var capabilitiesTask = _sourceManagementService.GetSourceManagementCapabilitiesAsync(
+                _lifetimeCancellation.Token);
+            var sourcesTask = _sourceManagementService.GetSourceDetailsAsync(
+                _lifetimeCancellation.Token);
+            await Task.WhenAll(capabilitiesTask, sourcesTask).ConfigureAwait(true);
+            SourceManagementCapabilities = await capabilitiesTask.ConfigureAwait(true);
+            ReplaceAll(ManagedSources, await sourcesTask.ConfigureAwait(true));
+            StatusMessage = "Package sources are up to date.";
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Source refresh failed: {ex.Message}";
+        }
+        finally
+        {
+            IsManagingSources = false;
+        }
+    }
+
+    public async Task<SourceOperationResult?> RefreshManagedSourceAsync(string sourceName)
+    {
+        if (_sourceManagementService is null || IsManagingSources)
+        {
+            return null;
+        }
+
+        IsManagingSources = true;
+        try
+        {
+            var result = await _sourceManagementService.RefreshSourceAsync(
+                sourceName,
+                cancellationToken: _lifetimeCancellation.Token).ConfigureAwait(true);
+            StatusMessage = result.Message;
+            return result;
+        }
+        finally
+        {
+            IsManagingSources = false;
+        }
+    }
+
     public Task SelectPackageAsync(PackageSummary? package) =>
-        SelectPackageCoreAsync(package, HasAcceptedSourceAgreements);
+        SelectPackageCoreAsync(
+            package,
+            package is not null && IsSourceAgreementAccepted(package.Key.SourceId));
 
     public Task SelectPackageAcceptingSourceAgreementsAsync(PackageSummary package) =>
         SelectPackageCoreAsync(package, acceptSourceAgreements: true);
+
+    public void AcceptPackageSourceAgreement(
+        PackageSummary package,
+        IReadOnlyList<PackageAgreement> agreements)
+    {
+        var snapshot = SourceAgreementSnapshot.Create(package.Key.SourceId, agreements);
+        _acceptedSourceAgreementFingerprints[package.Key.SourceId] = snapshot.Fingerprint;
+        ApplicationData.Current.LocalSettings.Values[
+            $"sourceAgreementConsent:{package.Key.SourceId}"] = snapshot.Fingerprint;
+        HasAcceptedSourceAgreements = true;
+    }
+
+    public bool IsSourceAgreementAccepted(string sourceId)
+    {
+        if (!_acceptedSourceAgreementFingerprints.TryGetValue(sourceId, out var accepted))
+        {
+            return false;
+        }
+
+        var current = SourceStatuses.FirstOrDefault(source => string.Equals(
+            source.Id,
+            sourceId,
+            StringComparison.OrdinalIgnoreCase));
+        return current is not null
+            && !string.IsNullOrWhiteSpace(current.AgreementFingerprint)
+            && string.Equals(
+                accepted,
+                current.AgreementFingerprint,
+                StringComparison.Ordinal);
+    }
 
     private async Task SelectPackageCoreAsync(
         PackageSummary? package,
@@ -313,7 +628,12 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         {
             SelectedDetails = await _wingetClient.GetPackageDetailsAsync(
                 package.Key,
-                new InstallPreferences { AcceptSourceAgreements = acceptSourceAgreements }).ConfigureAwait(true);
+                new InstallPreferences
+                {
+                    AcceptSourceAgreements = acceptSourceAgreements,
+                    AcceptedSourceAgreementFingerprint =
+                        _acceptedSourceAgreementFingerprints.GetValueOrDefault(package.Key.SourceId)
+                }).ConfigureAwait(true);
             if (acceptSourceAgreements)
             {
                 HasAcceptedSourceAgreements = true;
@@ -340,6 +660,8 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         var preferences = new InstallPreferences
         {
             AcceptSourceAgreements = acceptedSourceAgreements,
+            AcceptedSourceAgreementFingerprint =
+                _acceptedSourceAgreementFingerprints.GetValueOrDefault(package.Key.SourceId),
             AcceptPackageAgreements = acceptedPackageAgreements,
             Scope = scope,
             Architecture = architecture
@@ -357,20 +679,91 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
 
     public bool TryCancelOperation(Guid operationId) => _operationQueue.TryCancel(operationId);
 
+    public Guid EnqueueMsixRemoval(InstalledApp app, string packageFullName)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageFullName);
+        var installation = app.Installations.FirstOrDefault(item =>
+            string.Equals(item.PackageFullName, packageFullName, StringComparison.OrdinalIgnoreCase));
+        var familyName = installation?.Aliases
+            .FirstOrDefault(alias => alias.Kind == InstalledAppAliasKind.PackageFamilyName)?.Value
+            ?? string.Empty;
+        return _operationQueue.Enqueue(new PackageOperation
+        {
+            Kind = PackageOperationKind.Uninstall,
+            DisplayName = app.Name,
+            Target = new MsixTarget
+            {
+                PackageFullName = packageFullName,
+                PackageFamilyName = familyName
+            }
+        });
+    }
+
     public void ClearHistory() => _operationQueue.ClearHistory();
 
     public void SetStatusMessage(string message) => StatusMessage = message;
 
-    private async Task RefreshAllCoreAsync()
+    public void SetBackgroundMonitoringState(BackgroundMonitoringState state)
     {
-        var installedTask = _wingetClient.GetInstalledPackagesAsync();
-        var updatesTask = _wingetClient.GetAvailableUpdatesAsync();
-        var sourcesTask = _wingetClient.GetSourcesAsync();
-        await Task.WhenAll(installedTask, updatesTask, sourcesTask).ConfigureAwait(true);
+        WindowsIntegrationCapabilities = WindowsIntegrationCapabilities with
+        {
+            BackgroundMonitoringState = state
+        };
+    }
 
-        ReplaceAll(InstalledPackages, await installedTask.ConfigureAwait(true));
-        ReplaceAll(AvailableUpdates, await updatesTask.ConfigureAwait(true));
-        ReplaceAll(SourceStatuses, await sourcesTask.ConfigureAwait(true));
+    private void UpdateWindowsIntegrationCapabilities()
+    {
+        WindowsIntegrationCapabilities = WindowsIntegrationCapabilities with
+        {
+            SupportsPackageRepair = Capabilities.SupportsPackageRepair,
+            SupportsSourceRefresh = SourceManagementCapabilities.SupportsRefresh,
+            SupportsSourceMutation = SourceManagementCapabilities.SupportsAdd
+                && SourceManagementCapabilities.SupportsRemove
+                && SourceManagementCapabilities.SupportsResetOne,
+            SupportsSourceExplicitEdit = SourceManagementCapabilities.SupportsExplicitEdit
+        };
+    }
+
+    private async Task RefreshUpdatesCoreAsync(UpdateCheckReason reason)
+    {
+        if (!IsReady || _disposed)
+        {
+            return;
+        }
+
+        UpdatesCheckState = UpdateCheckState.Checking;
+        UpdateCheckError = null;
+        try
+        {
+            var execution = await _updateScanWorker.RunAsync(
+                reason,
+                isForegroundWindowActive: true,
+                SourceStatuses.ToArray(),
+                _lifetimeCancellation.Token).ConfigureAwait(true);
+            var result = execution.Check;
+            _updateSnapshot = result.Snapshot;
+            ApplyUpdateSnapshot(result.Snapshot, result.State);
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            UpdatesCheckState = UpdateCheckState.Failed;
+            UpdateCheckError = ex.Message;
+        }
+    }
+
+    private sealed class NullUpdateNotificationSink : IUpdateNotificationSink
+    {
+        public Task ApplyAsync(
+            UpdateNotificationDecision decision,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
     }
 
     private void OnOperationQueueChanged(object? sender, OperationQueueChangedEventArgs e)
@@ -391,15 +784,35 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
 
     private async Task RefreshAfterMutationAsync()
     {
+        Exception? installedRefreshError = null;
+        var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
+        var updatesTask = RefreshUpdatesCoreAsync(UpdateCheckReason.PackageMutation);
+
         try
         {
-            await RefreshAllCoreAsync().ConfigureAwait(true);
-            StatusMessage = "Installed packages and updates were refreshed.";
+            ApplyInstalledApps(await installedTask.ConfigureAwait(true));
         }
         catch (Exception ex)
         {
-            StatusMessage = $"The operation finished, but refresh failed: {ex.Message}";
+            installedRefreshError = ex;
         }
+
+        await updatesTask.ConfigureAwait(true);
+        StatusMessage = installedRefreshError is null
+            ? "Installed packages and updates were refreshed."
+            : $"The operation finished, but installed package refresh failed: {installedRefreshError.Message}";
+    }
+
+    private void ApplyUpdateSnapshot(UpdateSnapshot? snapshot, UpdateCheckState state)
+    {
+        if (snapshot is not null)
+        {
+            ReplaceAll(AvailableUpdates, snapshot.Updates);
+        }
+
+        LastUpdateCheckAt = snapshot?.LastAttemptAt;
+        UpdateCheckError = snapshot?.LastError;
+        UpdatesCheckState = state;
     }
 
     private void ApplyQueueSnapshot(OperationQueueSnapshot snapshot)
@@ -409,6 +822,56 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         ReplaceAll(OperationHistory, snapshot.History);
         OnPropertyChanged(nameof(HasActiveOperation));
         OnPropertyChanged(nameof(ActivitySummary));
+    }
+
+    private async Task<InstalledLoadResult> LoadInstalledAppsAsync(CancellationToken cancellationToken)
+    {
+        if (_installedAppInventory is null)
+        {
+            var packages = await _wingetClient.GetInstalledPackagesAsync(cancellationToken).ConfigureAwait(false);
+            return new InstalledLoadResult(packages, [], []);
+        }
+
+        var snapshot = await _installedAppInventory.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        var wingetPackages = snapshot.Apps
+            .SelectMany(app => app.Installations
+                .Where(installation => installation.WingetPackage is not null)
+                .Select(installation => new PackageSummary
+                {
+                    Key = installation.WingetPackage!,
+                    Name = app.Name,
+                    Publisher = app.Publisher,
+                    InstalledVersion = installation.Version,
+                    SourceName = installation.ProviderId,
+                    Status = PackageStatus.Installed
+                }))
+            .GroupBy(package => package.Key)
+            .Select(group => group.First())
+            .ToArray();
+        return new InstalledLoadResult(wingetPackages, snapshot.Apps, snapshot.Providers);
+    }
+
+    private void ApplyInstalledApps(InstalledLoadResult result)
+    {
+        ReplaceAll(InstalledPackages, result.WingetPackages);
+        ReplaceAll(InstalledApps, result.Apps);
+        ReplaceAll(InstalledAppProviders, result.Providers);
+    }
+
+    private void LoadSourceAgreementConsents()
+    {
+        const string prefix = "sourceAgreementConsent:";
+        foreach (var setting in ApplicationData.Current.LocalSettings.Values)
+        {
+            if (setting.Key.StartsWith(prefix, StringComparison.Ordinal)
+                && setting.Value is string fingerprint
+                && !string.IsNullOrWhiteSpace(fingerprint))
+            {
+                _acceptedSourceAgreementFingerprints[setting.Key[prefix.Length..]] = fingerprint;
+            }
+        }
+
+        HasAcceptedSourceAgreements = _acceptedSourceAgreementFingerprints.Count > 0;
     }
 
     private static void ReplaceAll<T>(ObservableCollection<T> target, IEnumerable<T> source)
@@ -438,8 +901,14 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         }
 
         _disposed = true;
+        _lifetimeCancellation.Cancel();
         _searchCancellation?.Cancel();
         _searchCancellation?.Dispose();
         _operationQueue.Changed -= OnOperationQueueChanged;
     }
+
+    private sealed record InstalledLoadResult(
+        IReadOnlyList<PackageSummary> WingetPackages,
+        IReadOnlyList<InstalledApp> Apps,
+        IReadOnlyList<InstalledAppProviderStatus> Providers);
 }

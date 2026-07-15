@@ -71,39 +71,47 @@ try {
         -Expected 'https://github.com/nativepapaya/package-pilot/releases/latest/download/PackagePilot.appinstaller' `
         -Message 'App Installer release URI mismatch.'
 
-    $mainPackage = $document.SelectSingleNode('/ai:AppInstaller/ai:MainPackage', $namespaces)
-    Assert-True -Condition ($null -ne $mainPackage) -Message 'MainPackage is missing.'
-    Assert-Equal -Actual $mainPackage.GetAttribute('Name') -Expected 'PackagePilot.Desktop' -Message 'Main package name mismatch.'
-    Assert-Equal -Actual $mainPackage.GetAttribute('Publisher') -Expected 'CN=PackagePilot.Dev' -Message 'Main package publisher mismatch.'
-    Assert-Equal -Actual $mainPackage.GetAttribute('Version') -Expected $testVersion -Message 'Main package version mismatch.'
-    Assert-Equal -Actual $mainPackage.GetAttribute('ProcessorArchitecture') -Expected 'x64' -Message 'Main package architecture mismatch.'
-    Assert-Equal -Actual $mainPackage.GetAttribute('Uri') `
-        -Expected 'https://github.com/nativepapaya/package-pilot/releases/latest/download/PackagePilot.msix' `
-        -Message 'Main package release URI mismatch.'
+    $mainBundle = $document.SelectSingleNode('/ai:AppInstaller/ai:MainBundle', $namespaces)
+    Assert-True -Condition ($null -ne $mainBundle) -Message 'MainBundle is missing.'
+    Assert-Equal -Actual $mainBundle.GetAttribute('Name') -Expected 'PackagePilot.Desktop' -Message 'Main bundle name mismatch.'
+    Assert-Equal -Actual $mainBundle.GetAttribute('Publisher') -Expected 'CN=PackagePilot.Dev' -Message 'Main bundle publisher mismatch.'
+    Assert-Equal -Actual $mainBundle.GetAttribute('Version') -Expected $testVersion -Message 'Main bundle version mismatch.'
+    Assert-Equal -Actual $mainBundle.GetAttribute('ProcessorArchitecture') -Expected '' -Message 'Main bundle must not pin an architecture.'
+    Assert-Equal -Actual $mainBundle.GetAttribute('Uri') `
+        -Expected 'https://github.com/nativepapaya/package-pilot/releases/latest/download/PackagePilot.msixbundle' `
+        -Message 'Main bundle release URI mismatch.'
 
-    $runtimePackage = $document.SelectSingleNode('/ai:AppInstaller/ai:Dependencies/ai:Package', $namespaces)
-    Assert-True -Condition ($null -ne $runtimePackage) -Message 'Windows App Runtime dependency is missing.'
-    Assert-Equal -Actual $runtimePackage.GetAttribute('Name') -Expected 'Microsoft.WindowsAppRuntime.2' -Message 'Runtime package name mismatch.'
-    Assert-Equal -Actual $runtimePackage.GetAttribute('Publisher') `
-        -Expected 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' `
-        -Message 'Runtime package publisher mismatch.'
-    Assert-Equal -Actual $runtimePackage.GetAttribute('Version') -Expected '2.2.0.0' -Message 'Runtime package version mismatch.'
-    Assert-Equal -Actual $runtimePackage.GetAttribute('ProcessorArchitecture') -Expected 'x64' -Message 'Runtime package architecture mismatch.'
-    Assert-Equal -Actual $runtimePackage.GetAttribute('Uri') `
-        -Expected 'https://github.com/nativepapaya/package-pilot/releases/latest/download/Microsoft.WindowsAppRuntime.2.msix' `
-        -Message 'Runtime package release URI mismatch.'
+    $runtimePackages = @($document.SelectNodes('/ai:AppInstaller/ai:Dependencies/ai:Package', $namespaces))
+    Assert-Equal -Actual $runtimePackages.Count -Expected 2 -Message 'Both Windows App Runtime dependencies are required.'
+    $expectedRuntimeUris = @{
+        x64 = 'https://github.com/nativepapaya/package-pilot/releases/latest/download/Microsoft.WindowsAppRuntime.2.x64.msix'
+        arm64 = 'https://github.com/nativepapaya/package-pilot/releases/latest/download/Microsoft.WindowsAppRuntime.2.arm64.msix'
+    }
+    foreach ($runtimePackage in $runtimePackages) {
+        $architecture = $runtimePackage.GetAttribute('ProcessorArchitecture')
+        Assert-True -Condition $expectedRuntimeUris.ContainsKey($architecture) `
+            -Message "Unexpected runtime package architecture '$architecture'."
+        Assert-Equal -Actual $runtimePackage.GetAttribute('Name') -Expected 'Microsoft.WindowsAppRuntime.2' -Message 'Runtime package name mismatch.'
+        Assert-Equal -Actual $runtimePackage.GetAttribute('Publisher') `
+            -Expected 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' `
+            -Message 'Runtime package publisher mismatch.'
+        Assert-Equal -Actual $runtimePackage.GetAttribute('Version') -Expected '2.2.0.0' -Message 'Runtime package version mismatch.'
+        Assert-Equal -Actual $runtimePackage.GetAttribute('Uri') `
+            -Expected $expectedRuntimeUris[$architecture] `
+            -Message 'Runtime package release URI mismatch.'
+    }
 
     $onLaunch = $document.SelectSingleNode('/ai:AppInstaller/ai:UpdateSettings/ai:OnLaunch', $namespaces)
     Assert-True -Condition ($null -ne $onLaunch) -Message 'OnLaunch update settings are missing.'
-    Assert-Equal -Actual $onLaunch.GetAttribute('HoursBetweenUpdateChecks') -Expected '0' -Message 'Update check interval mismatch.'
-    Assert-Equal -Actual $onLaunch.GetAttribute('ShowPrompt') -Expected 'true' -Message 'Update prompt setting mismatch.'
+    Assert-Equal -Actual $onLaunch.GetAttribute('HoursBetweenUpdateChecks') -Expected '24' -Message 'Update check interval mismatch.'
+    Assert-Equal -Actual $onLaunch.GetAttribute('ShowPrompt') -Expected 'false' -Message 'Update prompt setting mismatch.'
     Assert-Equal -Actual $onLaunch.GetAttribute('UpdateBlocksActivation') -Expected 'false' -Message 'Launch-blocking setting mismatch.'
 
     $backgroundTask = $document.SelectSingleNode('/ai:AppInstaller/ai:UpdateSettings/ai:AutomaticBackgroundTask', $namespaces)
     Assert-True -Condition ($null -ne $backgroundTask) -Message 'Automatic background update task is missing.'
 
     $childOrder = @($appInstaller.ChildNodes | Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element } | ForEach-Object LocalName)
-    Assert-Equal -Actual ($childOrder -join ',') -Expected 'MainPackage,Dependencies,UpdateSettings' `
+    Assert-Equal -Actual ($childOrder -join ',') -Expected 'MainBundle,Dependencies,UpdateSettings' `
         -Message 'App Installer child element order mismatch.'
 
     $invalidVersionWasRejected = $false

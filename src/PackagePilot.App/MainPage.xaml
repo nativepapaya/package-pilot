@@ -44,6 +44,11 @@
                     <FontIcon Glyph="&#xE823;" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
+            <NavigationViewItem Content="Sources" Tag="sources">
+                <NavigationViewItem.Icon>
+                    <FontIcon Glyph="&#xE774;" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
         </NavigationView.MenuItems>
 
         <Grid>

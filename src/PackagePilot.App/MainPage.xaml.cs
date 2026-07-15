@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Navigation;
 using PackagePilot.App.ViewModels;
 using PackagePilot.App.Views;
+using PackagePilot.Core.Abstractions;
 using PackagePilot.Core.Models;
 using Windows.System;
 using Windows.Storage;
@@ -19,20 +20,29 @@ public sealed partial class MainPage : Page
     private InstalledPage? _installedPage;
     private UpdatesPage? _updatesPage;
     private ActivityPage? _activityPage;
+    private SourcesPage? _sourcesPage;
     private SettingsPage? _settingsPage;
+    private AppActivationRequest? _pendingActivation;
     private bool _initialized;
+    private bool _activationReady;
     private bool _syncScheduled;
     private bool _synchronizingNavigationSelection;
+    private readonly IPrivilegedSourceManagementBroker? _sourceManagementBroker;
 
-    public MainPage(ShellViewModel viewModel)
+    public MainPage(
+        ShellViewModel viewModel,
+        IPrivilegedSourceManagementBroker? sourceManagementBroker = null)
     {
         ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+        _sourceManagementBroker = sourceManagementBroker;
         InitializeComponent();
 
         ContentFrame.CacheSize = 8;
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
         SubscribeToCollection(ViewModel.SearchResults);
         SubscribeToCollection(ViewModel.InstalledPackages);
+        SubscribeToCollection(ViewModel.InstalledApps);
+        SubscribeToCollection(ViewModel.InstalledAppProviders);
         SubscribeToCollection(ViewModel.AvailableUpdates);
         SubscribeToCollection(ViewModel.SourceStatuses);
         SubscribeToCollection(ViewModel.PendingOperations);
@@ -42,12 +52,25 @@ public sealed partial class MainPage : Page
         AddNavigationAccelerator(VirtualKey.Number2, "installed");
         AddNavigationAccelerator(VirtualKey.Number3, "updates");
         AddNavigationAccelerator(VirtualKey.Number4, "activity");
-        AddNavigationAccelerator(VirtualKey.Number5, "settings");
+        AddNavigationAccelerator(VirtualKey.Number5, "sources");
+        AddNavigationAccelerator(VirtualKey.Number6, "settings");
         AddGlobalAccelerator(VirtualKey.R, () => OnRefreshRequested(this, EventArgs.Empty));
         AddGlobalAccelerator(VirtualKey.F, FocusDiscoverSearch);
     }
 
     public ShellViewModel ViewModel { get; }
+
+    public Task ActivateAsync(AppActivationRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (!_activationReady)
+        {
+            _pendingActivation = request;
+            return Task.CompletedTask;
+        }
+
+        return ApplyActivationAsync(request);
+    }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -58,12 +81,46 @@ public sealed partial class MainPage : Page
 
         _initialized = true;
         ApplyStoredTheme();
-        NavigateTo("discover");
+        var initialActivation = _pendingActivation;
+        _pendingActivation = null;
+        NavigateTo(ToNavigationTag(initialActivation?.Destination ?? AppDestination.Discover));
         UpdateShellChrome();
         await ViewModel.InitializeAsync();
+        _activationReady = true;
+        await ApplyActivationAsync(_pendingActivation ?? initialActivation ?? new AppActivationRequest());
+        _pendingActivation = null;
         UpdateShellChrome();
         SyncViewData();
     }
+
+    private async Task ApplyActivationAsync(AppActivationRequest request)
+    {
+        NavigateTo(ToNavigationTag(request.Destination));
+
+        if (!string.IsNullOrWhiteSpace(request.SearchQuery))
+        {
+            ViewModel.SearchText = request.SearchQuery;
+            _discoverPage?.SetSearchQuery(request.SearchQuery);
+            await ViewModel.SearchAsync();
+            SyncViewData();
+        }
+
+        if (request.CheckForUpdates)
+        {
+            await ViewModel.RefreshUpdatesAsync();
+            SyncViewData();
+        }
+    }
+
+    private static string ToNavigationTag(AppDestination destination) => destination switch
+    {
+        AppDestination.Installed => "installed",
+        AppDestination.Updates => "updates",
+        AppDestination.Activity => "activity",
+        AppDestination.Settings => "settings",
+        AppDestination.Sources => "sources",
+        _ => "discover"
+    };
 
     private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
@@ -91,6 +148,7 @@ public sealed partial class MainPage : Page
             "installed" => typeof(InstalledPage),
             "updates" => typeof(UpdatesPage),
             "activity" => typeof(ActivityPage),
+            "sources" => typeof(SourcesPage),
             "settings" => typeof(SettingsPage),
             _ => typeof(DiscoverPage)
         };
@@ -170,6 +228,20 @@ public sealed partial class MainPage : Page
                     page.ClearCompletedRequested += OnClearCompletedRequested;
                 }
                 break;
+            case SourcesPage page:
+                if (!ReferenceEquals(_sourcesPage, page))
+                {
+                    _sourcesPage = page;
+                    page.NavigationCacheMode = NavigationCacheMode.Required;
+                    page.RefreshRequested += OnManagedSourcesRefreshRequested;
+                    page.RefreshSourceRequested += OnSourceRefreshRequested;
+                    page.AddRequested += OnSourceAddRequested;
+                    page.RemoveRequested += OnSourceRemoveRequested;
+                    page.ResetRequested += OnSourceResetRequested;
+                    page.ToggleExplicitRequested += OnSourceToggleExplicitRequested;
+                    _ = LoadManagedSourcesAsync();
+                }
+                break;
             case SettingsPage page:
                 if (!ReferenceEquals(_settingsPage, page))
                 {
@@ -202,19 +274,32 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var sourceAgreements = ViewModel.SourceStatuses
-            .SelectMany(source => source.Agreements)
-            .GroupBy(agreement => agreement.Id, StringComparer.Ordinal)
-            .Select(group => group.First())
+        var sourcesRequiringConsent = ViewModel.SourceStatuses
+            .Where(source => source.Agreements.Count > 0
+                && !string.IsNullOrWhiteSpace(source.AgreementFingerprint))
             .ToArray();
-        if (sourceAgreements.Length > 0
-            && await ConfirmAgreementSetAsync(
-                "WinGet source agreements",
-                "One or more configured sources require consent before they can return packages.",
-                sourceAgreements,
-                "Accept and search again"))
+        if (sourcesRequiringConsent.Length > 0)
         {
-            await ViewModel.SearchAcceptingSourceAgreementsAsync();
+            var acceptedSources = new List<PackageSourceStatus>();
+            foreach (var source in sourcesRequiringConsent)
+            {
+                if (!await ConfirmAgreementSetAsync(
+                        $"Terms for {source.Name}",
+                        "These exact source terms must be accepted before this source can return packages. A terms change will require consent again.",
+                        source.Agreements,
+                        "Accept and continue"))
+                {
+                    acceptedSources.Clear();
+                    break;
+                }
+
+                acceptedSources.Add(source);
+            }
+
+            if (acceptedSources.Count == sourcesRequiringConsent.Length)
+            {
+                await ViewModel.SearchAcceptingSourceAgreementsAsync(acceptedSources);
+            }
         }
 
         _discoverPage?.SetLoading(false);
@@ -227,6 +312,10 @@ public sealed partial class MainPage : Page
         var package = FindPackage(e.Package);
         if (package is null)
         {
+            if (sender is InstalledPage installedPage && e.Package.InstalledAppId is not null)
+            {
+                installedPage.ShowPackageDetails(e.Package);
+            }
             return;
         }
 
@@ -245,12 +334,350 @@ public sealed partial class MainPage : Page
 
     private async void OnRefreshRequested(object? sender, EventArgs e)
     {
-        await ViewModel.RefreshAllAsync();
+        var refreshTarget = sender is DiscoverPage or InstalledPage or UpdatesPage
+            ? sender
+            : ContentFrame.Content;
+
+        switch (refreshTarget)
+        {
+            case DiscoverPage:
+                await ViewModel.RefreshDiscoverAsync();
+                break;
+            case InstalledPage:
+                await ViewModel.RefreshInstalledAsync();
+                break;
+            case UpdatesPage:
+                await ViewModel.RefreshUpdatesAsync();
+                break;
+            case SourcesPage:
+                await ViewModel.RefreshManagedSourcesAsync();
+                break;
+            case SettingsPage:
+                await ViewModel.RefreshSourcesAsync();
+                break;
+            default:
+                var destination = (ShellNavigation.SelectedItem as NavigationViewItem)?.Tag as string;
+                switch (destination)
+                {
+                    case "installed":
+                        await ViewModel.RefreshInstalledAsync();
+                        break;
+                    case "updates":
+                        await ViewModel.RefreshUpdatesAsync();
+                        break;
+                    case "settings":
+                        await ViewModel.RefreshSourcesAsync();
+                        break;
+                    case "sources":
+                        await ViewModel.RefreshManagedSourcesAsync();
+                        break;
+                    case "discover":
+                        await ViewModel.RefreshDiscoverAsync();
+                        break;
+                    default:
+                        ViewModel.SetStatusMessage("This page has no refreshable data.");
+                        break;
+                }
+                break;
+        }
+
+        SyncViewData();
+    }
+
+    private async Task LoadManagedSourcesAsync()
+    {
+        _sourcesPage?.SetLoading(true);
+        await ViewModel.RefreshManagedSourcesAsync();
+        _sourcesPage?.SetLoading(false);
+        SyncViewData();
+    }
+
+    private async void OnManagedSourcesRefreshRequested(object? sender, EventArgs e) =>
+        await LoadManagedSourcesAsync();
+
+    private async void OnSourceRefreshRequested(object? sender, SourceCommandRequestedEventArgs e)
+    {
+        _sourcesPage?.SetLoading(true);
+        var result = await ViewModel.RefreshManagedSourceAsync(e.Source.Name);
+        await ViewModel.RefreshManagedSourcesAsync();
+        _sourcesPage?.SetLoading(false);
+        if (result is not null)
+        {
+            _sourcesPage?.ShowStatus(
+                result.IsSuccess ? "Source refreshed" : "Source refresh failed",
+                result.Message,
+                result.IsSuccess ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
+        }
+        SyncViewData();
+    }
+
+    private async void OnSourceAddRequested(object? sender, EventArgs e)
+    {
+        if (!CanRunSourceMutation(ViewModel.SourceManagementCapabilities.SupportsAdd))
+        {
+            return;
+        }
+
+        var nameBox = new TextBox
+        {
+            Header = "Name",
+            PlaceholderText = "contoso"
+        };
+        var locationBox = new TextBox
+        {
+            Header = "HTTPS or UNC location",
+            PlaceholderText = "https://packages.example.com/cache"
+        };
+        var typeBox = new ComboBox
+        {
+            Header = "Source type",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            ItemsSource = new[] { "PreIndexed", "REST" },
+            SelectedIndex = 0
+        };
+        var explicitBox = new CheckBox
+        {
+            Content = "Use only when explicitly selected",
+            IsChecked = true
+        };
+        var trustedBox = new CheckBox
+        {
+            Content = "Mark this source as trusted",
+            IsChecked = false
+        };
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(new TextBlock
+        {
+            Text = "Custom sources are untrusted and excluded from ordinary discovery by default. Package Pilot never stores custom headers.",
+            TextWrapping = TextWrapping.Wrap
+        });
+        content.Children.Add(nameBox);
+        content.Children.Add(locationBox);
+        content.Children.Add(typeBox);
+        content.Children.Add(explicitBox);
+        content.Children.Add(trustedBox);
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "Add a WinGet source",
+            Content = content,
+            PrimaryButtonText = "Review and add",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        var request = new AddPackageSourceRequest
+        {
+            Name = nameBox.Text.Trim(),
+            Location = locationBox.Text.Trim(),
+            Type = typeBox.SelectedIndex == 1
+                ? PackageSourceType.Rest
+                : PackageSourceType.PreIndexed,
+            IsExplicit = explicitBox.IsChecked == true,
+            TrustLevel = trustedBox.IsChecked == true
+                ? PackageSourceTrustLevel.Trusted
+                : PackageSourceTrustLevel.None
+        };
+        var validation = SourceRequestValidator.Validate(request);
+        if (!validation.IsValid)
+        {
+            _sourcesPage?.ShowStatus(
+                "Source details need attention",
+                string.Join(" ", validation.Errors),
+                InfoBarSeverity.Warning);
+            return;
+        }
+
+        await ExecuteSourceMutationAsync(
+            PrivilegedSourceRequest.Add(request),
+            "Source added");
+    }
+
+    private async void OnSourceRemoveRequested(
+        object? sender,
+        SourceCommandRequestedEventArgs e)
+    {
+        if (!CanRunSourceMutation(
+                ViewModel.SourceManagementCapabilities.SupportsRemove
+                && !IsPredefinedSource(e.Source.Id)))
+        {
+            return;
+        }
+
+        if (!await ConfirmSourceMutationAsync(
+                $"Remove {e.Source.Name}?",
+                "Package Pilot will ask Windows for administrator approval, remove only this named source, and then refresh the source list.",
+                "Remove source"))
+        {
+            return;
+        }
+
+        await ExecuteSourceMutationAsync(
+            PrivilegedSourceRequest.Remove(e.Source.Name),
+            "Source removed");
+    }
+
+    private async void OnSourceResetRequested(
+        object? sender,
+        SourceCommandRequestedEventArgs e)
+    {
+        if (!CanRunSourceMutation(
+                ViewModel.SourceManagementCapabilities.SupportsResetOne
+                && IsPredefinedSource(e.Source.Id)))
+        {
+            return;
+        }
+
+        _sourcesPage?.SetLoading(true);
+        var refresh = await ViewModel.RefreshManagedSourceAsync(e.Source.Name);
+        _sourcesPage?.SetLoading(false);
+        if (refresh is null)
+        {
+            _sourcesPage?.ShowStatus(
+                "Repair stopped",
+                "The named source could not be refreshed.",
+                InfoBarSeverity.Warning);
+            return;
+        }
+
+        var refreshSummary = refresh.IsSuccess
+            ? $"The refresh of {e.Source.Name} completed, but the source still needs repair."
+            : $"The refresh of {e.Source.Name} failed: {refresh.Message}";
+        if (!await ConfirmSourceMutationAsync(
+                $"Reset {e.Source.Name}?",
+                $"{refreshSummary} Reset only this predefined source to its Windows default?",
+                "Reset this source"))
+        {
+            return;
+        }
+
+        await ExecuteSourceMutationAsync(
+            PrivilegedSourceRequest.Reset(e.Source.Name, isConfirmed: true),
+            "Source repaired");
+    }
+
+    private async void OnSourceToggleExplicitRequested(
+        object? sender,
+        SourceCommandRequestedEventArgs e)
+    {
+        if (!CanRunSourceMutation(
+                ViewModel.SourceManagementCapabilities.SupportsExplicitEdit
+                && !IsPredefinedSource(e.Source.Id)))
+        {
+            return;
+        }
+
+        var makeExplicit = !e.Source.IsExplicit;
+        var action = makeExplicit ? "Make explicit" : "Include in discovery";
+        var explanation = makeExplicit
+            ? "This source will be used only when it is selected explicitly."
+            : "This source may participate in ordinary package discovery.";
+        if (!await ConfirmSourceMutationAsync(
+                $"{action}: {e.Source.Name}?",
+                $"{explanation} Windows will request administrator approval.",
+                action))
+        {
+            return;
+        }
+
+        await ExecuteSourceMutationAsync(
+            PrivilegedSourceRequest.EditExplicit(e.Source.Name, makeExplicit),
+            "Source updated");
+    }
+
+    private bool CanRunSourceMutation(bool capabilityAvailable)
+    {
+        if (_sourceManagementBroker is not null && capabilityAvailable)
+        {
+            return true;
+        }
+
+        _sourcesPage?.ShowStatus(
+            "Source change unavailable",
+            _sourceManagementBroker is null
+                ? "The packaged source-administration helper is unavailable."
+                : ViewModel.SourceManagementCapabilities.UnavailableReason
+                  ?? "This version of WinGet or organization policy does not support that change.",
+            InfoBarSeverity.Warning);
+        return false;
+    }
+
+    private bool IsPredefinedSource(string sourceId) =>
+        ViewModel.ManagedSources.FirstOrDefault(source => string.Equals(
+            source.Id,
+            sourceId,
+            StringComparison.Ordinal))?.IsPredefined == true;
+
+    private async Task<bool> ConfirmSourceMutationAsync(
+        string title,
+        string message,
+        string primaryButtonText)
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = title,
+            Content = new TextBlock
+            {
+                Text = message,
+                TextWrapping = TextWrapping.Wrap
+            },
+            PrimaryButtonText = primaryButtonText,
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close
+        };
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+    }
+
+    private async Task ExecuteSourceMutationAsync(
+        PrivilegedSourceRequest request,
+        string successTitle)
+    {
+        if (_sourceManagementBroker is null)
+        {
+            return;
+        }
+
+        _sourcesPage?.SetLoading(true);
+        SourceOperationResult result;
+        try
+        {
+            result = await _sourceManagementBroker.ExecuteElevatedAsync(request);
+        }
+        catch (OperationCanceledException)
+        {
+            _sourcesPage?.ShowStatus(
+                "Source change canceled",
+                "The source was not changed.",
+                InfoBarSeverity.Informational);
+            return;
+        }
+        finally
+        {
+            await ViewModel.RefreshManagedSourcesAsync();
+            _sourcesPage?.SetLoading(false);
+        }
+
+        _sourcesPage?.ShowStatus(
+            result.IsSuccess ? successTitle : "Source change failed",
+            result.Message,
+            result.IsSuccess ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
         SyncViewData();
     }
 
     private async void OnPackageActionRequested(object? sender, PackageActionRequestedEventArgs e)
     {
+        if (e.Package.InstalledActionKind is not null)
+        {
+            await HandleInstalledAppActionAsync(e.Package);
+            return;
+        }
+
         var package = FindPackage(e.Package);
         if (package is null)
         {
@@ -295,6 +722,65 @@ public sealed partial class MainPage : Page
         ViewModel.SetStatusMessage($"{package.Name} was added to the operation queue.");
         UpdateShellChrome();
         SyncViewData();
+    }
+
+    private async Task HandleInstalledAppActionAsync(PackageListItem item)
+    {
+        var app = ViewModel.InstalledApps.FirstOrDefault(candidate =>
+            string.Equals(candidate.Id, item.InstalledAppId, StringComparison.Ordinal));
+        if (app is null || item.InstalledActionKind is not { } actionKind)
+        {
+            ShowPageStatus("Application unavailable", "Refresh Installed and try again.", InfoBarSeverity.Warning);
+            return;
+        }
+
+        switch (actionKind)
+        {
+            case InstalledAppActionKind.UninstallWithWinget:
+                var wingetPackage = FindPackage(item);
+                if (wingetPackage is null || !await ConfirmUninstallAsync(wingetPackage))
+                {
+                    return;
+                }
+
+                ViewModel.EnqueueOperation(wingetPackage, PackageOperationKind.Uninstall);
+                ViewModel.SetStatusMessage($"{app.Name} was added to the operation queue.");
+                break;
+            case InstalledAppActionKind.RemoveMsix:
+                if (string.IsNullOrWhiteSpace(item.PackageFullName)
+                    || !await ConfirmMsixRemovalAsync(app.Name))
+                {
+                    return;
+                }
+
+                ViewModel.EnqueueMsixRemoval(app, item.PackageFullName);
+                ViewModel.SetStatusMessage($"{app.Name} was added to the operation queue.");
+                break;
+            case InstalledAppActionKind.OpenStoreUpdates:
+            case InstalledAppActionKind.OpenInstalledApps:
+                if (item.ActionDestination is not null)
+                {
+                    await Launcher.LaunchUriAsync(item.ActionDestination);
+                }
+                break;
+        }
+
+        UpdateShellChrome();
+        SyncViewData();
+    }
+
+    private async Task<bool> ConfirmMsixRemovalAsync(string appName)
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = $"Uninstall {appName}?",
+            Content = "Windows will remove this MSIX app for the current user. Once removal begins it cannot be cancelled from Package Pilot.",
+            PrimaryButtonText = "Uninstall",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close
+        };
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
     }
 
     private async void OnBulkUpdateRequested(object? sender, BulkPackageActionRequestedEventArgs e)
@@ -412,7 +898,8 @@ public sealed partial class MainPage : Page
         var sourceAgreements = (ViewModel.SelectedDetails?.Agreements ?? [])
             .Where(item => item.Kind == AgreementKind.Source)
             .ToArray();
-        var acceptedSource = ViewModel.HasAcceptedSourceAgreements || sourceAgreements.Length == 0;
+        var acceptedSource = ViewModel.IsSourceAgreementAccepted(package.Key.SourceId)
+            || sourceAgreements.Length == 0;
         if (!acceptedSource)
         {
             acceptedSource = await ConfirmAgreementSetAsync(
@@ -425,6 +912,7 @@ public sealed partial class MainPage : Page
                 return new AgreementAcceptance(false, false, false);
             }
 
+            ViewModel.AcceptPackageSourceAgreement(package, sourceAgreements);
             await ViewModel.SelectPackageAcceptingSourceAgreementsAsync(package);
         }
 
@@ -440,7 +928,8 @@ public sealed partial class MainPage : Page
 
         return new AgreementAcceptance(
             acceptedPackage,
-            ViewModel.HasAcceptedSourceAgreements || (acceptedSource && sourceAgreements.Length > 0),
+            ViewModel.IsSourceAgreementAccepted(package.Key.SourceId)
+                || (acceptedSource && sourceAgreements.Length > 0),
             acceptedPackage && packageAgreements.Length > 0);
     }
 
@@ -509,6 +998,14 @@ public sealed partial class MainPage : Page
 
     private PackageSummary? FindPackage(PackageListItem item)
     {
+        if (item.WingetPackage is { } wingetKey)
+        {
+            return ViewModel.SearchResults
+                .Concat(ViewModel.InstalledPackages)
+                .Concat(ViewModel.AvailableUpdates)
+                .FirstOrDefault(package => package.Key == wingetKey);
+        }
+
         return ViewModel.SearchResults
             .Concat(ViewModel.InstalledPackages)
             .Concat(ViewModel.AvailableUpdates)
@@ -569,12 +1066,19 @@ public sealed partial class MainPage : Page
 
         if (_installedPage is not null)
         {
-            _installedPage.SetPackages(ViewModel.InstalledPackages.Select(item => ToViewItem(item, "Uninstall")));
+            _installedPage.SetPackages(
+                ViewModel.InstalledAppProviders.Count > 0 || ViewModel.InstalledApps.Count > 0
+                    ? ViewModel.InstalledApps.Select(ToViewItem)
+                    : ViewModel.InstalledPackages.Select(item => ToViewItem(item, "Uninstall")));
         }
 
         if (_updatesPage is not null)
         {
             _updatesPage.SetUpdates(ViewModel.AvailableUpdates.Select(item => ToViewItem(item, "Update")));
+            _updatesPage.SetCheckState(
+                ViewModel.UpdatesCheckState,
+                ViewModel.LastUpdateCheckAt,
+                ViewModel.UpdateCheckError);
         }
 
         if (_activityPage is not null)
@@ -591,13 +1095,45 @@ public sealed partial class MainPage : Page
 
         if (_settingsPage is not null)
         {
-            _settingsPage.SetCapabilitySummary(ViewModel.HealthMessage);
+            _settingsPage.SetCapabilitySummary(ViewModel.WindowsCapabilitySummary);
             ReplaceAll(_settingsPage.Sources, ViewModel.SourceStatuses.Select(source => new SourceHealthItem
             {
                 Name = source.Name,
                 Identifier = source.Id,
                 Status = source.Health.ToString(),
                 Detail = source.Message ?? (source.Health == SourceHealth.Healthy ? "Available" : "No diagnostic detail")
+            }));
+        }
+
+
+        if (_sourcesPage is not null)
+        {
+            var capabilities = ViewModel.SourceManagementCapabilities;
+            _sourcesPage.SetCapabilitySummary(capabilities.IsAvailable
+                ? $"WinGet source contract {capabilities.ContractVersion}. Changes request administrator approval."
+                : capabilities.UnavailableReason ?? "Source management is unavailable.");
+            _sourcesPage.SetLoading(ViewModel.IsManagingSources);
+            _sourcesPage.SetCanAdd(capabilities.SupportsAdd);
+            ReplaceAll(_sourcesPage.Sources, ViewModel.ManagedSources.Select(source => new SourceManagementListItem
+            {
+                Id = source.Id,
+                Name = source.Name,
+                Type = source.TypeName,
+                Location = source.Argument,
+                Origin = source.Origin.ToString(),
+                Trust = source.TrustLevel.ToString(),
+                Status = source.Health.ToString(),
+                LastUpdated = source.LastUpdatedAt is { } updated
+                    ? $"Last updated {updated.ToLocalTime():g}"
+                    : "Never updated",
+                AgreementSummary = source.AgreementSnapshot.HasAgreements
+                    ? $"{source.AgreementSnapshot.Agreements.Count} agreement{(source.AgreementSnapshot.Agreements.Count == 1 ? string.Empty : "s")} require exact-term consent"
+                    : "No source agreements",
+                IsExplicit = source.IsExplicit,
+                CanRefresh = capabilities.SupportsRefresh,
+                CanRemove = capabilities.SupportsRemove && !source.IsPredefined,
+                CanReset = capabilities.SupportsResetOne && source.IsPredefined,
+                CanEditExplicit = capabilities.SupportsExplicitEdit && !source.IsPredefined
             }));
         }
 
@@ -643,11 +1179,58 @@ public sealed partial class MainPage : Page
         };
     }
 
+    private static PackageListItem ToViewItem(InstalledApp app)
+    {
+        var action = app.PrimaryAction;
+        var providers = app.Installations
+            .Select(installation => installation.Provider switch
+            {
+                InstalledAppProviderKind.Winget => "WinGet",
+                InstalledAppProviderKind.Msix => installation.IsStoreApp ? "Microsoft Store" : "MSIX",
+                InstalledAppProviderKind.Registry => "Windows registry",
+                _ => installation.ProviderId
+            })
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var scopes = app.Installations
+            .Select(installation => FormatScope(installation.Scope))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        var architectures = app.Installations
+            .Select(installation => FormatArchitecture(installation.Architecture))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        return new PackageListItem
+        {
+            Name = app.Name,
+            Publisher = app.Publisher,
+            PackageId = app.Id,
+            InstalledAppId = app.Id,
+            Source = string.Join(", ", providers),
+            InstalledVersion = app.VersionDisplay,
+            Status = app.HasMultipleVersions ? "Multiple versions" : "Installed",
+            ActionLabel = action?.Label ?? "Managed by Windows",
+            IsActionEnabled = action is not null,
+            InstalledActionKind = action?.Kind,
+            WingetPackage = action?.WingetPackage,
+            PackageFullName = action?.PackageFullName,
+            ActionDestination = action?.Destination,
+            Description = app.Installations.Count == 1
+                ? "One installation was detected."
+                : $"{app.Installations.Count} installations were detected and kept as separate records.",
+            Architecture = string.Join(", ", architectures),
+            Scope = string.Join(", ", scopes),
+            Versions = string.Join(", ", app.Installations
+                .Select(installation => installation.Version)
+                .Where(version => !string.IsNullOrWhiteSpace(version))
+                .Distinct(StringComparer.OrdinalIgnoreCase))
+        };
+    }
+
     private static OperationListItem ToViewItem(OperationQueueEntry entry) => new()
     {
         OperationId = entry.Operation.Id,
         PackageName = entry.Operation.DisplayName,
-        PackageId = entry.Operation.Package.Id,
+        PackageId = entry.Operation.EffectiveTarget?.Id ?? entry.Operation.Package.Id,
         Action = entry.Operation.Kind.ToString(),
         Status = entry.Progress.State.ToString(),
         Detail = entry.Progress.Message ?? (entry.Progress.CanCancel ? "Waiting or downloading" : "The installer controls completion"),
@@ -665,8 +1248,8 @@ public sealed partial class MainPage : Page
     private static OperationListItem ToViewItem(OperationResult result) => new()
     {
         OperationId = result.OperationId,
-        PackageName = result.Package.Id,
-        PackageId = result.Package.Id,
+        PackageName = result.EffectiveTarget?.Id ?? result.Package.Id,
+        PackageId = result.EffectiveTarget?.Id ?? result.Package.Id,
         Action = result.Kind.ToString(),
         Status = result.State.ToString(),
         Detail = result.Error?.Message ?? (result.RebootRequired ? "Restart Windows to complete this operation." : "Completed"),
@@ -787,6 +1370,9 @@ public sealed partial class MainPage : Page
             case UpdatesPage page:
                 page.ShowStatus(title, message, severity);
                 break;
+            case SourcesPage page:
+                page.ShowStatus(title, message, severity);
+                break;
         }
     }
 
@@ -840,6 +1426,7 @@ public sealed partial class MainPage : Page
             InstalledPage => "installed",
             UpdatesPage => "updates",
             ActivityPage => "activity",
+            SourcesPage => "sources",
             SettingsPage => "settings",
             _ => null
         };

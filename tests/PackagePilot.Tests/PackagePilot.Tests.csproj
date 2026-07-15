@@ -25,11 +25,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PackagePilot.Core\PackagePilot.Core.csproj" />
+    <ProjectReference Include="..\..\src\PackagePilot.Windows\PackagePilot.Windows.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="..\..\src\PackagePilot.App\Services\WingetClient.cs" Link="Integration\Adapter\WingetClient.cs" />
-    <Compile Include="..\..\src\PackagePilot.App\Services\WingetClientException.cs" Link="Integration\Adapter\WingetClientException.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\Views\ViewData.cs" Link="App\ViewData.cs" />
   </ItemGroup>
 
 </Project>

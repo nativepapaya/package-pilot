@@ -68,7 +68,15 @@ Assert-True -Condition ($initializer -match '(?m)^\s*KeyExportPolicy\s*=\s*''Non
 Assert-True -Condition ($initializer -match [regex]::Escape("Cert:\LocalMachine\TrustedPeople")) `
     -Message 'The certificate initializer must trust the public certificate in LocalMachine\TrustedPeople.'
 Assert-True -Condition ($publisher -match [regex]::Escape('AppxSignature.p7x')) `
-    -Message 'The manual publisher must validate the MSIX signature container.'
+    -Message 'The manual publisher must validate the MSIX bundle signature container.'
+Assert-True -Condition ($publisher -match 'Get-MsixBundleIdentity') `
+    -Message 'The manual publisher must validate the bundle identity and architecture set.'
+Assert-True -Condition ($publisher -match [regex]::Escape('PackagePilot.msixbundle')) `
+    -Message 'The manual publisher must sign and release the multi-architecture bundle.'
+Assert-True -Condition (
+    $publisher -match [regex]::Escape('Microsoft.WindowsAppRuntime.2.x64.msix') -and
+    $publisher -match [regex]::Escape('Microsoft.WindowsAppRuntime.2.arm64.msix')) `
+    -Message 'The manual publisher must validate both architecture-specific runtime dependencies.'
 Assert-True -Condition ($publisher -match 'Get-AuthenticodeSignature') `
     -Message 'The manual publisher must verify Authenticode signatures.'
 Assert-True -Condition ($publisher -match 'SHA256SUMS\.txt') `
@@ -90,6 +98,11 @@ Assert-True -Condition ($workflow -notmatch '(?i)PACKAGEPILOT_SIGNING_PFX|secret
     -Message 'The hosted Release workflow must not request signing secrets or write access.'
 Assert-True -Condition ($workflow -match 'release-metadata\.json') `
     -Message 'The hosted Release workflow must include release-metadata.json.'
+Assert-True -Condition (
+    $workflow -match [regex]::Escape('New-MsixBundle.ps1') -and
+    $workflow -match [regex]::Escape('win-x64') -and
+    $workflow -match [regex]::Escape('win-arm64')) `
+    -Message 'The hosted Release workflow must build both architectures and create the bundle.'
 Assert-True -Condition ($workflow -match '(?m)^\s*retention-days:\s*30\s*$') `
     -Message 'Unsigned release artifacts must be retained for 30 days.'
 

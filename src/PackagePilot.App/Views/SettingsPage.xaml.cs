@@ -2,6 +2,10 @@ using System.Collections.ObjectModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
+using PackagePilot.App.Services;
+using PackagePilot.Core.Models;
+using PackagePilot.Windows.Services;
+using PackagePilot.Core.Services;
 using Windows.ApplicationModel;
 using Windows.Storage;
 
@@ -10,13 +14,16 @@ namespace PackagePilot.App.Views;
 public sealed partial class SettingsPage : Page
 {
     private readonly ApplicationDataContainer _settings = ApplicationData.Current.LocalSettings;
+    private readonly WindowsBackgroundUpdateRegistrationService _backgroundRegistration = new();
     private bool _isLoading = true;
+    private bool _backgroundStatusLoaded;
 
     public SettingsPage()
     {
         InitializeComponent();
         VersionText.Text = GetCurrentVersionLabel();
         LoadPreferences();
+        Loaded += OnLoaded;
         _isLoading = false;
     }
 
@@ -25,11 +32,46 @@ public sealed partial class SettingsPage : Page
 
     public void SetCapabilitySummary(string summary) => CapabilityText.Text = summary;
 
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_backgroundStatusLoaded)
+        {
+            return;
+        }
+
+        _backgroundStatusLoaded = true;
+        var store = new JsonBackgroundUpdateRunStatusStore(Path.Combine(
+            ApplicationData.Current.LocalFolder.Path,
+            "background-update-status.json"));
+        var status = await store.LoadAsync();
+        if (status is null)
+        {
+            BackgroundStatusText.Text = "No background check has run yet.";
+            return;
+        }
+
+        var localAttempt = status.AttemptedAt.ToLocalTime();
+        BackgroundStatusText.Text = status.State == BackgroundUpdateRunState.Completed
+            ? $"Last background check {localAttempt:g}: {status.UpdateCount} update{(status.UpdateCount == 1 ? string.Empty : "s")} found."
+            : $"Last background attempt {localAttempt:g}: {status.State}.";
+
+        if (status.ForegroundFallbackRequired)
+        {
+            BackgroundMonitoringInfoBar.Title = "Background WinGet access unavailable";
+            BackgroundMonitoringInfoBar.Message = string.IsNullOrWhiteSpace(status.Message)
+                ? "Windows could not activate WinGet in the background host. Package Pilot will defer discovery until the foreground app runs."
+                : $"{status.Message} Package Pilot will defer discovery until the foreground app runs.";
+            BackgroundMonitoringInfoBar.Severity = InfoBarSeverity.Warning;
+            BackgroundMonitoringInfoBar.IsOpen = true;
+        }
+    }
+
     private void LoadPreferences()
     {
         SelectByTag(ThemeBox, ReadString("theme", "system"));
         SelectByTag(ScopeBox, ReadString("installScope", "default"));
         SelectByTag(ArchitectureBox, ReadString("architecture", "auto"));
+        SelectByTag(UpdateCadenceBox, ReadString("updateMonitoringCadence", "daily"));
         ReduceMotionToggle.IsOn = ReadBoolean("reduceMotion", false);
     }
 
@@ -57,6 +99,48 @@ public sealed partial class SettingsPage : Page
     private void OnScopeChanged(object sender, SelectionChangedEventArgs e) => SaveComboSetting("installScope", ScopeBox);
     private void OnArchitectureChanged(object sender, SelectionChangedEventArgs e) => SaveComboSetting("architecture", ArchitectureBox);
 
+    private async void OnUpdateCadenceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isLoading || UpdateCadenceBox.SelectedItem is not ComboBoxItem { Tag: string value })
+        {
+            return;
+        }
+
+        _settings.Values["updateMonitoringCadence"] = value;
+        SettingChanged?.Invoke(this, new SettingChangedEventArgs("updateMonitoringCadence", value));
+
+        var cadence = value switch
+        {
+            "manual" => UpdateMonitoringCadence.Manual,
+            "sixHours" => UpdateMonitoringCadence.EverySixHours,
+            _ => UpdateMonitoringCadence.Daily
+        };
+        UpdateCadenceBox.IsEnabled = false;
+        try
+        {
+            var result = await _backgroundRegistration.ConfigureAsync(cadence);
+            BackgroundMonitoringInfoBar.Title = result.State switch
+            {
+                BackgroundMonitoringState.Registered => "Background monitoring enabled",
+                BackgroundMonitoringState.Disabled => "Manual checks only",
+                BackgroundMonitoringState.Denied => "Background access denied",
+                _ => "Background monitoring unavailable"
+            };
+            BackgroundMonitoringInfoBar.Message = result.Message ?? string.Empty;
+            BackgroundMonitoringInfoBar.Severity = result.State switch
+            {
+                BackgroundMonitoringState.Registered or BackgroundMonitoringState.Disabled => InfoBarSeverity.Success,
+                BackgroundMonitoringState.Denied => InfoBarSeverity.Warning,
+                _ => InfoBarSeverity.Error
+            };
+            BackgroundMonitoringInfoBar.IsOpen = true;
+        }
+        finally
+        {
+            UpdateCadenceBox.IsEnabled = true;
+        }
+    }
+
     private async void OnCheckForUpdatesClick(object sender, RoutedEventArgs e)
     {
         CheckForUpdatesButton.IsEnabled = false;
@@ -67,7 +151,7 @@ public sealed partial class SettingsPage : Page
 
         try
         {
-            var packageManager = new Windows.Management.Deployment.PackageManager();
+            var packageManager = new global::Windows.Management.Deployment.PackageManager();
             var currentPackage = packageManager.FindPackageForUser(string.Empty, Package.Current.Id.FullName);
             if (currentPackage is null)
             {

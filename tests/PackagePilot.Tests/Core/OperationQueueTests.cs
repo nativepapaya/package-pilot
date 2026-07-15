@@ -139,6 +139,112 @@ public sealed class OperationQueueTests
     }
 
     [Fact]
+    public async Task ProgressBurst_CoalescesNotificationsAndKeepsLatestSnapshot()
+    {
+        var burstReported = NewSource();
+        var release = NewSource();
+        var client = new FakeWingetClient
+        {
+            Execute = async (operation, progress, cancellationToken) =>
+            {
+                for (var index = 0; index < 10_000; index++)
+                {
+                    progress?.Report(new OperationProgress
+                    {
+                        OperationId = operation.Id,
+                        State = PackageOperationState.Downloading,
+                        Percent = index / 100d,
+                        Message = "Downloading",
+                        BytesTransferred = index,
+                        BytesTotal = 10_000,
+                        Timestamp = default
+                    });
+                }
+
+                burstReported.TrySetResult();
+                await release.Task.WaitAsync(cancellationToken);
+                return Success(operation);
+            }
+        };
+        await using var queue = new OperationQueue(client, timeProvider: new ManualTimeProvider());
+        var operation = Operation("Package.ProgressBurst");
+        var publishedProgress = new ConcurrentQueue<OperationProgress>();
+        queue.Changed += (_, args) =>
+        {
+            if (args.Snapshot.Current is { } current
+                && current.Operation.Id == operation.Id
+                && current.Progress.State == PackageOperationState.Downloading)
+            {
+                publishedProgress.Enqueue(current.Progress);
+            }
+        };
+
+        queue.Enqueue(operation);
+        await burstReported.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var activeSnapshot = queue.Snapshot.Current;
+        var published = publishedProgress.ToArray();
+
+        release.TrySetResult();
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.NotNull(activeSnapshot);
+        Assert.Equal(99.99d, activeSnapshot.Progress.Percent);
+        Assert.Equal(9_999, activeSnapshot.Progress.BytesTransferred);
+        Assert.Equal(100, published.Length);
+        Assert.Equal(99d, published[^1].Percent);
+        Assert.Equal(9_900, published[^1].BytesTransferred);
+        var publishedLag = activeSnapshot.Progress.Percent.GetValueOrDefault()
+            - published[^1].Percent.GetValueOrDefault();
+        Assert.True(publishedLag is >= 0d and < 1d, $"Published progress lagged by {publishedLag} percentage points.");
+        Assert.True(Assert.Single(queue.Snapshot.History).IsSuccess);
+    }
+
+    [Fact]
+    public async Task ProgressWithinPercentBucket_PublishesAtTenHertz()
+    {
+        var reportsFinished = NewSource();
+        var release = NewSource();
+        var timeProvider = new ManualTimeProvider();
+        var client = new FakeWingetClient
+        {
+            Execute = async (operation, progress, cancellationToken) =>
+            {
+                progress?.Report(Progress(operation, PackageOperationState.Downloading, 10d));
+                progress?.Report(Progress(operation, PackageOperationState.Downloading, 10.1d));
+                timeProvider.Advance(TimeSpan.FromMilliseconds(99));
+                progress?.Report(Progress(operation, PackageOperationState.Downloading, 10.2d));
+                timeProvider.Advance(TimeSpan.FromMilliseconds(1));
+                progress?.Report(Progress(operation, PackageOperationState.Downloading, 10.3d));
+                reportsFinished.TrySetResult();
+
+                await release.Task.WaitAsync(cancellationToken);
+                return Success(operation);
+            }
+        };
+        await using var queue = new OperationQueue(client, timeProvider: timeProvider);
+        var operation = Operation("Package.ProgressInterval");
+        var publishedProgress = new ConcurrentQueue<double?>();
+        queue.Changed += (_, args) =>
+        {
+            if (args.Snapshot.Current is { } current
+                && current.Operation.Id == operation.Id
+                && current.Progress.State == PackageOperationState.Downloading)
+            {
+                publishedProgress.Enqueue(current.Progress.Percent);
+            }
+        };
+
+        queue.Enqueue(operation);
+        await reportsFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var published = publishedProgress.ToArray();
+
+        release.TrySetResult();
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal([10d, 10.3d], published);
+    }
+
+    [Fact]
     public async Task ClientFailure_IsTypedAndDoesNotStopFollowingOperations()
     {
         var call = 0;
@@ -352,6 +458,41 @@ public sealed class OperationQueueTests
         Assert.Null(queue.Snapshot.LastPersistenceError);
     }
 
+    [Fact]
+    public async Task MsixRemoval_IsDispatchedWithoutOfferingCancellation()
+    {
+        var started = NewSource();
+        var release = NewSource();
+        var msix = new FakeMsixClient(async operation =>
+        {
+            started.TrySetResult();
+            await release.Task;
+            return Success(operation) with { Target = operation.EffectiveTarget };
+        });
+        await using var queue = new OperationQueue(new FakeWingetClient(), msixClient: msix);
+        var operation = new PackageOperation
+        {
+            Kind = PackageOperationKind.Uninstall,
+            DisplayName = "Contoso App",
+            Target = new MsixTarget
+            {
+                PackageFullName = "Contoso.App_1.0.0.0_x64__publisher",
+                PackageFamilyName = "Contoso.App_publisher"
+            }
+        };
+
+        queue.Enqueue(operation);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(queue.Snapshot.Current!.Progress.CanCancel);
+        Assert.False(queue.TryCancel(operation.Id));
+
+        release.TrySetResult();
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.IsType<MsixTarget>(Assert.Single(queue.Snapshot.History).Target);
+        Assert.Equal(1, msix.CallCount);
+    }
+
     private static PackageOperation Operation(
         string id,
         PackageOperationKind kind = PackageOperationKind.Install) => PackageOperation.Create(
@@ -421,6 +562,20 @@ public sealed class OperationQueueTests
 
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class ManualTimeProvider : TimeProvider
+    {
+        private static readonly DateTimeOffset Now = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        private long _timestamp;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public override DateTimeOffset GetUtcNow() => Now + TimeSpan.FromTicks(GetTimestamp());
+
+        public override long GetTimestamp() => Volatile.Read(ref _timestamp);
+
+        public void Advance(TimeSpan elapsed) => Interlocked.Add(ref _timestamp, elapsed.Ticks);
     }
 
     private sealed class FailingHistoryStore(bool failLoad = false, bool failSave = false) : IOperationHistoryStore
@@ -524,6 +679,21 @@ public sealed class OperationQueueTests
                 }
             }
             while (Interlocked.CompareExchange(ref _maximumConcurrency, value, current) != current);
+        }
+    }
+
+    private sealed class FakeMsixClient(Func<PackageOperation, Task<OperationResult>> execute)
+        : IMsixPackageOperationClient
+    {
+        public int CallCount { get; private set; }
+
+        public async Task<OperationResult> UninstallAsync(
+            PackageOperation operation,
+            IProgress<OperationProgress>? progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return await execute(operation);
         }
     }
 }

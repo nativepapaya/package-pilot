@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using Microsoft.Management.Deployment;
 using PackagePilot.Core.Abstractions;
 using PackagePilot.Core.Models;
@@ -10,17 +11,19 @@ using CorePackageAgreement = PackagePilot.Core.Models.PackageAgreement;
 using CorePackageMatchField = PackagePilot.Core.Models.PackageMatchField;
 using DeploymentElevationRequirement = Microsoft.Management.Deployment.ElevationRequirement;
 
-namespace PackagePilot.App.Services;
+namespace PackagePilot.Windows.Services;
 
 /// <summary>
 /// Out-of-process adapter for the Windows Package Manager deployment API.
 /// </summary>
-public sealed class WingetClient : IWingetClient
+public sealed class WingetClient : IWingetClient, ISourceManagementService
 {
     private const string ContractName =
         "Microsoft.Management.Deployment.WindowsPackageManagerContract";
 
+    private readonly object _capabilitiesLock = new();
     private readonly object _managerLock = new();
+    private WingetCapabilities? _supportedCapabilities;
     private PackageManager? _manager;
 
     public Task<WingetCapabilities> GetCapabilitiesAsync(
@@ -28,6 +31,27 @@ public sealed class WingetClient : IWingetClient
     {
         cancellationToken.ThrowIfCancellationRequested();
 
+        lock (_capabilitiesLock)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_supportedCapabilities is not null)
+            {
+                return Task.FromResult(_supportedCapabilities);
+            }
+
+            var capabilities = ProbeCapabilities();
+            // Keep failures retryable in case App Installer is repaired while the app is open.
+            if (capabilities.MeetsMinimumContract)
+            {
+                _supportedCapabilities = capabilities;
+            }
+
+            return Task.FromResult(capabilities);
+        }
+    }
+
+    private WingetCapabilities ProbeCapabilities()
+    {
         var contractVersion = GetHighestContractVersion();
         try
         {
@@ -64,7 +88,7 @@ public sealed class WingetClient : IWingetClient
             // from a missing App Installer installation.
             contractVersion = Math.Max(contractVersion, 1);
 
-            return Task.FromResult(new WingetCapabilities
+            return new WingetCapabilities
             {
                 IsAvailable = true,
                 ContractVersion = contractVersion,
@@ -72,17 +96,17 @@ public sealed class WingetClient : IWingetClient
                 UnavailableReason = contractVersion < WingetCapabilities.RequiredContractVersion
                     ? "App Installer is too old. Package Pilot requires WinGet API contract 6 or newer."
                     : null
-            });
+            };
         }
         catch (Exception exception) when (!IsFatal(exception))
         {
             var error = FromException(exception);
-            return Task.FromResult(new WingetCapabilities
+            return new WingetCapabilities
             {
                 IsAvailable = false,
                 ContractVersion = contractVersion,
                 UnavailableReason = error.Message
-            });
+            };
         }
     }
 
@@ -99,7 +123,7 @@ public sealed class WingetClient : IWingetClient
 
             try
             {
-                var result = await AwaitAsync(reference.ConnectAsync(), cancellationToken);
+                var result = await ConnectAsync(reference, cancellationToken);
                 statuses.Add(ToSourceStatus(
                     identity,
                     result,
@@ -127,6 +151,394 @@ public sealed class WingetClient : IWingetClient
         return statuses;
     }
 
+    public async Task<SourceManagementCapabilities> GetSourceManagementCapabilitiesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var capabilities = await GetCapabilitiesAsync(cancellationToken);
+        return CreateSourceManagementCapabilities(capabilities, IsCurrentProcessElevated());
+    }
+
+    public async Task<IReadOnlyList<PackageSourceInfo>> GetSourceDetailsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await EnsureSupportedAsync(cancellationToken);
+
+        var sources = new List<PackageSourceInfo>();
+        foreach (var reference in EnumerateWinRt(GetManager().GetPackageCatalogs()))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var source = CreateSourceInfo(reference);
+
+            try
+            {
+                var result = await ConnectAsync(reference, cancellationToken);
+                source = source with
+                {
+                    Health = result.Status switch
+                    {
+                        ConnectResultStatus.Ok => SourceHealth.Healthy,
+                        ConnectResultStatus.SourceAgreementsNotAccepted => SourceHealth.Degraded,
+                        ConnectResultStatus.CatalogError => SourceHealth.Unavailable,
+                        _ => SourceHealth.Unknown
+                    },
+                    Message = result.Status switch
+                    {
+                        ConnectResultStatus.Ok => null,
+                        ConnectResultStatus.SourceAgreementsNotAccepted =>
+                            "This source requires agreement acceptance before it can be used.",
+                        ConnectResultStatus.CatalogError =>
+                            "The source could not be reached. Check the network and source configuration.",
+                        _ => $"The source returned {result.Status}."
+                    }
+                };
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (!IsFatal(exception))
+            {
+                var error = FromException(exception);
+                source = source with
+                {
+                    Health = ToSourceHealth(error.Kind),
+                    Message = error.Message
+                };
+            }
+
+            sources.Add(source);
+        }
+
+        return sources
+            .OrderBy(source => source.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(source => source.Id, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    public async Task<SourceOperationResult> RefreshSourceAsync(
+        string sourceName,
+        IProgress<SourceOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var operationId = Guid.NewGuid();
+        const SourceOperationKind kind = SourceOperationKind.Refresh;
+        var normalizedName = sourceName?.Trim() ?? string.Empty;
+
+        try
+        {
+            var validation = SourceRequestValidator.ValidateSourceName(sourceName);
+            if (!validation.IsValid)
+            {
+                return InvalidSourceRequest(operationId, kind, normalizedName, validation);
+            }
+
+            var capabilities = await GetSourceManagementCapabilitiesAsync(cancellationToken);
+            if (!capabilities.SupportsRefresh)
+            {
+                return UnsupportedSourceOperation(operationId, kind, normalizedName,
+                    SourceManagementCapabilities.RefreshAndMutationContractVersion,
+                    capabilities);
+            }
+
+            var source = FindConfiguredSource(normalizedName);
+            if (source is null)
+            {
+                return SourceNotFound(operationId, kind, normalizedName);
+            }
+
+            return await ExecuteSourceOperationAsync(
+                operationId,
+                kind,
+                source.Name,
+                source.Reference.RefreshPackageCatalogAsync,
+                result => ToNativeSourceResult(result.Status, TryGetSourceHResult(result)),
+                progress,
+                cancellationToken);
+        }
+        catch (OperationCanceledException exception)
+        {
+            return CancelledSourceOperation(operationId, kind, normalizedName, exception);
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            return FailedSourceOperation(operationId, kind, normalizedName, exception);
+        }
+    }
+
+    public async Task<SourceOperationResult> AddSourceAsync(
+        AddPackageSourceRequest request,
+        IProgress<SourceOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var operationId = Guid.NewGuid();
+        const SourceOperationKind kind = SourceOperationKind.Add;
+        var sourceName = request.Name?.Trim() ?? string.Empty;
+
+        try
+        {
+            var validation = SourceRequestValidator.Validate(request);
+            if (!validation.IsValid)
+            {
+                return InvalidSourceRequest(operationId, kind, sourceName, validation);
+            }
+
+            var capabilities = await GetSourceManagementCapabilitiesAsync(cancellationToken);
+            if (!capabilities.SupportsAdd)
+            {
+                return UnsupportedSourceOperation(operationId, kind, sourceName,
+                    SourceManagementCapabilities.RefreshAndMutationContractVersion,
+                    capabilities);
+            }
+
+            if (!capabilities.IsCurrentProcessElevated)
+            {
+                return ElevationRequired(operationId, kind, sourceName);
+            }
+
+            var options = new AddPackageCatalogOptions
+            {
+                Name = sourceName,
+                SourceUri = request.Location.Trim(),
+                Type = SourceRequestValidator.ToDeploymentType(request.Type),
+                Explicit = request.IsExplicit,
+                TrustLevel = request.TrustLevel == PackageSourceTrustLevel.Trusted
+                    ? PackageCatalogTrustLevel.Trusted
+                    : PackageCatalogTrustLevel.None
+            };
+
+            // Advanced headers are intentionally not part of the public request model so they
+            // cannot be persisted or emitted by structured logging.
+            return await ExecuteSourceOperationAsync(
+                operationId,
+                kind,
+                sourceName,
+                () => GetManager().AddPackageCatalogAsync(options),
+                result => ToNativeSourceResult(result.Status, TryGetSourceHResult(result)),
+                progress,
+                cancellationToken);
+        }
+        catch (OperationCanceledException exception)
+        {
+            return CancelledSourceOperation(operationId, kind, sourceName, exception);
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            return FailedSourceOperation(operationId, kind, sourceName, exception);
+        }
+    }
+
+    public async Task<SourceOperationResult> RemoveSourceAsync(
+        string sourceName,
+        IProgress<SourceOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var operationId = Guid.NewGuid();
+        const SourceOperationKind kind = SourceOperationKind.Remove;
+        var normalizedName = sourceName?.Trim() ?? string.Empty;
+
+        try
+        {
+            var validation = SourceRequestValidator.ValidateSourceName(sourceName);
+            if (!validation.IsValid)
+            {
+                return InvalidSourceRequest(operationId, kind, normalizedName, validation);
+            }
+
+            var capabilities = await GetSourceManagementCapabilitiesAsync(cancellationToken);
+            if (!capabilities.SupportsRemove)
+            {
+                return UnsupportedSourceOperation(operationId, kind, normalizedName,
+                    SourceManagementCapabilities.RefreshAndMutationContractVersion,
+                    capabilities);
+            }
+
+            var source = FindConfiguredSource(normalizedName);
+            if (source is null)
+            {
+                return SourceNotFound(operationId, kind, normalizedName);
+            }
+
+            if (source.Origin == PackageSourceOrigin.Predefined)
+            {
+                return SourceOperationNotAllowed(operationId, kind, source.Name,
+                    "Predefined WinGet sources cannot be removed.");
+            }
+
+            if (!capabilities.IsCurrentProcessElevated)
+            {
+                return ElevationRequired(operationId, kind, source.Name);
+            }
+
+            var options = new RemovePackageCatalogOptions
+            {
+                Name = source.Name,
+                PreserveData = false
+            };
+            return await ExecuteSourceOperationAsync(
+                operationId,
+                kind,
+                source.Name,
+                () => GetManager().RemovePackageCatalogAsync(options),
+                result => ToNativeSourceResult(result.Status, TryGetSourceHResult(result)),
+                progress,
+                cancellationToken);
+        }
+        catch (OperationCanceledException exception)
+        {
+            return CancelledSourceOperation(operationId, kind, normalizedName, exception);
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            return FailedSourceOperation(operationId, kind, normalizedName, exception);
+        }
+    }
+
+    public async Task<SourceOperationResult> ResetSourceAsync(
+        ResetPackageSourceRequest request,
+        IProgress<SourceOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var operationId = Guid.NewGuid();
+        const SourceOperationKind kind = SourceOperationKind.Reset;
+        var sourceName = request.SourceName?.Trim() ?? string.Empty;
+
+        try
+        {
+            var validation = SourceRequestValidator.Validate(request);
+            if (!validation.IsValid)
+            {
+                return InvalidSourceRequest(operationId, kind, sourceName, validation);
+            }
+
+            var capabilities = await GetSourceManagementCapabilitiesAsync(cancellationToken);
+            if (!capabilities.SupportsResetOne)
+            {
+                return UnsupportedSourceOperation(operationId, kind, sourceName,
+                    SourceManagementCapabilities.RefreshAndMutationContractVersion,
+                    capabilities);
+            }
+
+            var source = FindConfiguredSource(sourceName);
+            if (source is null)
+            {
+                return SourceNotFound(operationId, kind, sourceName);
+            }
+
+            if (source.Origin != PackageSourceOrigin.Predefined)
+            {
+                return SourceOperationNotAllowed(operationId, kind, source.Name,
+                    "Only one named predefined WinGet source can be reset by this operation.");
+            }
+
+            if (!capabilities.IsCurrentProcessElevated)
+            {
+                return ElevationRequired(operationId, kind, source.Name);
+            }
+
+            var options = new RemovePackageCatalogOptions
+            {
+                Name = source.Name,
+                PreserveData = true
+            };
+            return await ExecuteSourceOperationAsync(
+                operationId,
+                kind,
+                source.Name,
+                () => GetManager().RemovePackageCatalogAsync(options),
+                result => ToNativeSourceResult(result.Status, TryGetSourceHResult(result)),
+                progress,
+                cancellationToken);
+        }
+        catch (OperationCanceledException exception)
+        {
+            return CancelledSourceOperation(operationId, kind, sourceName, exception);
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            return FailedSourceOperation(operationId, kind, sourceName, exception);
+        }
+    }
+
+    public async Task<SourceOperationResult> SetSourceExplicitAsync(
+        string sourceName,
+        bool isExplicit,
+        IProgress<SourceOperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var operationId = Guid.NewGuid();
+        const SourceOperationKind kind = SourceOperationKind.EditExplicit;
+        var normalizedName = sourceName?.Trim() ?? string.Empty;
+
+        try
+        {
+            var validation = SourceRequestValidator.ValidateSourceName(sourceName);
+            if (!validation.IsValid)
+            {
+                return InvalidSourceRequest(operationId, kind, normalizedName, validation);
+            }
+
+            var capabilities = await GetSourceManagementCapabilitiesAsync(cancellationToken);
+            if (!capabilities.SupportsExplicitEdit)
+            {
+                return UnsupportedSourceOperation(operationId, kind, normalizedName,
+                    SourceManagementCapabilities.ExplicitEditContractVersion,
+                    capabilities);
+            }
+
+            var source = FindConfiguredSource(normalizedName);
+            if (source is null)
+            {
+                return SourceNotFound(operationId, kind, normalizedName);
+            }
+
+            if (source.Origin == PackageSourceOrigin.Predefined)
+            {
+                return SourceOperationNotAllowed(operationId, kind, source.Name,
+                    "Predefined WinGet sources cannot be edited.");
+            }
+
+            if (!capabilities.IsCurrentProcessElevated)
+            {
+                return ElevationRequired(operationId, kind, source.Name);
+            }
+
+            ReportSourceProgress(progress, operationId, kind, source.Name, 0,
+                "Editing source settings…");
+            cancellationToken.ThrowIfCancellationRequested();
+            var options = new EditPackageCatalogOptions
+            {
+                Name = source.Name,
+                Explicit = isExplicit
+            };
+            var nativeResult = await Task.Run(
+                () => GetManager().EditPackageCatalog(options),
+                cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var mapped = ToNativeSourceResult(
+                nativeResult.Status,
+                TryGetSourceHResult(nativeResult));
+            var result = CreateSourceOperationResult(
+                operationId,
+                kind,
+                source.Name,
+                mapped);
+            ReportSourceProgress(progress, operationId, kind, source.Name,
+                result.IsSuccess ? 100 : null,
+                result.Message);
+            return result;
+        }
+        catch (OperationCanceledException exception)
+        {
+            return CancelledSourceOperation(operationId, kind, normalizedName, exception);
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            return FailedSourceOperation(operationId, kind, normalizedName, exception);
+        }
+    }
+
     public async Task<PackageSearchResult> SearchAsync(
         PackageQuery query,
         CancellationToken cancellationToken = default)
@@ -145,18 +557,28 @@ public sealed class WingetClient : IWingetClient
 
             try
             {
+                var currentSourceAgreements = GetSourceAgreements(reference, identity);
+                var currentFingerprint = SourceAgreementSnapshot.Create(
+                    identity.Id,
+                    currentSourceAgreements).Fingerprint;
                 // This flag is only true after the UI has displayed the source terms
                 // and captured explicit user consent.
-                if (query.AcceptSourceAgreements)
+                if (query.AcceptedSourceAgreementFingerprints.TryGetValue(
+                        identity.Id,
+                        out var acceptedFingerprint)
+                    && string.Equals(
+                        currentFingerprint,
+                        acceptedFingerprint,
+                        StringComparison.Ordinal))
                 {
                     reference.AcceptSourceAgreements = true;
                 }
-                var connectResult = await AwaitAsync(reference.ConnectAsync(), cancellationToken);
+                var connectResult = await ConnectAsync(reference, cancellationToken);
                 var sourceStatus = ToSourceStatus(
                     identity,
                     connectResult,
                     connectResult.Status == ConnectResultStatus.SourceAgreementsNotAccepted
-                        ? GetSourceAgreements(reference, identity)
+                        ? currentSourceAgreements
                         : Array.Empty<CorePackageAgreement>());
                 sources.Add(sourceStatus);
 
@@ -234,70 +656,294 @@ public sealed class WingetClient : IWingetClient
             .ToArray();
     }
 
-    public async Task<IReadOnlyList<PackageSummary>> GetAvailableUpdatesAsync(
-        CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<PackageSummary>> GetAvailableUpdatesAsync(
+        CancellationToken cancellationToken = default) =>
+        GetAvailableUpdatesCoreAsync(tryCombinedCatalog: true, cancellationToken);
+
+    internal Task<IReadOnlyList<PackageSummary>> GetAvailableUpdatesPerSourceAsync(
+        CancellationToken cancellationToken = default) =>
+        GetAvailableUpdatesCoreAsync(tryCombinedCatalog: false, cancellationToken);
+
+    private async Task<IReadOnlyList<PackageSummary>> GetAvailableUpdatesCoreAsync(
+        bool tryCombinedCatalog,
+        CancellationToken cancellationToken)
     {
         await EnsureSupportedAsync(cancellationToken);
 
         var manager = GetManager();
-        var updates = new List<PackageSummary>();
-
-        foreach (var remoteReference in EnumerateWinRt(manager.GetPackageCatalogs()))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var identity = GetSourceIdentity(remoteReference);
-
-            try
-            {
-                var options = new CreateCompositePackageCatalogOptions
-                {
-                    // Updates are an installed-inventory query enriched by the remote
-                    // source. Searching all remote packages with an empty selector can
-                    // enumerate the entire catalog before correlation and may never
-                    // return promptly on large sources.
-                    CompositeSearchBehavior = CompositeSearchBehavior.LocalCatalogs,
-                    InstalledScope = PackageInstallScope.Any
-                };
-                options.Catalogs.Add(remoteReference);
-
-                var reference = manager.CreateCompositePackageCatalog(options);
-                var connectResult = await AwaitAsync(reference.ConnectAsync(), cancellationToken);
-                if (connectResult.Status != ConnectResultStatus.Ok)
-                {
-                    continue;
-                }
-
-                var findResult = await FindAsync(
-                    connectResult.PackageCatalog,
-                    CreateFindAllOptions(),
-                    cancellationToken);
-
-                foreach (var match in EnumerateWinRt(findResult.Matches))
-                {
-                    if (match.CatalogPackage.IsUpdateAvailable)
-                    {
-                        updates.Add(ToSummary(
-                            match.CatalogPackage,
-                            identity,
-                            PackageStatus.UpdateAvailable));
-                    }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception exception) when (!IsFatal(exception))
-            {
-                // One unavailable source must not hide updates from healthy sources.
-            }
-        }
+        var sources = EnumerateWinRt(manager.GetPackageCatalogs())
+            .Select(reference => new RemoteCatalog(reference, GetSourceIdentity(reference)))
+            .ToArray();
+        var updates = tryCombinedCatalog
+            ? await QueryCombinedThenFallbackAsync(
+                sources,
+                (catalogs, token) => TryFindCombinedUpdatesAsync(manager, catalogs, token),
+                (source, token) => TryFindSourceUpdatesAsync(manager, source, token),
+                cancellationToken)
+            : await QueryPerSourceAsync(
+                sources,
+                (source, token) => TryFindSourceUpdatesAsync(manager, source, token),
+                cancellationToken);
 
         return updates
             .GroupBy(package => package.Key)
             .Select(group => group.First())
             .OrderBy(package => package.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(package => package.SourceName, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(package => package.Key.Id, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(package => package.Key.SourceId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    internal static async Task<IReadOnlyList<TResult>> QueryCombinedThenFallbackAsync<TSource, TResult>(
+        IReadOnlyList<TSource> sources,
+        Func<IReadOnlyList<TSource>, CancellationToken, Task<IReadOnlyList<TResult>?>> tryCombined,
+        Func<TSource, CancellationToken, Task<IReadOnlyList<TResult>?>> trySingle,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sources);
+        ArgumentNullException.ThrowIfNull(tryCombined);
+        ArgumentNullException.ThrowIfNull(trySingle);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (sources.Count > 1)
+        {
+            var combined = await tryCombined(sources, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (combined is not null)
+            {
+                return combined;
+            }
+        }
+
+        return await QueryPerSourceAsync(sources, trySingle, cancellationToken);
+    }
+
+    internal static async Task<IReadOnlyList<TResult>> QueryPerSourceAsync<TSource, TResult>(
+        IReadOnlyList<TSource> sources,
+        Func<TSource, CancellationToken, Task<IReadOnlyList<TResult>?>> trySingle,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sources);
+        ArgumentNullException.ThrowIfNull(trySingle);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var results = new List<TResult>();
+        foreach (var source in sources)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var sourceResults = await trySingle(source, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (sourceResults is not null)
+            {
+                results.AddRange(sourceResults);
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return results;
+    }
+
+    internal static bool UpdatesHaveKnownSources(
+        IEnumerable<PackageSummary> updates,
+        IEnumerable<string> knownSourceIds)
+    {
+        ArgumentNullException.ThrowIfNull(updates);
+        ArgumentNullException.ThrowIfNull(knownSourceIds);
+
+        var known = knownSourceIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return updates.All(update =>
+            !string.IsNullOrWhiteSpace(update.Key.SourceId)
+            && known.Contains(update.Key.SourceId));
+    }
+
+    internal static bool HasSingleAttributedSource(
+        IEnumerable<(string? Id, string? Name)> versionSources)
+    {
+        ArgumentNullException.ThrowIfNull(versionSources);
+
+        (string? Id, string? Name)? first = null;
+        foreach (var source in versionSources)
+        {
+            if (string.IsNullOrWhiteSpace(source.Id)
+                && string.IsNullOrWhiteSpace(source.Name))
+            {
+                return false;
+            }
+
+            if (first is null)
+            {
+                first = source;
+                continue;
+            }
+
+            // Connected versions from different catalogs have distinct IDs. If an
+            // implementation omits an ID, fall back to its stable source name.
+            var sameSource = !string.IsNullOrWhiteSpace(first.Value.Id)
+                && !string.IsNullOrWhiteSpace(source.Id)
+                    ? string.Equals(first.Value.Id, source.Id, StringComparison.OrdinalIgnoreCase)
+                    : SourceAliasesOverlap(
+                        first.Value.Id,
+                        first.Value.Name,
+                        source.Id,
+                        source.Name);
+            if (!sameSource)
+            {
+                return false;
+            }
+        }
+
+        return first is not null;
+    }
+
+    internal static bool SourceAliasesOverlap(
+        string? firstId,
+        string? firstName,
+        string? secondId,
+        string? secondName)
+    {
+        var firstAliases = new[] { firstId, firstName }
+            .Where(value => !string.IsNullOrWhiteSpace(value));
+        var secondAliases = new[] { secondId, secondName }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return firstAliases.Any(secondAliases.Contains);
+    }
+
+    private async Task<IReadOnlyList<PackageSummary>?> TryFindCombinedUpdatesAsync(
+        PackageManager manager,
+        IReadOnlyList<RemoteCatalog> sources,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var updates = await FindUpdatesAsync(
+                manager,
+                sources.Select(source => source.Reference),
+                new SourceIdentity(string.Empty, string.Empty),
+                cancellationToken,
+                sources.Select(source => source.Identity).ToArray());
+            if (updates is null)
+            {
+                return null;
+            }
+
+            return UpdatesHaveKnownSources(
+                updates,
+                sources.Select(source => source.Identity.Id))
+                ? updates
+                : null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return null;
+        }
+    }
+
+    private async Task<IReadOnlyList<PackageSummary>?> TryFindSourceUpdatesAsync(
+        PackageManager manager,
+        RemoteCatalog source,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await FindUpdatesAsync(
+                manager,
+                [source.Reference],
+                source.Identity,
+                cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            // One unavailable source must not hide updates from healthy sources.
+            cancellationToken.ThrowIfCancellationRequested();
+            return null;
+        }
+    }
+
+    private async Task<IReadOnlyList<PackageSummary>?> FindUpdatesAsync(
+        PackageManager manager,
+        IEnumerable<PackageCatalogReference> remoteReferences,
+        SourceIdentity fallbackIdentity,
+        CancellationToken cancellationToken,
+        IReadOnlyList<SourceIdentity>? combinedSources = null)
+    {
+        var options = new CreateCompositePackageCatalogOptions
+        {
+            // Updates are an installed-inventory query enriched by the remote
+            // sources. Searching all remote packages with an empty selector can
+            // enumerate entire catalogs before correlation.
+            CompositeSearchBehavior = CompositeSearchBehavior.LocalCatalogs,
+            InstalledScope = PackageInstallScope.Any
+        };
+        foreach (var remoteReference in remoteReferences)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            options.Catalogs.Add(remoteReference);
+        }
+
+        var reference = manager.CreateCompositePackageCatalog(options);
+        var connectResult = await ConnectAsync(reference, cancellationToken);
+        if (connectResult.Status != ConnectResultStatus.Ok)
+        {
+            throw ConnectFailure(connectResult, fallbackIdentity);
+        }
+
+        var findResult = await FindAsync(
+            connectResult.PackageCatalog,
+            CreateFindAllOptions(),
+            cancellationToken);
+        var updates = new List<PackageSummary>();
+        foreach (var match in EnumerateWinRt(findResult.Matches))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (match.CatalogPackage.IsUpdateAvailable)
+            {
+                var summarySource = fallbackIdentity;
+                if (combinedSources is not null)
+                {
+                    var versionSources = EnumerateWinRt(match.CatalogPackage.AvailableVersions)
+                        .Select(version => TryGetVersionSource(
+                            match.CatalogPackage.GetPackageVersionInfo(version)))
+                        .Append(TryGetVersionSource(match.CatalogPackage.DefaultInstallVersion))
+                        .Select(source => (source?.Id, source?.Name))
+                        .ToArray();
+                    if (!HasSingleAttributedSource(versionSources))
+                    {
+                        // The previous implementation returned one row per source.
+                        // Re-run source-by-source when the composite merged mirrors.
+                        return null;
+                    }
+
+                    var actualSource = TryGetVersionSource(
+                        match.CatalogPackage.DefaultInstallVersion);
+                    summarySource = FindConfiguredSource(actualSource, combinedSources)
+                        ?? new SourceIdentity(string.Empty, string.Empty);
+                    if (string.IsNullOrWhiteSpace(summarySource.Id))
+                    {
+                        return null;
+                    }
+                }
+
+                updates.Add(ToSummary(
+                    match.CatalogPackage,
+                    summarySource,
+                    PackageStatus.UpdateAvailable));
+            }
+        }
+
+        return updates;
     }
 
     public async Task<PackageDetails?> GetPackageDetailsAsync(
@@ -547,16 +1193,24 @@ public sealed class WingetClient : IWingetClient
                 reference = manager.CreateCompositePackageCatalog(compositeOptions);
             }
 
-            if (preferences.AcceptSourceAgreements)
+            var sourceAgreements = GetSourceAgreements(reference, source);
+            var currentFingerprint = SourceAgreementSnapshot.Create(
+                source.Id,
+                sourceAgreements).Fingerprint;
+            if (preferences.AcceptSourceAgreements
+                && string.Equals(
+                    preferences.AcceptedSourceAgreementFingerprint,
+                    currentFingerprint,
+                    StringComparison.Ordinal))
             {
                 reference.AcceptSourceAgreements = true;
             }
-            var connectResult = await AwaitAsync(reference.ConnectAsync(), cancellationToken);
+            var connectResult = await ConnectAsync(reference, cancellationToken);
             if (connectResult.Status == ConnectResultStatus.SourceAgreementsNotAccepted)
             {
                 throw AgreementRequired(
                     $"The {source.Name} source requires agreement acceptance before it can be used.",
-                    GetSourceAgreements(reference, source));
+                    sourceAgreements);
             }
 
             if (connectResult.Status != ConnectResultStatus.Ok)
@@ -597,6 +1251,35 @@ public sealed class WingetClient : IWingetClient
         }
 
         return references;
+    }
+
+    private static SourceIdentity? FindConfiguredSource(
+        SourceIdentity? actualSource,
+        IReadOnlyList<SourceIdentity> configuredSources)
+    {
+        if (actualSource is null)
+        {
+            return null;
+        }
+
+        var idMatches = configuredSources
+            .Where(source => !string.IsNullOrWhiteSpace(actualSource.Id)
+                && (string.Equals(source.Id, actualSource.Id, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(source.Name, actualSource.Id, StringComparison.OrdinalIgnoreCase)))
+            .Take(2)
+            .ToArray();
+        if (idMatches.Length == 1)
+        {
+            return idMatches[0];
+        }
+
+        var nameMatches = configuredSources
+            .Where(source => !string.IsNullOrWhiteSpace(actualSource.Name)
+                && (string.Equals(source.Id, actualSource.Name, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(source.Name, actualSource.Name, StringComparison.OrdinalIgnoreCase)))
+            .Take(2)
+            .ToArray();
+        return nameMatches.Length == 1 ? nameMatches[0] : null;
     }
 
     private static FindPackagesOptions CreateFindOptions(PackageQuery query)
@@ -659,7 +1342,9 @@ public sealed class WingetClient : IWingetClient
         var available = package.DefaultInstallVersion;
         var installed = package.InstalledVersion;
         var metadata = TryGetMetadata(available) ?? TryGetMetadata(installed);
-        var source = TryGetVersionSource(available) ?? fallbackSource;
+        var source = string.IsNullOrWhiteSpace(fallbackSource.Id)
+            ? TryGetVersionSource(available) ?? fallbackSource
+            : fallbackSource;
         var installer = TryGetInstaller(available, new InstallOptions());
 
         var status = forcedStatus ?? (package.IsUpdateAvailable
@@ -864,7 +1549,10 @@ public sealed class WingetClient : IWingetClient
         try
         {
             var info = version.PackageCatalog.Info;
-            return new SourceIdentity(info.Id ?? string.Empty, info.Name ?? string.Empty);
+            var id = FirstNonEmpty(info.Id, info.Name);
+            return string.IsNullOrWhiteSpace(id)
+                ? null
+                : new SourceIdentity(id, FirstNonEmpty(info.Name, info.Id));
         }
         catch (Exception)
         {
@@ -891,7 +1579,7 @@ public sealed class WingetClient : IWingetClient
         CancellationToken cancellationToken)
     {
         var source = GetSourceIdentity(reference);
-        var result = await AwaitAsync(reference.ConnectAsync(), cancellationToken);
+        var result = await ConnectAsync(reference, cancellationToken);
         if (result.Status != ConnectResultStatus.Ok)
         {
             throw ConnectFailure(result, source);
@@ -953,7 +1641,8 @@ public sealed class WingetClient : IWingetClient
                     "The source could not be reached. Check the network and source configuration.",
                 _ => $"The source returned {result.Status}."
             },
-            Agreements = agreements
+            Agreements = agreements,
+            AgreementFingerprint = SourceAgreementSnapshot.Create(identity.Id, agreements).Fingerprint
         };
     }
 
@@ -1119,6 +1808,449 @@ public sealed class WingetClient : IWingetClient
         };
     }
 
+    internal static SourceManagementCapabilities CreateSourceManagementCapabilities(
+        WingetCapabilities capabilities,
+        bool isCurrentProcessElevated)
+    {
+        ArgumentNullException.ThrowIfNull(capabilities);
+        return new SourceManagementCapabilities
+        {
+            IsAvailable = capabilities.IsAvailable,
+            ContractVersion = capabilities.ContractVersion,
+            IsCurrentProcessElevated = isCurrentProcessElevated,
+            UnavailableReason = capabilities.UnavailableReason
+        };
+    }
+
+    private static bool IsCurrentProcessElevated()
+    {
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            return false;
+        }
+    }
+
+    private PackageSourceInfo CreateSourceInfo(PackageCatalogReference reference)
+    {
+        var identity = GetSourceIdentity(reference);
+        var agreements = GetSourceAgreements(reference, identity);
+
+        try
+        {
+            var info = reference.Info;
+            var typeName = NullIfWhiteSpace(info.Type) ?? string.Empty;
+            return new PackageSourceInfo
+            {
+                Id = identity.Id,
+                Name = identity.Name,
+                Type = SourceRequestValidator.FromDeploymentType(typeName),
+                TypeName = typeName,
+                Argument = NullIfWhiteSpace(info.Argument) ?? string.Empty,
+                LastUpdatedAt = TryGetLastUpdatedAt(info),
+                Origin = ToCoreSourceOrigin(info.Origin),
+                TrustLevel = ToCoreSourceTrustLevel(info.TrustLevel),
+                IsExplicit = TryGetSourceExplicit(info),
+                AgreementSnapshot = SourceAgreementSnapshot.Create(identity.Id, agreements)
+            };
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            var error = FromException(exception);
+            return new PackageSourceInfo
+            {
+                Id = identity.Id,
+                Name = identity.Name,
+                Health = ToSourceHealth(error.Kind),
+                Message = error.Message,
+                AgreementSnapshot = SourceAgreementSnapshot.Create(identity.Id, agreements)
+            };
+        }
+    }
+
+    private ManagedSource? FindConfiguredSource(string sourceName)
+    {
+        foreach (var reference in EnumerateWinRt(GetManager().GetPackageCatalogs()))
+        {
+            var info = CreateSourceInfo(reference);
+            if (string.Equals(info.Name, sourceName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(info.Id, sourceName, StringComparison.OrdinalIgnoreCase))
+            {
+                return new ManagedSource(reference, info.Name, info.Origin);
+            }
+        }
+
+        return null;
+    }
+
+    private static DateTimeOffset? TryGetLastUpdatedAt(PackageCatalogInfo info)
+    {
+        try
+        {
+            var value = info.LastUpdateTime;
+            return value == default ? null : value;
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            return null;
+        }
+    }
+
+    private static bool TryGetSourceExplicit(PackageCatalogInfo info)
+    {
+        try
+        {
+            return info.Explicit;
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            return false;
+        }
+    }
+
+    private static PackageSourceOrigin ToCoreSourceOrigin(PackageCatalogOrigin origin) =>
+        origin switch
+        {
+            PackageCatalogOrigin.Predefined => PackageSourceOrigin.Predefined,
+            PackageCatalogOrigin.User => PackageSourceOrigin.User,
+            _ => PackageSourceOrigin.Unknown
+        };
+
+    private static PackageSourceTrustLevel ToCoreSourceTrustLevel(
+        PackageCatalogTrustLevel trustLevel) => trustLevel switch
+    {
+        PackageCatalogTrustLevel.Trusted => PackageSourceTrustLevel.Trusted,
+        _ => PackageSourceTrustLevel.None
+    };
+
+    private async Task<SourceOperationResult> ExecuteSourceOperationAsync<TResult>(
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName,
+        Func<IAsyncOperationWithProgress<TResult, double>> startOperation,
+        Func<TResult, NativeSourceResult> mapResult,
+        IProgress<SourceOperationProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        ReportSourceProgress(progress, operationId, kind, sourceName, 0,
+            DescribeSourceOperation(kind));
+
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var operation = await Task.Run(startOperation, cancellationToken);
+            operation.Progress = (_, value) => ReportSourceProgress(
+                progress,
+                operationId,
+                kind,
+                sourceName,
+                NormalizeSourcePercent(value),
+                DescribeSourceOperation(kind));
+            using var registration = cancellationToken.Register(operation.Cancel);
+            var nativeResult = await operation;
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var result = CreateSourceOperationResult(
+                operationId,
+                kind,
+                sourceName,
+                mapResult(nativeResult));
+            ReportSourceProgress(
+                progress,
+                operationId,
+                kind,
+                sourceName,
+                result.IsSuccess ? 100 : null,
+                result.Message);
+            return result;
+        }
+        catch (OperationCanceledException exception)
+        {
+            return CancelledSourceOperation(operationId, kind, sourceName, exception);
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            return FailedSourceOperation(operationId, kind, sourceName, exception);
+        }
+    }
+
+    private static void ReportSourceProgress(
+        IProgress<SourceOperationProgress>? progress,
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName,
+        double? percent,
+        string message) => progress?.Report(new SourceOperationProgress
+    {
+        OperationId = operationId,
+        Kind = kind,
+        SourceName = sourceName,
+        Percent = percent,
+        Message = message,
+        Timestamp = DateTimeOffset.UtcNow
+    });
+
+    internal static double? NormalizeSourcePercent(double value) =>
+        double.IsNaN(value) || double.IsInfinity(value) || value < 0
+            ? null
+            : Math.Clamp(value, 0, 100);
+
+    private static string DescribeSourceOperation(SourceOperationKind kind) => kind switch
+    {
+        SourceOperationKind.Refresh => "Refreshing source…",
+        SourceOperationKind.Add => "Adding source…",
+        SourceOperationKind.Remove => "Removing source…",
+        SourceOperationKind.Reset => "Resetting source…",
+        SourceOperationKind.EditExplicit => "Editing source settings…",
+        _ => "Managing source…"
+    };
+
+    private static string DescribeSourceSuccess(SourceOperationKind kind, string sourceName) =>
+        kind switch
+        {
+            SourceOperationKind.Refresh => $"Refreshed {sourceName}.",
+            SourceOperationKind.Add => $"Added {sourceName}.",
+            SourceOperationKind.Remove => $"Removed {sourceName}.",
+            SourceOperationKind.Reset => $"Reset {sourceName}.",
+            SourceOperationKind.EditExplicit => $"Updated {sourceName}.",
+            _ => $"Updated {sourceName}."
+        };
+
+    private static SourceOperationResult CreateSourceOperationResult(
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName,
+        NativeSourceResult nativeResult) => new()
+    {
+        OperationId = operationId,
+        Kind = kind,
+        SourceName = sourceName,
+        Status = nativeResult.Status,
+        Message = nativeResult.Status == SourceOperationStatus.Succeeded
+            ? DescribeSourceSuccess(kind, sourceName)
+            : nativeResult.Message,
+        HResult = nativeResult.HResult
+    };
+
+    private static SourceOperationResult InvalidSourceRequest(
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName,
+        SourceRequestValidationResult validation) => new()
+    {
+        OperationId = operationId,
+        Kind = kind,
+        SourceName = sourceName,
+        Status = SourceOperationStatus.InvalidRequest,
+        Message = string.Join(" ", validation.Errors)
+    };
+
+    private static SourceOperationResult UnsupportedSourceOperation(
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName,
+        uint requiredContract,
+        SourceManagementCapabilities capabilities) => new()
+    {
+        OperationId = operationId,
+        Kind = kind,
+        SourceName = sourceName,
+        Status = capabilities.IsAvailable
+            ? SourceOperationStatus.Unsupported
+            : SourceOperationStatus.Unavailable,
+        Message = capabilities.IsAvailable
+            ? $"This source operation requires WinGet API contract {requiredContract} or newer."
+            : capabilities.UnavailableReason ?? "Windows Package Manager is unavailable."
+    };
+
+    private static SourceOperationResult ElevationRequired(
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName) => new()
+    {
+        OperationId = operationId,
+        Kind = kind,
+        SourceName = sourceName,
+        Status = SourceOperationStatus.AccessDenied,
+        Message = "Changing WinGet sources requires administrator approval."
+    };
+
+    private static SourceOperationResult SourceNotFound(
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName) => new()
+    {
+        OperationId = operationId,
+        Kind = kind,
+        SourceName = sourceName,
+        Status = SourceOperationStatus.NotFound,
+        Message = $"WinGet source '{sourceName}' was not found."
+    };
+
+    private static SourceOperationResult SourceOperationNotAllowed(
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName,
+        string message) => new()
+    {
+        OperationId = operationId,
+        Kind = kind,
+        SourceName = sourceName,
+        Status = SourceOperationStatus.NotAllowed,
+        Message = message
+    };
+
+    private static SourceOperationResult CancelledSourceOperation(
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName,
+        Exception exception) => new()
+    {
+        OperationId = operationId,
+        Kind = kind,
+        SourceName = sourceName,
+        Status = SourceOperationStatus.Cancelled,
+        Message = "The source operation was cancelled.",
+        HResult = exception.HResult
+    };
+
+    private static SourceOperationResult FailedSourceOperation(
+        Guid operationId,
+        SourceOperationKind kind,
+        string sourceName,
+        Exception exception)
+    {
+        var error = FromException(exception);
+        var status = unchecked((uint)exception.HResult) switch
+        {
+            0x80070005 or 0x800702E4 or 0x800704C7 => SourceOperationStatus.AccessDenied,
+            _ => error.Kind switch
+            {
+                WingetErrorKind.PolicyBlocked => SourceOperationStatus.BlockedByPolicy,
+                WingetErrorKind.Authentication => SourceOperationStatus.AuthenticationRequired,
+                WingetErrorKind.Network or WingetErrorKind.AppInstallerMissing =>
+                    SourceOperationStatus.Unavailable,
+                WingetErrorKind.Cancelled => SourceOperationStatus.Cancelled,
+                _ => SourceOperationStatus.Failed
+            }
+        };
+        return new SourceOperationResult
+        {
+            OperationId = operationId,
+            Kind = kind,
+            SourceName = sourceName,
+            Status = status,
+            Message = status switch
+            {
+                SourceOperationStatus.AccessDenied =>
+                    "Changing WinGet sources requires administrator approval.",
+                SourceOperationStatus.BlockedByPolicy =>
+                    "This source is managed or blocked by your organization.",
+                SourceOperationStatus.AuthenticationRequired =>
+                    "The source requires authentication.",
+                SourceOperationStatus.Unavailable =>
+                    "The source could not be reached.",
+                SourceOperationStatus.Cancelled =>
+                    "The source operation was cancelled.",
+                _ => error.Message
+            },
+            HResult = exception.HResult
+        };
+    }
+
+    internal static SourceOperationStatus MapSourceStatus(
+        RefreshPackageCatalogStatus status) => status switch
+    {
+        RefreshPackageCatalogStatus.Ok => SourceOperationStatus.Succeeded,
+        RefreshPackageCatalogStatus.GroupPolicyError => SourceOperationStatus.BlockedByPolicy,
+        RefreshPackageCatalogStatus.CatalogError => SourceOperationStatus.Unavailable,
+        _ => SourceOperationStatus.Failed
+    };
+
+    internal static SourceOperationStatus MapSourceStatus(AddPackageCatalogStatus status) =>
+        status switch
+        {
+            AddPackageCatalogStatus.Ok => SourceOperationStatus.Succeeded,
+            AddPackageCatalogStatus.GroupPolicyError => SourceOperationStatus.BlockedByPolicy,
+            AddPackageCatalogStatus.CatalogError => SourceOperationStatus.Unavailable,
+            AddPackageCatalogStatus.InvalidOptions => SourceOperationStatus.InvalidRequest,
+            AddPackageCatalogStatus.AccessDenied => SourceOperationStatus.AccessDenied,
+            AddPackageCatalogStatus.AuthenticationError =>
+                SourceOperationStatus.AuthenticationRequired,
+            _ => SourceOperationStatus.Failed
+        };
+
+    internal static SourceOperationStatus MapSourceStatus(RemovePackageCatalogStatus status) =>
+        status switch
+        {
+            RemovePackageCatalogStatus.Ok => SourceOperationStatus.Succeeded,
+            RemovePackageCatalogStatus.GroupPolicyError => SourceOperationStatus.BlockedByPolicy,
+            RemovePackageCatalogStatus.CatalogError => SourceOperationStatus.Unavailable,
+            RemovePackageCatalogStatus.AccessDenied => SourceOperationStatus.AccessDenied,
+            RemovePackageCatalogStatus.InvalidOptions => SourceOperationStatus.InvalidRequest,
+            _ => SourceOperationStatus.Failed
+        };
+
+    internal static SourceOperationStatus MapSourceStatus(EditPackageCatalogStatus status) =>
+        status switch
+        {
+            EditPackageCatalogStatus.Ok => SourceOperationStatus.Succeeded,
+            EditPackageCatalogStatus.GroupPolicyError => SourceOperationStatus.BlockedByPolicy,
+            EditPackageCatalogStatus.CatalogError => SourceOperationStatus.Unavailable,
+            EditPackageCatalogStatus.AccessDenied => SourceOperationStatus.AccessDenied,
+            EditPackageCatalogStatus.InvalidOptions => SourceOperationStatus.InvalidRequest,
+            _ => SourceOperationStatus.Failed
+        };
+
+    private static NativeSourceResult ToNativeSourceResult(
+        RefreshPackageCatalogStatus status,
+        int? hresult) => new(
+            MapSourceStatus(status),
+            DescribeSourceFailure(MapSourceStatus(status)),
+            hresult);
+
+    private static NativeSourceResult ToNativeSourceResult(
+        AddPackageCatalogStatus status,
+        int? hresult) => new(
+            MapSourceStatus(status),
+            DescribeSourceFailure(MapSourceStatus(status)),
+            hresult);
+
+    private static NativeSourceResult ToNativeSourceResult(
+        RemovePackageCatalogStatus status,
+        int? hresult) => new(
+            MapSourceStatus(status),
+            DescribeSourceFailure(MapSourceStatus(status)),
+            hresult);
+
+    private static NativeSourceResult ToNativeSourceResult(
+        EditPackageCatalogStatus status,
+        int? hresult) => new(
+            MapSourceStatus(status),
+            DescribeSourceFailure(MapSourceStatus(status)),
+            hresult);
+
+    private static string DescribeSourceFailure(SourceOperationStatus status) => status switch
+    {
+        SourceOperationStatus.BlockedByPolicy =>
+            "This source is managed or blocked by your organization.",
+        SourceOperationStatus.Unavailable =>
+            "The source could not be reached. Check its address and your network connection.",
+        SourceOperationStatus.InvalidRequest =>
+            "WinGet rejected the source settings.",
+        SourceOperationStatus.AccessDenied =>
+            "Changing WinGet sources requires administrator approval.",
+        SourceOperationStatus.AuthenticationRequired =>
+            "The source requires authentication.",
+        SourceOperationStatus.Failed =>
+            "Windows Package Manager could not complete the source operation.",
+        _ => string.Empty
+    };
+
     private static WingetError FromException(Exception exception)
     {
         var hresult = exception.HResult;
@@ -1244,6 +2376,20 @@ public sealed class WingetClient : IWingetClient
         {
             return false;
         }
+    }
+
+    private static async Task<ConnectResult> ConnectAsync(
+        PackageCatalogReference reference,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // WinGet currently performs catalog opening before ConnectAsync returns.
+        // Start that native work on the thread pool so remote sources cannot block
+        // the WinUI dispatcher while the operation is being created.
+        var operation = await Task.Run(reference.ConnectAsync, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        return await AwaitAsync(operation, cancellationToken);
     }
 
     private static async Task<T> AwaitAsync<T>(
@@ -1477,6 +2623,18 @@ public sealed class WingetClient : IWingetClient
     private static int? TryGetUninstallHResult(UninstallResult result) =>
         TryGetHResult(() => result.ExtendedErrorCode);
 
+    private static int? TryGetSourceHResult(RefreshPackageCatalogResult result) =>
+        TryGetHResult(() => result.ExtendedErrorCode);
+
+    private static int? TryGetSourceHResult(AddPackageCatalogResult result) =>
+        TryGetHResult(() => result.ExtendedErrorCode);
+
+    private static int? TryGetSourceHResult(RemovePackageCatalogResult result) =>
+        TryGetHResult(() => result.ExtendedErrorCode);
+
+    private static int? TryGetSourceHResult(EditPackageCatalogResult result) =>
+        TryGetHResult(() => result.ExtendedErrorCode);
+
     private static int? TryGetHResult(Func<Exception?> getValue)
     {
         try
@@ -1534,6 +2692,18 @@ public sealed class WingetClient : IWingetClient
         exception is OutOfMemoryException or StackOverflowException or AccessViolationException;
 
     private sealed record SourceIdentity(string Id, string Name);
+
+    private sealed record RemoteCatalog(PackageCatalogReference Reference, SourceIdentity Identity);
+
+    private sealed record ManagedSource(
+        PackageCatalogReference Reference,
+        string Name,
+        PackageSourceOrigin Origin);
+
+    private sealed record NativeSourceResult(
+        SourceOperationStatus Status,
+        string Message,
+        int? HResult);
 
     private sealed record ResolvedPackage(CatalogPackage Package, SourceIdentity Source);
 }

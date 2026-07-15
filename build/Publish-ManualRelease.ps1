@@ -186,6 +186,49 @@ function Get-MsixIdentity {
     }
 }
 
+function Get-MsixBundleIdentity {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $manifestEntry = $archive.GetEntry('AppxMetadata/AppxBundleManifest.xml')
+        if ($null -eq $manifestEntry) {
+            throw "'$Path' does not contain AppxMetadata/AppxBundleManifest.xml."
+        }
+
+        $reader = [IO.StreamReader]::new($manifestEntry.Open())
+        try {
+            [xml]$manifest = $reader.ReadToEnd()
+        }
+        finally {
+            $reader.Dispose()
+        }
+
+        $identity = $manifest.SelectSingleNode("/*[local-name()='Bundle']/*[local-name()='Identity']")
+        $packages = @($manifest.SelectNodes(
+            "/*[local-name()='Bundle']/*[local-name()='Packages']/*[local-name()='Package']"))
+        if ($null -eq $identity -or $packages.Count -eq 0) {
+            throw "'$Path' contains an incomplete bundle manifest."
+        }
+
+        return [pscustomobject]@{
+            Name = $identity.GetAttribute('Name')
+            Publisher = $identity.GetAttribute('Publisher')
+            Version = $identity.GetAttribute('Version')
+            Architectures = @($packages | ForEach-Object {
+                $_.GetAttribute('Architecture').ToLowerInvariant()
+            } | Sort-Object -Unique)
+            HasSignature = $null -ne $archive.GetEntry('AppxSignature.p7x')
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
 function Assert-MetadataProperty {
     param(
         [Parameter(Mandatory)]
@@ -439,6 +482,8 @@ try {
     foreach ($propertyName in @(
         'schemaVersion'
         'packageVersion'
+        'architectures'
+        'packageAsset'
         'releaseSequence'
         'tagName'
         'repository'
@@ -453,8 +498,10 @@ try {
         Assert-MetadataProperty -Metadata $metadata -Name $propertyName
     }
 
-    if ([int]$metadata.schemaVersion -ne 1 -or
+    if ([int]$metadata.schemaVersion -ne 2 -or
         [string]$metadata.packageVersion -ne $expectedVersion -or
+        (@($metadata.architectures) -join ',') -ne 'x64,arm64' -or
+        [string]$metadata.packageAsset -ne 'PackagePilot.msixbundle' -or
         [uint64]$metadata.releaseSequence -ne $expectedSequence -or
         [string]$metadata.tagName -ne $expectedTag -or
         -not [string]::Equals(
@@ -480,37 +527,43 @@ try {
     }
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $packagePath = Join-Path $resolvedWorkingDirectory 'PackagePilot.msix'
-    $runtimePath = Join-Path $resolvedWorkingDirectory 'Microsoft.WindowsAppRuntime.2.msix'
+    $packagePath = Join-Path $resolvedWorkingDirectory 'PackagePilot.msixbundle'
+    $x64RuntimePath = Join-Path $resolvedWorkingDirectory 'Microsoft.WindowsAppRuntime.2.x64.msix'
+    $arm64RuntimePath = Join-Path $resolvedWorkingDirectory 'Microsoft.WindowsAppRuntime.2.arm64.msix'
     $appInstallerPath = Join-Path $resolvedWorkingDirectory 'PackagePilot.appinstaller'
-    foreach ($requiredPath in @($packagePath, $runtimePath, $appInstallerPath)) {
+    foreach ($requiredPath in @($packagePath, $x64RuntimePath, $arm64RuntimePath, $appInstallerPath)) {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
             throw "The downloaded release payload is missing '$([IO.Path]::GetFileName($requiredPath))'."
         }
     }
 
-    $packageIdentity = Get-MsixIdentity -Path $packagePath
+    $packageIdentity = Get-MsixBundleIdentity -Path $packagePath
     if ($packageIdentity.Name -ne 'PackagePilot.Desktop' -or
         $packageIdentity.Publisher -ne $script:CertificateSubject -or
         $packageIdentity.Version -ne $expectedVersion -or
-        $packageIdentity.ProcessorArchitecture -ne 'x64' -or
+        ($packageIdentity.Architectures -join ',') -ne 'arm64,x64' -or
         $packageIdentity.HasSignature) {
-        throw 'The unsigned Package Pilot MSIX identity or signature state is invalid.'
+        throw 'The unsigned Package Pilot MSIX bundle identity, architecture set, or signature state is invalid.'
     }
 
-    $runtimeIdentity = Get-MsixIdentity -Path $runtimePath
-    if ($runtimeIdentity.Name -ne 'Microsoft.WindowsAppRuntime.2' -or
-        $runtimeIdentity.Publisher -ne
-            'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' -or
-        $runtimeIdentity.Version -ne '2.2.0.0' -or
-        $runtimeIdentity.ProcessorArchitecture -ne 'x64' -or
-        -not $runtimeIdentity.HasSignature) {
-        throw 'The Windows App Runtime dependency identity or signature state is invalid.'
-    }
-    $runtimeSignature = Get-AuthenticodeSignature -FilePath $runtimePath
-    if ($runtimeSignature.Status -ne
-        [System.Management.Automation.SignatureStatus]::Valid) {
-        throw "The Windows App Runtime signature is invalid: $($runtimeSignature.StatusMessage)"
+    foreach ($runtime in @(
+        @{ Path = $x64RuntimePath; Architecture = 'x64' }
+        @{ Path = $arm64RuntimePath; Architecture = 'arm64' }
+    )) {
+        $runtimeIdentity = Get-MsixIdentity -Path $runtime.Path
+        if ($runtimeIdentity.Name -ne 'Microsoft.WindowsAppRuntime.2' -or
+            $runtimeIdentity.Publisher -ne
+                'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' -or
+            $runtimeIdentity.Version -ne '2.2.0.0' -or
+            $runtimeIdentity.ProcessorArchitecture -ne $runtime.Architecture -or
+            -not $runtimeIdentity.HasSignature) {
+            throw "The $($runtime.Architecture) Windows App Runtime dependency identity or signature state is invalid."
+        }
+        $runtimeSignature = Get-AuthenticodeSignature -FilePath $runtime.Path
+        if ($runtimeSignature.Status -ne
+            [System.Management.Automation.SignatureStatus]::Valid) {
+            throw "The $($runtime.Architecture) Windows App Runtime signature is invalid: $($runtimeSignature.StatusMessage)"
+        }
     }
 
     [xml]$appInstaller = Get-Content -LiteralPath $appInstallerPath -Raw
@@ -518,11 +571,11 @@ try {
     $namespaceManager.AddNamespace('ai', 'http://schemas.microsoft.com/appx/appinstaller/2021')
     $feedRoot = $appInstaller.SelectSingleNode('/ai:AppInstaller', $namespaceManager)
     $feedPackage = $appInstaller.SelectSingleNode(
-        '/ai:AppInstaller/ai:MainPackage',
+        '/ai:AppInstaller/ai:MainBundle',
         $namespaceManager)
-    $feedRuntime = $appInstaller.SelectSingleNode(
+    $feedRuntimes = @($appInstaller.SelectNodes(
         '/ai:AppInstaller/ai:Dependencies/ai:Package',
-        $namespaceManager)
+        $namespaceManager))
     $feedOnLaunch = $appInstaller.SelectSingleNode(
         '/ai:AppInstaller/ai:UpdateSettings/ai:OnLaunch',
         $namespaceManager)
@@ -532,26 +585,39 @@ try {
     $latestBaseUri = "https://github.com/$Repository/releases/latest/download"
     if ($null -eq $feedRoot -or
         $null -eq $feedPackage -or
-        $null -eq $feedRuntime -or
         $feedRoot.GetAttribute('Version') -ne $expectedVersion -or
         $feedRoot.GetAttribute('Uri') -ne "$latestBaseUri/PackagePilot.appinstaller" -or
         $feedPackage.GetAttribute('Name') -ne 'PackagePilot.Desktop' -or
         $feedPackage.GetAttribute('Publisher') -ne $script:CertificateSubject -or
         $feedPackage.GetAttribute('Version') -ne $expectedVersion -or
-        $feedPackage.GetAttribute('ProcessorArchitecture') -ne 'x64' -or
-        $feedPackage.GetAttribute('Uri') -ne "$latestBaseUri/PackagePilot.msix" -or
-        $feedRuntime.GetAttribute('Name') -ne 'Microsoft.WindowsAppRuntime.2' -or
-        $feedRuntime.GetAttribute('Publisher') -ne
-            'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' -or
-        $feedRuntime.GetAttribute('Version') -ne '2.2.0.0' -or
-        $feedRuntime.GetAttribute('ProcessorArchitecture') -ne 'x64' -or
-        $feedRuntime.GetAttribute('Uri') -ne "$latestBaseUri/Microsoft.WindowsAppRuntime.2.msix" -or
+        $feedPackage.HasAttribute('ProcessorArchitecture') -or
+        $feedPackage.GetAttribute('Uri') -ne "$latestBaseUri/PackagePilot.msixbundle" -or
+        $feedRuntimes.Count -ne 2 -or
         $null -eq $feedOnLaunch -or
-        $feedOnLaunch.GetAttribute('HoursBetweenUpdateChecks') -ne '0' -or
-        $feedOnLaunch.GetAttribute('ShowPrompt') -ne 'true' -or
+        $feedOnLaunch.GetAttribute('HoursBetweenUpdateChecks') -ne '24' -or
+        $feedOnLaunch.GetAttribute('ShowPrompt') -ne 'false' -or
         $feedOnLaunch.GetAttribute('UpdateBlocksActivation') -ne 'false' -or
         $null -eq $feedBackgroundTask) {
         throw 'The App Installer feed does not match the selected release payload.'
+    }
+    $expectedRuntimeUris = @{
+        x64 = "$latestBaseUri/Microsoft.WindowsAppRuntime.2.x64.msix"
+        arm64 = "$latestBaseUri/Microsoft.WindowsAppRuntime.2.arm64.msix"
+    }
+    foreach ($feedRuntime in $feedRuntimes) {
+        $architecture = $feedRuntime.GetAttribute('ProcessorArchitecture')
+        if (-not $expectedRuntimeUris.ContainsKey($architecture) -or
+            $feedRuntime.GetAttribute('Name') -ne 'Microsoft.WindowsAppRuntime.2' -or
+            $feedRuntime.GetAttribute('Publisher') -ne
+                'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' -or
+            $feedRuntime.GetAttribute('Version') -ne '2.2.0.0' -or
+            $feedRuntime.GetAttribute('Uri') -ne $expectedRuntimeUris[$architecture]) {
+            throw "The App Installer feed contains an invalid '$architecture' runtime dependency."
+        }
+        [void]$expectedRuntimeUris.Remove($architecture)
+    }
+    if ($expectedRuntimeUris.Count -ne 0) {
+        throw 'The App Installer feed does not contain both architecture-specific runtime dependencies.'
     }
 
     $certificate = Get-ReleaseCertificate
@@ -567,35 +633,36 @@ try {
 
     & $signTool.FullName 'sign' '/fd' 'SHA256' '/sha1' $certificate.Thumbprint '/s' 'My' '/tr' 'http://timestamp.acs.microsoft.com' '/td' 'SHA256' $packagePath
     if ($LASTEXITCODE -ne 0) {
-        throw "SignTool signing failed with exit code $LASTEXITCODE."
+        throw "SignTool bundle signing failed with exit code $LASTEXITCODE."
     }
 
     $packageSignature = Get-AuthenticodeSignature -FilePath $packagePath
     if ($packageSignature.Status -ne
             [System.Management.Automation.SignatureStatus]::Valid -or
         $packageSignature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
-        throw "The signed Package Pilot MSIX failed signer verification: $($packageSignature.StatusMessage)"
+        throw "The signed Package Pilot MSIX bundle failed signer verification: $($packageSignature.StatusMessage)"
     }
     & $signTool.FullName 'verify' '/pa' '/all' '/v' $packagePath
     if ($LASTEXITCODE -ne 0) {
-        throw "SignTool verification failed with exit code $LASTEXITCODE."
+        throw "SignTool bundle verification failed with exit code $LASTEXITCODE."
     }
 
-    $signedIdentity = Get-MsixIdentity -Path $packagePath
+    $signedIdentity = Get-MsixBundleIdentity -Path $packagePath
     if (-not $signedIdentity.HasSignature -or
         $signedIdentity.Name -ne 'PackagePilot.Desktop' -or
         $signedIdentity.Publisher -ne $script:CertificateSubject -or
         $signedIdentity.Version -ne $expectedVersion -or
-        $signedIdentity.ProcessorArchitecture -ne 'x64') {
-        throw 'Signing changed the package identity or did not add AppxSignature.p7x.'
+        ($signedIdentity.Architectures -join ',') -ne 'arm64,x64') {
+        throw 'Signing changed the bundle identity or architecture set, or did not add AppxSignature.p7x.'
     }
 
     $certificatePath = Join-Path $resolvedWorkingDirectory 'PackagePilot.cer'
     Export-Certificate -Cert $certificate -FilePath $certificatePath -Force | Out-Null
 
     $checksumNames = @(
-        'PackagePilot.msix'
-        'Microsoft.WindowsAppRuntime.2.msix'
+        'PackagePilot.msixbundle'
+        'Microsoft.WindowsAppRuntime.2.x64.msix'
+        'Microsoft.WindowsAppRuntime.2.arm64.msix'
         'PackagePilot.cer'
         'PackagePilot.appinstaller'
     )
@@ -608,7 +675,8 @@ try {
 
     $assets = @(
         $packagePath
-        $runtimePath
+        $x64RuntimePath
+        $arm64RuntimePath
         $certificatePath
         $appInstallerPath
         $checksumPath
@@ -637,10 +705,11 @@ try {
         'assets,isDraft,isPrerelease,tagName,targetCommitish,url'
     )
     $expectedAssetNames = @(
-        'Microsoft.WindowsAppRuntime.2.msix'
+        'Microsoft.WindowsAppRuntime.2.arm64.msix'
+        'Microsoft.WindowsAppRuntime.2.x64.msix'
         'PackagePilot.appinstaller'
         'PackagePilot.cer'
-        'PackagePilot.msix'
+        'PackagePilot.msixbundle'
         'SHA256SUMS.txt'
     ) | Sort-Object
     $publishedAssetNames = @(

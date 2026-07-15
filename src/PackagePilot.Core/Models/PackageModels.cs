@@ -24,6 +24,13 @@ public sealed record PackageQuery
     /// </summary>
     public bool AcceptSourceAgreements { get; init; }
 
+    /// <summary>
+    /// Exact per-source term fingerprints previously accepted by the user. A source is
+    /// accepted only when its current terms produce the same fingerprint.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> AcceptedSourceAgreementFingerprints { get; init; } =
+        new Dictionary<string, string>();
+
     /// <summary>The maximum number of results. Values are always clamped to the V1 limit of 100.</summary>
     public int Limit
     {
@@ -90,6 +97,7 @@ public sealed record PackageSourceStatus
     public SourceHealth Health { get; init; } = SourceHealth.Unknown;
     public string? Message { get; init; }
     public IReadOnlyList<PackageAgreement> Agreements { get; init; } = Array.Empty<PackageAgreement>();
+    public string AgreementFingerprint { get; init; } = string.Empty;
 }
 
 public enum PackageMatchField

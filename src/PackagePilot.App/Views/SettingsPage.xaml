@@ -136,9 +136,9 @@
                     <InfoBar
                         IsClosable="False"
                         IsOpen="True"
-                        Message="Sources are shown for diagnostics. Manage them with WinGet or your organization's policy."
+                        Message="Source health is summarized here. Use the Sources destination for supported refresh and administration actions."
                         Severity="Informational"
-                        Title="Read-only" />
+                        Title="Source summary" />
                     <ListView
                         Style="{StaticResource PackagePilotListViewStyle}"
                         AutomationProperties.Name="Configured WinGet sources"
@@ -153,6 +153,49 @@
                             </Style>
                         </ListView.ItemContainerStyle>
                     </ListView>
+                </StackPanel>
+
+                <StackPanel Spacing="8">
+                    <TextBlock Style="{StaticResource PackagePilotSectionTitleStyle}" Text="Update monitoring" />
+                    <Border Style="{StaticResource PackagePilotCardStyle}">
+                        <StackPanel Spacing="14">
+                            <Grid ColumnSpacing="20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center" Spacing="2">
+                                    <TextBlock FontWeight="SemiBold" Text="Check for application updates" />
+                                    <TextBlock
+                                        Style="{StaticResource PackagePilotCaptionStyle}"
+                                        Text="Background checks are read-only and run when Windows allows. Installs and updates always wait for your review."
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ComboBox
+                                    x:Name="UpdateCadenceBox"
+                                    Grid.Column="1"
+                                    MinWidth="160"
+                                    AutomationProperties.Name="Application update check frequency"
+                                    SelectedIndex="0"
+                                    SelectionChanged="OnUpdateCadenceChanged">
+                                    <ComboBoxItem Content="Daily" Tag="daily" />
+                                    <ComboBoxItem Content="Every 6 hours" Tag="sixHours" />
+                                    <ComboBoxItem Content="Manual" Tag="manual" />
+                                </ComboBox>
+                            </Grid>
+                            <InfoBar
+                                x:Name="BackgroundMonitoringInfoBar"
+                                AutomationProperties.LiveSetting="Polite"
+                                IsClosable="True"
+                                IsOpen="False"
+                                Severity="Informational" />
+                            <TextBlock
+                                x:Name="BackgroundStatusText"
+                                Style="{StaticResource PackagePilotCaptionStyle}"
+                                Text="Background status has not been loaded."
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
 
                 <StackPanel Spacing="8">
@@ -177,7 +220,7 @@
                                     <TextBlock x:Name="VersionText" Style="{StaticResource PackagePilotCaptionStyle}" Text="Version unavailable" />
                                     <TextBlock
                                         Style="{StaticResource PackagePilotSubtitleStyle}"
-                                        Text="Copies installed through PackagePilot.appinstaller check the public GitHub release feed at launch and in the background."
+                                        Text="Windows checks the Package Pilot release feed quietly about once a day and in the background."
                                         TextWrapping="Wrap" />
                                 </StackPanel>
                                 <InfoBar
@@ -215,7 +258,7 @@
                             </Border>
                             <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
                                 <TextBlock FontWeight="SemiBold" Text="Package Pilot" />
-                                <TextBlock x:Name="CapabilityText" Style="{StaticResource PackagePilotCaptionStyle}" Text="Checking WinGet capabilities…" />
+                                <TextBlock x:Name="CapabilityText" Style="{StaticResource PackagePilotCaptionStyle}" Text="Checking Windows integration capabilities…" TextWrapping="Wrap" />
                             </StackPanel>
                         </Grid>
                     </Border>

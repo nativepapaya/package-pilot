@@ -41,6 +41,14 @@ jobs:
         shell: pwsh
         run: dotnet build PackagePilot.slnx --configuration Release --no-restore
 
+      - name: Build ARM64
+        shell: pwsh
+        run: >-
+          dotnet build src/PackagePilot.App/PackagePilot.App.csproj
+          --configuration Release
+          --runtime win-arm64
+          -p:Platform=ARM64
+
       - name: Run deterministic tests
         shell: pwsh
         run: >-
@@ -54,6 +62,8 @@ jobs:
         shell: pwsh
         run: |
           ./build/tests/New-AppInstaller.Tests.ps1
+          ./build/tests/New-MsixBundle.Tests.ps1
+          ./build/tests/PackagingArchitecture.Tests.ps1
           ./build/tests/Set-PackageVersion.Tests.ps1
 
       - name: Test manual release security on Windows PowerShell 5.1

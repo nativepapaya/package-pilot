@@ -41,7 +41,7 @@ public sealed partial class InstalledPage : Page
     public void SetPackages(IEnumerable<PackageListItem> packages)
     {
         var snapshot = packages.ToArray();
-        if (HaveSameRows(Packages, snapshot))
+        if (PackageListItemComparer.HaveSameRows(Packages, snapshot))
         {
             return;
         }
@@ -97,36 +97,6 @@ public sealed partial class InstalledPage : Page
             1 => "1 installed package",
             _ => $"{DisplayedPackages.Count} installed packages"
         };
-    }
-
-    private static bool HaveSameRows(
-        IReadOnlyList<PackageListItem> current,
-        IReadOnlyList<PackageListItem> replacement)
-    {
-        if (current.Count != replacement.Count)
-        {
-            return false;
-        }
-
-        for (var index = 0; index < current.Count; index++)
-        {
-            var left = current[index];
-            var right = replacement[index];
-            if (!string.Equals(left.PackageId, right.PackageId, StringComparison.Ordinal)
-                || !string.Equals(left.Source, right.Source, StringComparison.Ordinal)
-                || !string.Equals(left.Name, right.Name, StringComparison.Ordinal)
-                || !string.Equals(left.Publisher, right.Publisher, StringComparison.Ordinal)
-                || !string.Equals(left.InstalledVersion, right.InstalledVersion, StringComparison.Ordinal)
-                || !string.Equals(left.AvailableVersion, right.AvailableVersion, StringComparison.Ordinal)
-                || !string.Equals(left.Status, right.Status, StringComparison.Ordinal)
-                || !string.Equals(left.ActionLabel, right.ActionLabel, StringComparison.Ordinal)
-                || left.IconUri != right.IconUri)
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private void OnPackageSelectionChanged(object sender, SelectionChangedEventArgs e)
