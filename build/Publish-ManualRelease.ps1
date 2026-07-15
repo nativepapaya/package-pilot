@@ -1123,11 +1123,13 @@ if ($Prepare) {
         'api'
         "repos/$Repository/actions/runs/$selectedRunId/artifacts"
     )
-    $matchingArtifacts = @($artifactResponse.artifacts) |
-        Where-Object {
-            [string]$_.name -eq $expectedArtifactName -and
-            -not [bool]$_.expired
-        }
+    $matchingArtifacts = @(
+        @($artifactResponse.artifacts) |
+            Where-Object {
+                [string]$_.name -eq $expectedArtifactName -and
+                -not [bool]$_.expired
+            }
+    )
     if ($matchingArtifacts.Count -ne 1) {
         throw "Expected exactly one nonexpired artifact '$expectedArtifactName', but found $($matchingArtifacts.Count)."
     }
