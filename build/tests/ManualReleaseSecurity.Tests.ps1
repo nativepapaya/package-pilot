@@ -93,4 +93,54 @@ Assert-True -Condition ($workflow -match 'release-metadata\.json') `
 Assert-True -Condition ($workflow -match '(?m)^\s*retention-days:\s*30\s*$') `
     -Message 'Unsigned release artifacts must be retained for 30 days.'
 
+$nonExportableFunction = $initializerAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Test-NonExportablePrivateKey'
+    },
+    $true)
+$assertCertificateFunction = $initializerAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Assert-ReleaseCertificate'
+    },
+    $true)
+Assert-True -Condition ($null -ne $nonExportableFunction -and $null -ne $assertCertificateFunction) `
+    -Message 'The certificate validation functions could not be loaded for a runtime compatibility test.'
+
+Invoke-Expression $nonExportableFunction.Extent.Text
+Invoke-Expression $assertCertificateFunction.Extent.Text
+$Subject = 'CN=PackagePilot.Dev'
+$testCertificate = $null
+try {
+    $testCertificate = New-SelfSignedCertificate `
+        -Type Custom `
+        -Subject $Subject `
+        -FriendlyName "Package Pilot release security test $([Guid]::NewGuid().ToString('N'))" `
+        -CertStoreLocation 'Cert:\CurrentUser\My' `
+        -KeyAlgorithm RSA `
+        -KeyLength 3072 `
+        -HashAlgorithm SHA256 `
+        -KeyUsage DigitalSignature `
+        -KeyExportPolicy NonExportable `
+        -NotBefore (Get-Date).AddMinutes(-5) `
+        -NotAfter (Get-Date).AddMonths(2) `
+        -TextExtension @(
+            '2.5.29.19={text}'
+            '2.5.29.37={text}1.3.6.1.5.5.7.3.3'
+        )
+
+    Assert-ReleaseCertificate -Certificate $testCertificate
+}
+finally {
+    if ($null -ne $testCertificate) {
+        Remove-Item `
+            -LiteralPath "Cert:\CurrentUser\My\$($testCertificate.Thumbprint)" `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Output 'Manual release security tests passed.'
