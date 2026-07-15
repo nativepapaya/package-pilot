@@ -4,8 +4,15 @@ public enum BackgroundUpdateRunState
 {
     Completed,
     Skipped,
+    SkippedBusy,
     Failed,
     Cancelled
+}
+
+public enum UpdateScanExecutionState
+{
+    Completed,
+    SkippedBusy
 }
 
 /// <summary>
@@ -23,12 +30,14 @@ public sealed record BackgroundUpdateRunStatus
     public DateTimeOffset? LastSuccessfulRunAt { get; init; }
     public int UpdateCount { get; init; }
     public bool ForegroundFallbackRequired { get; init; }
+    public bool NotificationRetryPending { get; init; }
     public string? Message { get; init; }
 }
 
 /// <summary>Result of one serialized, read-only update discovery pass.</summary>
 public sealed record UpdateScanExecutionResult
 {
+    public UpdateScanExecutionState State { get; init; } = UpdateScanExecutionState.Completed;
     public UpdateCheckResult Check { get; init; } = new();
     public UpdateNotificationDecision Notification { get; init; } = new();
     public bool NotificationApplied { get; init; }

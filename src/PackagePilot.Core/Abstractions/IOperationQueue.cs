@@ -19,6 +19,13 @@ public interface IOperationQueue : IAsyncDisposable
     /// </summary>
     bool TryCancel(Guid operationId);
 
+    /// <summary>
+    /// Atomically refuses new package work when the queue is idle so the owning process can
+    /// shut down without racing a concurrent enqueue. Returns false and leaves the queue open
+    /// when an operation is queued or running.
+    /// </summary>
+    bool TryBeginShutdownIfIdle();
+
     /// <summary>Clears retained completed results without affecting active or queued operations.</summary>
     void ClearHistory();
 

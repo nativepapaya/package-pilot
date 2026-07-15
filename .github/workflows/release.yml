@@ -176,6 +176,7 @@ jobs:
               param([Parameter(Mandatory)][string]$Path)
 
               $requiredEntries = @(
+                  'PackagePilot.Windows.ReadOnly.dll'
                   'PackagePilot.Background.exe'
                   'PackagePilot.Background.dll'
                   'PackagePilot.Background.deps.json'
@@ -185,6 +186,9 @@ jobs:
                   'PackagePilot.SourceAdmin.dll'
                   'PackagePilot.SourceAdmin.deps.json'
                   'PackagePilot.SourceAdmin.runtimeconfig.json'
+                  'Microsoft.Management.Deployment.CsWinRTProjection.dll'
+                  'Microsoft.Management.Deployment.dll'
+                  'Microsoft.Management.Deployment.winmd'
                   'Microsoft.Windows.ApplicationModel.Background.Projection.dll'
                   'Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.dll'
               )

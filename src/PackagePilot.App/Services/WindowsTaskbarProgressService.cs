@@ -12,14 +12,15 @@ internal sealed class WindowsTaskbarProgressService : IDisposable
     internal WindowsTaskbarProgressService(Microsoft.UI.Xaml.Window window)
     {
         ArgumentNullException.ThrowIfNull(window);
-        _windowHandle = WinRT.Interop.WindowNative.GetWindowHandle(window);
         try
         {
+            _windowHandle = WinRT.Interop.WindowNative.GetWindowHandle(window);
             _taskbar = (ITaskbarList3)(object)new TaskbarList();
             _taskbar.HrInit();
         }
-        catch (COMException)
+        catch (Exception exception) when (IsRecoverable(exception))
         {
+            _windowHandle = 0;
             _taskbar = null;
         }
     }
@@ -55,7 +56,7 @@ internal sealed class WindowsTaskbarProgressService : IDisposable
             _taskbar.SetProgressState(_windowHandle, TaskbarProgressState.Normal);
             _taskbar.SetProgressValue(_windowHandle, completed, 100);
         }
-        catch (COMException)
+        catch (Exception exception) when (IsRecoverable(exception))
         {
             // Explorer can restart while an operation is active. The in-app queue remains
             // authoritative and the taskbar indicator is best-effort shell integration.
@@ -64,11 +65,23 @@ internal sealed class WindowsTaskbarProgressService : IDisposable
 
     public void Dispose()
     {
-        if (_taskbar is not null && Marshal.IsComObject(_taskbar))
+        try
         {
-            Marshal.FinalReleaseComObject(_taskbar);
+            if (_taskbar is not null && Marshal.IsComObject(_taskbar))
+            {
+                Marshal.FinalReleaseComObject(_taskbar);
+            }
+        }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            // Explorer integration must never prevent normal window shutdown.
         }
     }
+
+    private static bool IsRecoverable(Exception exception) => exception is not
+        OutOfMemoryException and not
+        StackOverflowException and not
+        AccessViolationException;
 
     private enum TaskbarProgressState : uint
     {

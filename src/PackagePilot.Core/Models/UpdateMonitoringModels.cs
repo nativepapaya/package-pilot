@@ -26,6 +26,24 @@ public sealed record BackgroundMonitoringResult
     public bool IsAvailable => State is BackgroundMonitoringState.Disabled or BackgroundMonitoringState.Registered;
 }
 
+/// <summary>
+/// Combined durable view of Windows registration and the most recent opportunistic scan.
+/// Desired and actual cadence are separate so rollback or policy failures are never presented
+/// as though Windows accepted the requested schedule.
+/// </summary>
+public sealed record BackgroundMonitoringStatus
+{
+    public UpdateMonitoringCadence DesiredCadence { get; init; }
+    public UpdateMonitoringCadence ActualCadence { get; init; }
+    public BackgroundMonitoringState RegistrationState { get; init; }
+    public bool RegistrationHealthy { get; init; }
+    public DateTimeOffset? RegistrationAttemptedAt { get; init; }
+    public DateTimeOffset? LastAttemptAt { get; init; }
+    public DateTimeOffset? LastSuccessAt { get; init; }
+    public string? Error { get; init; }
+    public bool ForegroundFallbackRequired { get; init; }
+}
+
 /// <summary>One testable capability surface for Windows identity-bound integrations.</summary>
 public sealed record WindowsIntegrationCapabilities
 {

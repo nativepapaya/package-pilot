@@ -1,9 +1,32 @@
 #Requires -Version 5.1
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Prepare')]
 param(
-    [uint64]$RunId = 0,
+    [Parameter(Mandatory, ParameterSetName = 'Prepare')]
+    [switch]$Prepare,
 
+    [Parameter(Mandatory, ParameterSetName = 'Promote')]
+    [switch]$Promote,
+
+    [Parameter(Mandatory, ParameterSetName = 'Prepare')]
+    [Parameter(Mandatory, ParameterSetName = 'Promote')]
+    [uint64]$RunId,
+
+    [Parameter(Mandatory, ParameterSetName = 'Prepare')]
+    [Parameter(Mandatory, ParameterSetName = 'Promote')]
+    [ValidateNotNullOrEmpty()]
+    [string]$PreparedDirectory,
+
+    [Parameter(Mandatory, ParameterSetName = 'Promote')]
+    [ValidatePattern('^v1\.0\.[0-9]+$')]
+    [string]$ConfirmTag,
+
+    [Parameter(Mandatory, ParameterSetName = 'Promote')]
+    [ValidatePattern('^[A-Fa-f0-9]{64}$')]
+    [string]$ConfirmBundleSha256,
+
+    [Parameter(ParameterSetName = 'Prepare')]
+    [Parameter(ParameterSetName = 'Promote')]
     [ValidatePattern('^[A-Fa-f0-9]{40}$')]
     [string]$CertificateThumbprint
 )
@@ -15,6 +38,39 @@ $script:CertificateSubject = 'CN=PackagePilot.Dev'
 $script:CertificateFriendlyName = 'Package Pilot manual release signing'
 $script:GhExecutable = $null
 $Repository = 'nativepapaya/package-pilot'
+$PreparedStateFileName = 'prepared-release.json'
+$PreparedStateSignatureFileName = 'prepared-release.json.sig'
+$ReleaseAssetNames = @(
+    'PackagePilot.msixbundle'
+    'Microsoft.WindowsAppRuntime.2.x64.msix'
+    'Microsoft.WindowsAppRuntime.2.arm64.msix'
+    'PackagePilot.cer'
+    'PackagePilot.appinstaller'
+    'SHA256SUMS.txt'
+)
+$RequiredApplicationPayloadNames = @(
+    'PackagePilot.App.exe'
+    'PackagePilot.App.dll'
+    'PackagePilot.App.deps.json'
+    'PackagePilot.App.runtimeconfig.json'
+    'PackagePilot.Core.dll'
+    'PackagePilot.Windows.ReadOnly.dll'
+    'PackagePilot.Windows.dll'
+    'PackagePilot.Background.exe'
+    'PackagePilot.Background.dll'
+    'PackagePilot.Background.deps.json'
+    'PackagePilot.Background.runtimeconfig.json'
+    'PackagePilot.Background.pri'
+    'PackagePilot.SourceAdmin.exe'
+    'PackagePilot.SourceAdmin.dll'
+    'PackagePilot.SourceAdmin.deps.json'
+    'PackagePilot.SourceAdmin.runtimeconfig.json'
+    'Microsoft.Management.Deployment.CsWinRTProjection.dll'
+    'Microsoft.Management.Deployment.dll'
+    'Microsoft.Management.Deployment.winmd'
+    'Microsoft.Windows.ApplicationModel.Background.Projection.dll'
+    'Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.dll'
+)
 
 function Invoke-GhJson {
     param(
@@ -151,6 +207,51 @@ function Get-ReleaseCertificate {
     return $certificate
 }
 
+function Get-MsixIdentityFromArchive {
+    param(
+        [Parameter(Mandatory)]
+        [System.IO.Compression.ZipArchive]$Archive,
+
+        [Parameter(Mandatory)]
+        [string]$DisplayName,
+
+        [switch]$RequireApplicationPayload
+    )
+
+    $manifestEntry = $Archive.GetEntry('AppxManifest.xml')
+    if ($null -eq $manifestEntry) {
+        throw "'$DisplayName' does not contain AppxManifest.xml."
+    }
+
+    $reader = [IO.StreamReader]::new($manifestEntry.Open())
+    try {
+        [xml]$manifest = $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
+
+    $identity = $manifest.Package.Identity
+    if ($null -eq $identity) {
+        throw "'$DisplayName' does not contain a package identity."
+    }
+    if ($RequireApplicationPayload) {
+        foreach ($entryName in $RequiredApplicationPayloadNames) {
+            if ($null -eq $Archive.GetEntry($entryName)) {
+                throw "'$DisplayName' is missing required application payload '$entryName'."
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Name = [string]$identity.Name
+        Publisher = [string]$identity.Publisher
+        Version = [string]$identity.Version
+        ProcessorArchitecture = ([string]$identity.ProcessorArchitecture).ToLowerInvariant()
+        HasSignature = $null -ne $Archive.GetEntry('AppxSignature.p7x')
+    }
+}
+
 function Get-MsixIdentity {
     param(
         [Parameter(Mandatory)]
@@ -159,27 +260,7 @@ function Get-MsixIdentity {
 
     $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
     try {
-        $manifestEntry = $archive.GetEntry('AppxManifest.xml')
-        if ($null -eq $manifestEntry) {
-            throw "'$Path' does not contain AppxManifest.xml."
-        }
-
-        $reader = [IO.StreamReader]::new($manifestEntry.Open())
-        try {
-            [xml]$manifest = $reader.ReadToEnd()
-        }
-        finally {
-            $reader.Dispose()
-        }
-
-        $identity = $manifest.Package.Identity
-        return [pscustomobject]@{
-            Name = [string]$identity.Name
-            Publisher = [string]$identity.Publisher
-            Version = [string]$identity.Version
-            ProcessorArchitecture = [string]$identity.ProcessorArchitecture
-            HasSignature = $null -ne $archive.GetEntry('AppxSignature.p7x')
-        }
+        return Get-MsixIdentityFromArchive -Archive $archive -DisplayName $Path
     }
     finally {
         $archive.Dispose()
@@ -210,17 +291,92 @@ function Get-MsixBundleIdentity {
         $identity = $manifest.SelectSingleNode("/*[local-name()='Bundle']/*[local-name()='Identity']")
         $packages = @($manifest.SelectNodes(
             "/*[local-name()='Bundle']/*[local-name()='Packages']/*[local-name()='Package']"))
-        if ($null -eq $identity -or $packages.Count -eq 0) {
+        if ($null -eq $identity -or $packages.Count -ne 2) {
             throw "'$Path' contains an incomplete bundle manifest."
+        }
+
+        $embeddedMsixEntries = @($archive.Entries | Where-Object {
+            [IO.Path]::GetExtension($_.FullName) -ieq '.msix'
+        })
+        if ($embeddedMsixEntries.Count -ne 2) {
+            throw "'$Path' must contain exactly two embedded application MSIX files."
+        }
+
+        $embeddedPackages = foreach ($package in $packages) {
+            $fileName = $package.GetAttribute('FileName')
+            $manifestArchitecture = $package.GetAttribute('Architecture').ToLowerInvariant()
+            $manifestVersion = $package.GetAttribute('Version')
+            if (-not [string]::Equals(
+                    $package.GetAttribute('Type'),
+                    'application',
+                    [StringComparison]::OrdinalIgnoreCase) -or
+                [string]::IsNullOrWhiteSpace($fileName) -or
+                [IO.Path]::GetFileName($fileName) -ne $fileName -or
+                [IO.Path]::GetExtension($fileName) -ine '.msix') {
+                throw "'$Path' contains a non-application or unsafe embedded package record."
+            }
+
+            $embeddedEntry = $archive.GetEntry($fileName)
+            if ($null -eq $embeddedEntry) {
+                throw "'$Path' bundle manifest references missing embedded package '$fileName'."
+            }
+
+            $memory = [IO.MemoryStream]::new()
+            $entryStream = $embeddedEntry.Open()
+            try {
+                $entryStream.CopyTo($memory)
+            }
+            finally {
+                $entryStream.Dispose()
+            }
+            $memory.Position = 0
+            $embeddedArchive = [IO.Compression.ZipArchive]::new(
+                $memory,
+                [IO.Compression.ZipArchiveMode]::Read,
+                $false)
+            try {
+                $embeddedIdentity = Get-MsixIdentityFromArchive `
+                    -Archive $embeddedArchive `
+                    -DisplayName "${Path}::$fileName" `
+                    -RequireApplicationPayload
+            }
+            finally {
+                $embeddedArchive.Dispose()
+                $memory.Dispose()
+            }
+
+            if ($embeddedIdentity.Name -ne 'PackagePilot.Desktop' -or
+                $embeddedIdentity.Publisher -ne 'CN=PackagePilot.Dev' -or
+                $embeddedIdentity.Version -ne $identity.GetAttribute('Version') -or
+                $embeddedIdentity.Version -ne $manifestVersion -or
+                $embeddedIdentity.ProcessorArchitecture -ne $manifestArchitecture -or
+                $embeddedIdentity.HasSignature) {
+                throw "'${Path}::$fileName' has an invalid identity, architecture, version, or nested signature state."
+            }
+
+            [pscustomobject]@{
+                FileName = $fileName
+                Name = $embeddedIdentity.Name
+                Publisher = $embeddedIdentity.Publisher
+                Version = $embeddedIdentity.Version
+                Architecture = $embeddedIdentity.ProcessorArchitecture
+            }
+        }
+
+        $referencedFileNames = @($embeddedPackages.FileName | Sort-Object)
+        $actualFileNames = @($embeddedMsixEntries.FullName | Sort-Object)
+        $architectures = @($embeddedPackages.Architecture | Sort-Object -Unique)
+        if (($referencedFileNames -join "`n") -ne ($actualFileNames -join "`n") -or
+            ($architectures -join ',') -ne 'arm64,x64') {
+            throw "'$Path' does not contain exactly one validated x64 and ARM64 application package."
         }
 
         return [pscustomobject]@{
             Name = $identity.GetAttribute('Name')
             Publisher = $identity.GetAttribute('Publisher')
             Version = $identity.GetAttribute('Version')
-            Architectures = @($packages | ForEach-Object {
-                $_.GetAttribute('Architecture').ToLowerInvariant()
-            } | Sort-Object -Unique)
+            Architectures = $architectures
+            EmbeddedPackages = @($embeddedPackages)
             HasSignature = $null -ne $archive.GetEntry('AppxSignature.p7x')
         }
     }
@@ -244,17 +400,46 @@ function Assert-MetadataProperty {
 }
 
 function Get-ExistingReleases {
-    $result = Invoke-GhJson -Arguments @(
-        'release'
-        'list'
-        '--repo'
-        $Repository
-        '--limit'
-        '1000'
-        '--json'
-        'tagName,isDraft,isPrerelease'
+    $pageResult = Invoke-GhJson -Arguments @(
+        'api'
+        '--paginate'
+        '--slurp'
+        "repos/$Repository/releases?per_page=100"
     )
-    return @($result | Where-Object { $null -ne $_ })
+    $rawReleases = @($pageResult | ForEach-Object { $_ })
+    $seenReleaseIds = [Collections.Generic.HashSet[uint64]]::new()
+    $releases = [Collections.Generic.List[object]]::new()
+    foreach ($release in $rawReleases) {
+        if ($null -eq $release) {
+            throw 'GitHub returned a malformed release page.'
+        }
+        foreach ($propertyName in @('id', 'tag_name', 'draft', 'prerelease')) {
+            if ($release.PSObject.Properties.Name -notcontains $propertyName) {
+                throw "GitHub returned a release without '$propertyName'."
+            }
+        }
+
+        [uint64]$releaseId = 0
+        if (-not [uint64]::TryParse(
+                [string]$release.id,
+                [Globalization.NumberStyles]::None,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$releaseId) -or
+            $releaseId -lt 1) {
+            throw 'GitHub returned an invalid release identifier.'
+        }
+        if (-not $seenReleaseIds.Add($releaseId)) {
+            throw 'GitHub returned duplicate releases during pagination; retry instead of publishing from an unstable snapshot.'
+        }
+
+        $releases.Add([pscustomobject]@{
+            tagName = [string]$release.tag_name
+            isDraft = [bool]$release.draft
+            isPrerelease = [bool]$release.prerelease
+        })
+    }
+
+    return @($releases)
 }
 
 function Get-ReleaseHighWaterMark {
@@ -305,49 +490,443 @@ function Get-ExactTagReference {
 function Get-SelectedRun {
     param(
         [Parameter(Mandatory)]
-        [uint64]$MinimumSequenceExclusive
+        [uint64]$WorkflowRunId
     )
 
-    if ($RunId -gt 0) {
-        $run = Invoke-GhJson -Arguments @(
-            'run'
-            'view'
-            $RunId.ToString()
-            '--repo'
-            $Repository
-            '--json'
-            'attempt,conclusion,databaseId,event,headBranch,headSha,number,status,workflowDatabaseId,workflowName'
-        )
-        return $run
+    if ($WorkflowRunId -lt 1) {
+        throw 'An exact positive Release workflow run ID is required.'
     }
 
-    $runs = @(
-        (Invoke-GhJson -Arguments @(
-            'run'
-            'list'
-            '--repo'
-            $Repository
-            '--workflow'
-            'release.yml'
-            '--branch'
-            'main'
-            '--status'
-            'success'
-            '--limit'
-            '100'
-            '--json'
-            'attempt,conclusion,databaseId,event,headBranch,headSha,number,status,workflowDatabaseId,workflowName'
-        )) | Where-Object { $null -ne $_ }
+    return Invoke-GhJson -Arguments @(
+        'run'
+        'view'
+        $WorkflowRunId.ToString()
+        '--repo'
+        $Repository
+        '--json'
+        'attempt,conclusion,databaseId,event,headBranch,headSha,number,status,workflowDatabaseId,workflowName'
+    )
+}
+
+function Get-NewerBlockingReleaseRuns {
+    param(
+        [Parameter(Mandatory)]
+        [uint64]$WorkflowDatabaseId,
+
+        [Parameter(Mandatory)]
+        [uint64]$RunNumber
     )
 
-    foreach ($candidate in $runs | Sort-Object { [uint64]$_.number }) {
-        [uint64]$sequence = [uint64]$candidate.number + 4
-        if ($sequence -gt $MinimumSequenceExclusive) {
-            return $candidate
+    # Do not add branch/status filters here. GitHub caps filtered workflow-run
+    # searches at 1,000 results, which could hide an older blocking run. Fetch
+    # every page for this workflow and filter the main branch locally instead.
+    $pageResult = Invoke-GhJson -Arguments @(
+        'api'
+        '--paginate'
+        '--slurp'
+        "repos/$Repository/actions/workflows/$WorkflowDatabaseId/runs?per_page=100"
+    )
+    # Windows PowerShell 5.1 can preserve a ConvertFrom-Json top-level array as
+    # one pipeline object. Enumerate that array explicitly, but not the page
+    # objects or their workflow_runs arrays.
+    $pages = @($pageResult | ForEach-Object { $_ })
+    if ($pages.Count -eq 0) {
+        throw 'GitHub returned no workflow-run pages; refusing to infer that no newer run exists.'
+    }
+
+    [uint64]$expectedTotalCount = 0
+    $hasExpectedTotalCount = $false
+    $seenRunIds = [Collections.Generic.HashSet[uint64]]::new()
+    $blockingRuns = [Collections.Generic.List[object]]::new()
+    foreach ($page in $pages) {
+        if ($null -eq $page -or
+            $page.PSObject.Properties.Name -notcontains 'total_count' -or
+            $page.PSObject.Properties.Name -notcontains 'workflow_runs') {
+            throw 'GitHub returned a malformed workflow-run page.'
+        }
+
+        [uint64]$pageTotalCount = 0
+        if (-not [uint64]::TryParse(
+                [string]$page.total_count,
+                [Globalization.NumberStyles]::None,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$pageTotalCount)) {
+            throw 'GitHub returned an invalid workflow-run total count.'
+        }
+        if (-not $hasExpectedTotalCount) {
+            $expectedTotalCount = $pageTotalCount
+            $hasExpectedTotalCount = $true
+        }
+        elseif ($expectedTotalCount -ne $pageTotalCount) {
+            throw 'The workflow-run list changed during pagination; retry after GitHub settles.'
+        }
+
+        foreach ($run in @($page.workflow_runs | Where-Object { $null -ne $_ })) {
+            foreach ($propertyName in @(
+                'id',
+                'run_number',
+                'head_branch',
+                'status',
+                'conclusion')) {
+                if ($run.PSObject.Properties.Name -notcontains $propertyName) {
+                    throw "GitHub returned a workflow run without '$propertyName'."
+                }
+            }
+
+            [uint64]$runId = 0
+            [uint64]$candidateRunNumber = 0
+            if (-not [uint64]::TryParse(
+                    [string]$run.id,
+                    [Globalization.NumberStyles]::None,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [ref]$runId) -or
+                $runId -lt 1 -or
+                -not [uint64]::TryParse(
+                    [string]$run.run_number,
+                    [Globalization.NumberStyles]::None,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [ref]$candidateRunNumber) -or
+                $candidateRunNumber -lt 1) {
+                throw 'GitHub returned an invalid workflow run identifier or number.'
+            }
+            if (-not $seenRunIds.Add($runId)) {
+                throw 'GitHub returned duplicate workflow runs during pagination; retry instead of publishing from an unstable snapshot.'
+            }
+
+            if ([string]$run.head_branch -eq 'main' -and
+                $candidateRunNumber -gt $RunNumber -and
+                ([string]$run.status -ne 'completed' -or
+                    [string]$run.conclusion -eq 'success')) {
+                $blockingRuns.Add($run)
+            }
         }
     }
 
-    throw 'No unpublished successful main-branch Release workflow run was found.'
+    if (-not $hasExpectedTotalCount -or
+        [uint64]$seenRunIds.Count -ne $expectedTotalCount) {
+        throw 'GitHub workflow-run pagination was incomplete; refusing to publish.'
+    }
+
+    return @($blockingRuns)
+}
+
+function New-PreparedFileRecord {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Directory,
+
+        [Parameter(Mandatory)]
+        [string]$FileName
+    )
+
+    $path = Join-Path $Directory $FileName
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Prepared release file '$FileName' is missing."
+    }
+
+    $file = Get-Item -LiteralPath $path
+    $hash = Get-FileHash -LiteralPath $path -Algorithm SHA256
+    return [ordered]@{
+        name = $FileName
+        size = [uint64]$file.Length
+        sha256 = $hash.Hash.ToLowerInvariant()
+    }
+}
+
+function Write-SignedPreparedState {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Directory,
+
+        [Parameter(Mandatory)]
+        [object]$State,
+
+        [Parameter(Mandatory)]
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
+    )
+
+    $statePath = Join-Path $Directory $PreparedStateFileName
+    $signaturePath = Join-Path $Directory $PreparedStateSignatureFileName
+    if ((Test-Path -LiteralPath $statePath) -or (Test-Path -LiteralPath $signaturePath)) {
+        throw 'The prepared release state or signature already exists.'
+    }
+
+    $json = $State | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText(
+        $statePath,
+        $json + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false))
+
+    $privateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey(
+        $Certificate)
+    if ($null -eq $privateKey) {
+        throw 'The release certificate RSA private key could not sign the prepared state.'
+    }
+
+    try {
+        $signature = $privateKey.SignData(
+            [IO.File]::ReadAllBytes($statePath),
+            [Security.Cryptography.HashAlgorithmName]::SHA256,
+            [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        [IO.File]::WriteAllText(
+            $signaturePath,
+            [Convert]::ToBase64String($signature) + [Environment]::NewLine,
+            [Text.Encoding]::ASCII)
+    }
+    finally {
+        $privateKey.Dispose()
+    }
+}
+
+function Read-AndVerifyPreparedState {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Directory,
+
+        [Parameter(Mandatory)]
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
+    )
+
+    $statePath = Join-Path $Directory $PreparedStateFileName
+    $signaturePath = Join-Path $Directory $PreparedStateSignatureFileName
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+        throw 'The prepared release state or its detached signature is missing.'
+    }
+
+    try {
+        $signature = [Convert]::FromBase64String(
+            (Get-Content -LiteralPath $signaturePath -Raw).Trim())
+    }
+    catch {
+        throw 'The prepared release state signature is not valid Base64.'
+    }
+
+    $publicKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey(
+        $Certificate)
+    if ($null -eq $publicKey) {
+        throw 'The release certificate RSA public key could not verify the prepared state.'
+    }
+
+    try {
+        $isValid = $publicKey.VerifyData(
+            [IO.File]::ReadAllBytes($statePath),
+            $signature,
+            [Security.Cryptography.HashAlgorithmName]::SHA256,
+            [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    }
+    finally {
+        $publicKey.Dispose()
+    }
+    if (-not $isValid) {
+        throw 'The prepared release state signature is invalid.'
+    }
+
+    return Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+}
+
+function Assert-PreparedDirectory {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Directory,
+
+        [Parameter(Mandatory)]
+        [object]$State
+    )
+
+    $expectedNames = @(
+        $ReleaseAssetNames
+        'release-metadata.json'
+        $PreparedStateFileName
+        $PreparedStateSignatureFileName
+    ) | Sort-Object
+    $directories = @(Get-ChildItem -LiteralPath $Directory -Directory -Force)
+    $actualNames = @(Get-ChildItem -LiteralPath $Directory -File -Force |
+        ForEach-Object Name |
+        Sort-Object)
+    if ($directories.Count -ne 0 -or
+        ($actualNames -join "`n") -ne ($expectedNames -join "`n")) {
+        throw 'The prepared release directory contains missing, duplicate, nested, or unexpected content.'
+    }
+
+    $stateAssets = @($State.assets)
+    $stateAssetNames = @($stateAssets | ForEach-Object { [string]$_.name } | Sort-Object)
+    $expectedAssetNames = @($ReleaseAssetNames | Sort-Object)
+    if ($stateAssets.Count -ne $ReleaseAssetNames.Count -or
+        ($stateAssetNames -join "`n") -ne ($expectedAssetNames -join "`n")) {
+        throw 'The prepared release state does not contain the exact release asset set.'
+    }
+
+    foreach ($record in $stateAssets) {
+        $current = New-PreparedFileRecord -Directory $Directory -FileName ([string]$record.name)
+        if ([uint64]$record.size -ne [uint64]$current.size -or
+            [string]$record.sha256 -ne [string]$current.sha256) {
+            throw "Prepared release asset '$([string]$record.name)' no longer matches its signed state."
+        }
+    }
+
+    $sourceMetadata = New-PreparedFileRecord -Directory $Directory -FileName 'release-metadata.json'
+    if ([uint64]$State.sourceMetadata.size -ne [uint64]$sourceMetadata.size -or
+        [string]$State.sourceMetadata.sha256 -ne [string]$sourceMetadata.sha256) {
+        throw 'release-metadata.json no longer matches the signed prepared state.'
+    }
+}
+
+function Get-ReleaseView {
+    param(
+        [Parameter(Mandatory)]
+        [string]$TagName
+    )
+
+    return Invoke-GhJson -Arguments @(
+        'release'
+        'view'
+        $TagName
+        '--repo'
+        $Repository
+        '--json'
+        'assets,isDraft,isPrerelease,name,tagName,targetCommitish,url'
+    )
+}
+
+function Assert-GitHubReleaseAssets {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Release,
+
+        [Parameter(Mandatory)]
+        [object]$State,
+
+        [switch]$AllowMissing
+    )
+
+    $stateAssets = @{}
+    foreach ($record in @($State.assets)) {
+        $stateAssets[[string]$record.name] = $record
+    }
+
+    $seen = @{}
+    foreach ($asset in @($Release.assets)) {
+        $name = [string]$asset.name
+        if (-not $stateAssets.ContainsKey($name) -or $seen.ContainsKey($name)) {
+            throw "GitHub release '$([string]$Release.tagName)' contains unexpected or duplicate asset '$name'."
+        }
+
+        $expected = $stateAssets[$name]
+        $expectedDigest = "sha256:$([string]$expected.sha256)"
+        if ([uint64]$asset.size -ne [uint64]$expected.size -or
+            [string]$asset.digest -ne $expectedDigest -or
+            [string]$asset.state -ne 'uploaded') {
+            throw "GitHub release asset '$name' does not match the signed prepared payload."
+        }
+        $seen[$name] = $true
+    }
+
+    $missing = @($ReleaseAssetNames | Where-Object { -not $seen.ContainsKey($_) })
+    if (-not $AllowMissing -and $missing.Count -ne 0) {
+        throw "GitHub release is missing prepared assets: $($missing -join ', ')."
+    }
+
+    return $missing
+}
+
+function Assert-GitHubReleaseBinding {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Release,
+
+        [Parameter(Mandatory)]
+        [string]$TagName,
+
+        [Parameter(Mandatory)]
+        [string]$CommitSha
+    )
+
+    if ([string]$Release.tagName -ne $TagName -or
+        [string]$Release.name -ne "Package Pilot $($TagName.Substring(1))" -or
+        [bool]$Release.isPrerelease -or
+        -not [string]::Equals(
+            [string]$Release.targetCommitish,
+            $CommitSha,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Release '$TagName' does not match the signed prepared state."
+    }
+
+    $tag = Get-ExactTagReference -TagName $TagName
+    if ($null -ne $tag -and
+        ([string]$tag.object.type -ne 'commit' -or
+            -not [string]::Equals(
+                [string]$tag.object.sha,
+                $CommitSha,
+                [StringComparison]::OrdinalIgnoreCase))) {
+        throw "Git tag '$TagName' does not point to the signed prepared commit."
+    }
+}
+
+function Assert-PromotionPreconditionsStillHold {
+    param(
+        [Parameter(Mandatory)]
+        [uint64]$WorkflowDatabaseId,
+
+        [Parameter(Mandatory)]
+        [uint64]$WorkflowRunId,
+
+        [Parameter(Mandatory)]
+        [uint64]$RunNumber,
+
+        [Parameter(Mandatory)]
+        [uint64]$RunAttempt,
+
+        [Parameter(Mandatory)]
+        [string]$CommitSha,
+
+        [Parameter(Mandatory)]
+        [uint64]$ReleaseSequence,
+
+        [Parameter(Mandatory)]
+        [string]$TagName
+    )
+
+    $currentRun = Get-SelectedRun -WorkflowRunId $WorkflowRunId
+    if ([uint64]$currentRun.databaseId -ne $WorkflowRunId -or
+        [uint64]$currentRun.workflowDatabaseId -ne $WorkflowDatabaseId -or
+        [uint64]$currentRun.number -ne $RunNumber -or
+        [uint64]$currentRun.attempt -ne $RunAttempt -or
+        [string]$currentRun.status -ne 'completed' -or
+        [string]$currentRun.conclusion -ne 'success' -or
+        [string]$currentRun.headBranch -ne 'main' -or
+        -not [string]::Equals(
+            [string]$currentRun.headSha,
+            $CommitSha,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The selected Release run changed after preparation; the draft remains unpublished.'
+    }
+
+    $currentMain = Invoke-GhJson -Arguments @(
+        'api'
+        "repos/$Repository/branches/main"
+    )
+    if (-not [string]::Equals(
+            [string]$currentMain.commit.sha,
+            $CommitSha,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Main changed after preparation; the draft remains unpublished for inspection.'
+    }
+
+    $blockingRuns = @(Get-NewerBlockingReleaseRuns `
+        -WorkflowDatabaseId $WorkflowDatabaseId `
+        -RunNumber $RunNumber)
+    if ($blockingRuns.Count -ne 0) {
+        throw 'A newer successful or unfinished Release run appeared; the draft remains unpublished.'
+    }
+
+    $otherReleases = @(Get-ExistingReleases | Where-Object {
+        [string]$_.tagName -ne $TagName
+    })
+    [uint64]$highWaterMark = Get-ReleaseHighWaterMark -Releases $otherReleases
+    if ($ReleaseSequence -le $highWaterMark) {
+        throw "A newer v1.0.$highWaterMark release appeared; the draft remains unpublished."
+    }
 }
 
 $ghCommand = Get-Command 'gh.exe' -ErrorAction SilentlyContinue
@@ -374,9 +953,67 @@ if ($null -eq $workflowDefinition -or
     throw "The active .github/workflows/release.yml workflow could not be verified in '$Repository'."
 }
 
-$existingReleases = @(Get-ExistingReleases)
-[uint64]$releaseHighWaterMark = Get-ReleaseHighWaterMark -Releases $existingReleases
-$selectedRun = Get-SelectedRun -MinimumSequenceExclusive $releaseHighWaterMark
+$resolvedPreparedDirectory = [IO.Path]::GetFullPath(
+    $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PreparedDirectory))
+$certificate = Get-ReleaseCertificate
+$preparedState = $null
+if ($Promote) {
+    if (-not (Test-Path -LiteralPath $resolvedPreparedDirectory -PathType Container)) {
+        throw "PreparedDirectory '$resolvedPreparedDirectory' was not found."
+    }
+    $preparedState = Read-AndVerifyPreparedState `
+        -Directory $resolvedPreparedDirectory `
+        -Certificate $certificate
+    foreach ($propertyName in @(
+        'schemaVersion'
+        'repository'
+        'workflowName'
+        'workflowDatabaseId'
+        'runId'
+        'runNumber'
+        'runAttempt'
+        'artifactId'
+        'artifactName'
+        'commitSha'
+        'releaseSequence'
+        'tagName'
+        'packageVersion'
+        'signerThumbprint'
+        'preparedAtUtc'
+        'sourceMetadata'
+        'assets'
+    )) {
+        Assert-MetadataProperty -Metadata $preparedState -Name $propertyName
+    }
+    if ([int]$preparedState.schemaVersion -ne 1 -or
+        [string]$preparedState.repository -ne $Repository -or
+        [string]$preparedState.workflowName -ne 'Release' -or
+        -not [string]::Equals(
+            [string]$preparedState.signerThumbprint,
+            $certificate.Thumbprint,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The signed prepared state has an invalid schema, repository, workflow, or signer.'
+    }
+    if ([uint64]$preparedState.runId -ne $RunId) {
+        throw 'The supplied RunId does not match the signed prepared state.'
+    }
+    $preparedBundleRecord = @($preparedState.assets) |
+        Where-Object { [string]$_.name -eq 'PackagePilot.msixbundle' } |
+        Select-Object -First 1
+    if ($null -eq $preparedBundleRecord -or
+        -not [string]::Equals(
+            [string]$preparedBundleRecord.sha256,
+            $ConfirmBundleSha256,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'ConfirmBundleSha256 does not match the exact signed prepared bundle.'
+    }
+    Assert-PreparedDirectory -Directory $resolvedPreparedDirectory -State $preparedState
+}
+elseif (Test-Path -LiteralPath $resolvedPreparedDirectory) {
+    throw "PreparedDirectory '$resolvedPreparedDirectory' already exists. Preparation never overwrites or resumes a directory."
+}
+
+$selectedRun = Get-SelectedRun -WorkflowRunId $RunId
 if ($null -eq $selectedRun) {
     throw 'The selected GitHub Actions run could not be read.'
 }
@@ -409,6 +1046,12 @@ if (@('ahead', 'identical') -notcontains [string]$ancestry.status -or
         [StringComparison]::OrdinalIgnoreCase)) {
     throw 'The selected workflow commit is not an ancestor of the current main branch.'
 }
+if (-not [string]::Equals(
+        [string]$selectedRun.headSha,
+        $mainCommitSha,
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The selected workflow commit is no longer the exact current main commit.'
+}
 
 [uint64]$selectedRunId = [uint64]$selectedRun.databaseId
 [uint64]$selectedRunNumber = [uint64]$selectedRun.number
@@ -423,56 +1066,114 @@ if ($expectedBuild -gt [uint16]::MaxValue) {
 $expectedVersion = "1.0.$expectedBuild.$expectedRevision"
 $expectedTag = "v1.0.$expectedSequence"
 $expectedArtifactName = "package-pilot-unsigned-$selectedRunId-$selectedRunAttempt"
+if ($Promote -and $ConfirmTag -ne $expectedTag) {
+    throw "ConfirmTag '$ConfirmTag' does not match the exact prepared release '$expectedTag'."
+}
+$newerBlockingRuns = @(Get-NewerBlockingReleaseRuns `
+    -WorkflowDatabaseId ([uint64]$workflowDefinition.id) `
+    -RunNumber $selectedRunNumber)
+if ($newerBlockingRuns.Count -ne 0) {
+    throw 'A newer successful or unfinished main-branch Release workflow run exists. Prepare the newest intended successful run instead.'
+}
+
+if ($Promote) {
+    if ([uint64]$preparedState.workflowDatabaseId -ne [uint64]$workflowDefinition.id -or
+        [uint64]$preparedState.runId -ne $selectedRunId -or
+        [uint64]$preparedState.runNumber -ne $selectedRunNumber -or
+        [uint64]$preparedState.runAttempt -ne $selectedRunAttempt -or
+        [string]$preparedState.artifactName -ne $expectedArtifactName -or
+        [string]$preparedState.commitSha -ne ([string]$selectedRun.headSha).ToLowerInvariant() -or
+        [uint64]$preparedState.releaseSequence -ne $expectedSequence -or
+        [string]$preparedState.tagName -ne $expectedTag -or
+        [string]$preparedState.packageVersion -ne $expectedVersion) {
+        throw 'The signed prepared state no longer matches the exact selected workflow run.'
+    }
+}
+
+$existingReleases = @(Get-ExistingReleases)
+$existingReleaseSummary = $existingReleases |
+    Where-Object { [string]$_.tagName -eq $expectedTag } |
+    Select-Object -First 1
+$otherReleases = @($existingReleases | Where-Object { [string]$_.tagName -ne $expectedTag })
+[uint64]$releaseHighWaterMark = Get-ReleaseHighWaterMark -Releases $otherReleases
 if ($expectedSequence -le $releaseHighWaterMark) {
     throw "Release '$expectedTag' is not newer than the existing v1.0.$releaseHighWaterMark high-water mark."
 }
-$existingRelease = $existingReleases |
-    Where-Object { [string]$_.tagName -eq $expectedTag } |
-    Select-Object -First 1
-if ($null -ne $existingRelease) {
-    throw "Release '$expectedTag' already exists. Existing releases are never overwritten."
+$existingTag = Get-ExactTagReference -TagName $expectedTag
+if ($Prepare) {
+    if ($null -ne $existingReleaseSummary -or $null -ne $existingTag) {
+        throw "Release or Git tag '$expectedTag' already exists. Preparation refuses an already-reserved version."
+    }
 }
-if ($null -ne (Get-ExactTagReference -TagName $expectedTag)) {
-    throw "Git tag '$expectedTag' already exists. Refusing to reuse an existing tag."
+elseif ($null -eq $existingReleaseSummary -and $null -ne $existingTag) {
+    throw "Git tag '$expectedTag' exists without the matching prepared release. Refusing to reuse it."
 }
-
-$artifactResponse = Invoke-GhJson -Arguments @(
-    'api'
-    "repos/$Repository/actions/runs/$selectedRunId/artifacts"
-)
-$artifact = @($artifactResponse.artifacts) |
-    Where-Object {
-        [string]$_.name -eq $expectedArtifactName -and
-        -not [bool]$_.expired
-    } |
-    Sort-Object created_at -Descending |
-    Select-Object -First 1
-if ($null -eq $artifact) {
-    throw "The nonexpired artifact '$expectedArtifactName' was not found. Rerun the Release workflow if its 30-day retention expired."
+elseif ($null -ne $existingTag -and
+    ([string]$existingTag.object.type -ne 'commit' -or
+        -not [string]::Equals(
+            [string]$existingTag.object.sha,
+            [string]$selectedRun.headSha,
+            [StringComparison]::OrdinalIgnoreCase))) {
+    throw "Git tag '$expectedTag' does not point to the prepared workflow commit."
 }
 
-$temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
-$workingDirectory = Join-Path $temporaryRoot "PackagePilot-ManualRelease-$([Guid]::NewGuid().ToString('N'))"
-$resolvedWorkingDirectory = [IO.Path]::GetFullPath($workingDirectory)
-if (-not $resolvedWorkingDirectory.StartsWith(
-        $temporaryRoot + '\',
-        [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The release working directory resolved outside the system temporary directory.'
-}
-
-try {
-    [void][IO.Directory]::CreateDirectory($resolvedWorkingDirectory)
-    Invoke-GhCommand -Arguments @(
-        'run'
-        'download'
-        $selectedRunId.ToString()
-        '--repo'
-        $Repository
-        '--name'
-        $expectedArtifactName
-        '--dir'
-        $resolvedWorkingDirectory
+$artifact = $null
+if ($Prepare) {
+    $artifactResponse = Invoke-GhJson -Arguments @(
+        'api'
+        "repos/$Repository/actions/runs/$selectedRunId/artifacts"
     )
+    $matchingArtifacts = @($artifactResponse.artifacts) |
+        Where-Object {
+            [string]$_.name -eq $expectedArtifactName -and
+            -not [bool]$_.expired
+        }
+    if ($matchingArtifacts.Count -ne 1) {
+        throw "Expected exactly one nonexpired artifact '$expectedArtifactName', but found $($matchingArtifacts.Count)."
+    }
+    $artifact = $matchingArtifacts[0]
+}
+
+$resolvedWorkingDirectory = $resolvedPreparedDirectory
+$cleanupWorkingDirectory = $false
+if ($Prepare) {
+    $preparedParent = [IO.Path]::GetDirectoryName($resolvedPreparedDirectory)
+    $preparedLeaf = [IO.Path]::GetFileName($resolvedPreparedDirectory)
+    if ([string]::IsNullOrWhiteSpace($preparedParent) -or
+        [string]::IsNullOrWhiteSpace($preparedLeaf)) {
+        throw "PreparedDirectory '$resolvedPreparedDirectory' must name a child directory."
+    }
+    if (-not [IO.Directory]::Exists($preparedParent)) {
+        [void][IO.Directory]::CreateDirectory($preparedParent)
+    }
+    $resolvedWorkingDirectory = Join-Path `
+        $preparedParent `
+        ".$preparedLeaf.preparing-$([Guid]::NewGuid().ToString('N'))"
+    $resolvedWorkingDirectory = [IO.Path]::GetFullPath($resolvedWorkingDirectory)
+    if (-not $resolvedWorkingDirectory.StartsWith(
+            [IO.Path]::GetFullPath($preparedParent).TrimEnd('\') + '\',
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The preparation staging directory resolved outside its intended parent.'
+    }
+    $cleanupWorkingDirectory = $true
+}
+
+$operationFailure = $null
+try {
+    if ($Prepare) {
+        [void][IO.Directory]::CreateDirectory($resolvedWorkingDirectory)
+        Invoke-GhCommand -Arguments @(
+            'run'
+            'download'
+            $selectedRunId.ToString()
+            '--repo'
+            $Repository
+            '--name'
+            $expectedArtifactName
+            '--dir'
+            $resolvedWorkingDirectory
+        )
+    }
 
     $metadataPath = Join-Path $resolvedWorkingDirectory 'release-metadata.json'
     if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
@@ -542,8 +1243,9 @@ try {
         $packageIdentity.Publisher -ne $script:CertificateSubject -or
         $packageIdentity.Version -ne $expectedVersion -or
         ($packageIdentity.Architectures -join ',') -ne 'arm64,x64' -or
-        $packageIdentity.HasSignature) {
-        throw 'The unsigned Package Pilot MSIX bundle identity, architecture set, or signature state is invalid.'
+        ($Prepare -and $packageIdentity.HasSignature) -or
+        ($Promote -and -not $packageIdentity.HasSignature)) {
+        throw 'The Package Pilot MSIX bundle identity, architecture set, or phase-specific signature state is invalid.'
     }
 
     foreach ($runtime in @(
@@ -620,20 +1322,41 @@ try {
         throw 'The App Installer feed does not contain both architecture-specific runtime dependencies.'
     }
 
-    $certificate = Get-ReleaseCertificate
-    $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
-    $kitsRoot = Join-Path $programFilesX86 'Windows Kits\10\bin'
-    $signTool = Get-ChildItem -LiteralPath $kitsRoot -Recurse -File -Filter 'signtool.exe' |
-        Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
-        Sort-Object FullName -Descending |
-        Select-Object -First 1
-    if ($null -eq $signTool) {
-        throw 'SignTool.exe was not found in the Windows 10/11 SDK.'
-    }
+    $certificatePath = Join-Path $resolvedWorkingDirectory 'PackagePilot.cer'
+    $checksumPath = Join-Path $resolvedWorkingDirectory 'SHA256SUMS.txt'
+    if ($Prepare) {
+        $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+        $kitsRoot = Join-Path $programFilesX86 'Windows Kits\10\bin'
+        $signTool = Get-ChildItem -LiteralPath $kitsRoot -Recurse -File -Filter 'signtool.exe' |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($null -eq $signTool) {
+            throw 'SignTool.exe was not found in the Windows 10/11 SDK.'
+        }
 
-    & $signTool.FullName 'sign' '/fd' 'SHA256' '/sha1' $certificate.Thumbprint '/s' 'My' '/tr' 'http://timestamp.acs.microsoft.com' '/td' 'SHA256' $packagePath
-    if ($LASTEXITCODE -ne 0) {
-        throw "SignTool bundle signing failed with exit code $LASTEXITCODE."
+        & $signTool.FullName 'sign' '/fd' 'SHA256' '/sha1' $certificate.Thumbprint '/s' 'My' '/tr' 'http://timestamp.acs.microsoft.com' '/td' 'SHA256' $packagePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "SignTool bundle signing failed with exit code $LASTEXITCODE."
+        }
+        & $signTool.FullName 'verify' '/pa' '/all' '/v' $packagePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "SignTool bundle verification failed with exit code $LASTEXITCODE."
+        }
+
+        Export-Certificate -Cert $certificate -FilePath $certificatePath | Out-Null
+        $checksumNames = @(
+            'PackagePilot.msixbundle'
+            'Microsoft.WindowsAppRuntime.2.x64.msix'
+            'Microsoft.WindowsAppRuntime.2.arm64.msix'
+            'PackagePilot.cer'
+            'PackagePilot.appinstaller'
+        )
+        $checksumLines = foreach ($fileName in $checksumNames) {
+            $hash = Get-FileHash -LiteralPath (Join-Path $resolvedWorkingDirectory $fileName) -Algorithm SHA256
+            "$($hash.Hash.ToLowerInvariant()) *$fileName"
+        }
+        $checksumLines | Set-Content -LiteralPath $checksumPath -Encoding ascii
     }
 
     $packageSignature = Get-AuthenticodeSignature -FilePath $packagePath
@@ -642,11 +1365,6 @@ try {
         $packageSignature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
         throw "The signed Package Pilot MSIX bundle failed signer verification: $($packageSignature.StatusMessage)"
     }
-    & $signTool.FullName 'verify' '/pa' '/all' '/v' $packagePath
-    if ($LASTEXITCODE -ne 0) {
-        throw "SignTool bundle verification failed with exit code $LASTEXITCODE."
-    }
-
     $signedIdentity = Get-MsixBundleIdentity -Path $packagePath
     if (-not $signedIdentity.HasSignature -or
         $signedIdentity.Name -ne 'PackagePilot.Desktop' -or
@@ -656,34 +1374,85 @@ try {
         throw 'Signing changed the bundle identity or architecture set, or did not add AppxSignature.p7x.'
     }
 
-    $certificatePath = Join-Path $resolvedWorkingDirectory 'PackagePilot.cer'
-    Export-Certificate -Cert $certificate -FilePath $certificatePath -Force | Out-Null
+    if ($Prepare) {
+        $assetRecords = @($ReleaseAssetNames | ForEach-Object {
+            New-PreparedFileRecord -Directory $resolvedWorkingDirectory -FileName $_
+        })
+        $state = [ordered]@{
+            schemaVersion = 1
+            repository = $Repository
+            workflowName = 'Release'
+            workflowDatabaseId = [uint64]$workflowDefinition.id
+            runId = $selectedRunId
+            runNumber = $selectedRunNumber
+            runAttempt = $selectedRunAttempt
+            artifactId = [uint64]$artifact.id
+            artifactName = $expectedArtifactName
+            commitSha = ([string]$selectedRun.headSha).ToLowerInvariant()
+            releaseSequence = $expectedSequence
+            tagName = $expectedTag
+            packageVersion = $expectedVersion
+            signerThumbprint = $certificate.Thumbprint
+            preparedAtUtc = [DateTimeOffset]::UtcNow.ToString(
+                'o',
+                [Globalization.CultureInfo]::InvariantCulture)
+            sourceMetadata = New-PreparedFileRecord `
+                -Directory $resolvedWorkingDirectory `
+                -FileName 'release-metadata.json'
+            assets = $assetRecords
+        }
+        Write-SignedPreparedState `
+            -Directory $resolvedWorkingDirectory `
+            -State $state `
+            -Certificate $certificate
+        $validatedState = Read-AndVerifyPreparedState `
+            -Directory $resolvedWorkingDirectory `
+            -Certificate $certificate
+        Assert-PreparedDirectory -Directory $resolvedWorkingDirectory -State $validatedState
+        $preparedBundleHash = [string]($assetRecords |
+            Where-Object { [string]$_.name -eq 'PackagePilot.msixbundle' } |
+            Select-Object -First 1).sha256
 
-    $checksumNames = @(
-        'PackagePilot.msixbundle'
-        'Microsoft.WindowsAppRuntime.2.x64.msix'
-        'Microsoft.WindowsAppRuntime.2.arm64.msix'
-        'PackagePilot.cer'
-        'PackagePilot.appinstaller'
-    )
-    $checksumLines = foreach ($fileName in $checksumNames) {
-        $hash = Get-FileHash -LiteralPath (Join-Path $resolvedWorkingDirectory $fileName) -Algorithm SHA256
-        "$($hash.Hash.ToLowerInvariant()) *$fileName"
+        [IO.Directory]::Move($resolvedWorkingDirectory, $resolvedPreparedDirectory)
+        $postMoveState = Read-AndVerifyPreparedState `
+            -Directory $resolvedPreparedDirectory `
+            -Certificate $certificate
+        Assert-PreparedDirectory -Directory $resolvedPreparedDirectory -State $postMoveState
+        $cleanupWorkingDirectory = $false
+        [pscustomobject]@{
+            Mode = 'Prepared'
+            Repository = $Repository
+            WorkflowRunId = $selectedRunId
+            Release = $expectedTag
+            PackageVersion = $expectedVersion
+            CommitSha = [string]$selectedRun.headSha
+            SignerThumbprint = $certificate.Thumbprint
+            BundleSha256 = $preparedBundleHash
+            PreparedDirectory = $resolvedPreparedDirectory
+        } | ConvertTo-Json
+        return
     }
-    $checksumPath = Join-Path $resolvedWorkingDirectory 'SHA256SUMS.txt'
-    $checksumLines | Set-Content -LiteralPath $checksumPath -Encoding ascii
 
-    $assets = @(
-        $packagePath
-        $x64RuntimePath
-        $arm64RuntimePath
-        $certificatePath
-        $appInstallerPath
-        $checksumPath
-    )
-    $releaseArguments = @('release', 'create', $expectedTag) +
-        $assets +
-        @(
+    $preparedCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
+    try {
+        if (-not [string]::Equals(
+                $preparedCertificate.Thumbprint,
+                $certificate.Thumbprint,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            $preparedCertificate.Subject -ne $script:CertificateSubject) {
+            throw 'PackagePilot.cer does not match the release signer in the prepared state.'
+        }
+    }
+    finally {
+        $preparedCertificate.Dispose()
+    }
+
+    $release = $null
+    if ($null -eq $existingReleaseSummary) {
+        Invoke-GhCommand -Arguments @(
+            'release'
+            'create'
+            $expectedTag
             '--repo'
             $Repository
             '--target'
@@ -691,40 +1460,81 @@ try {
             '--title'
             "Package Pilot 1.0.$expectedSequence"
             '--generate-notes'
-            '--latest'
+            '--draft'
+            '--latest=false'
         )
-    Invoke-GhCommand -Arguments $releaseArguments
+        $release = Get-ReleaseView -TagName $expectedTag
+    }
+    else {
+        $release = Get-ReleaseView -TagName $expectedTag
+    }
 
-    $publishedRelease = Invoke-GhJson -Arguments @(
-        'release'
-        'view'
-        $expectedTag
-        '--repo'
-        $Repository
-        '--json'
-        'assets,isDraft,isPrerelease,tagName,targetCommitish,url'
-    )
-    $expectedAssetNames = @(
-        'Microsoft.WindowsAppRuntime.2.arm64.msix'
-        'Microsoft.WindowsAppRuntime.2.x64.msix'
-        'PackagePilot.appinstaller'
-        'PackagePilot.cer'
-        'PackagePilot.msixbundle'
-        'SHA256SUMS.txt'
-    ) | Sort-Object
-    $publishedAssetNames = @(
-        $publishedRelease.assets |
-            ForEach-Object { [string]$_.name }
-    ) | Sort-Object
-    if ([string]$publishedRelease.tagName -ne $expectedTag -or
-        [bool]$publishedRelease.isDraft -or
-        [bool]$publishedRelease.isPrerelease -or
-        -not [string]::Equals(
-            [string]$publishedRelease.targetCommitish,
-            [string]$selectedRun.headSha,
-            [StringComparison]::OrdinalIgnoreCase) -or
-        ($publishedAssetNames -join "`n") -ne ($expectedAssetNames -join "`n")) {
-        throw "The published release '$expectedTag' failed post-publication verification."
+    Assert-GitHubReleaseBinding `
+        -Release $release `
+        -TagName $expectedTag `
+        -CommitSha ([string]$selectedRun.headSha)
+
+    $missingAssets = @(Assert-GitHubReleaseAssets `
+        -Release $release `
+        -State $preparedState `
+        -AllowMissing)
+    if (-not [bool]$release.isDraft -and $missingAssets.Count -ne 0) {
+        throw "Published release '$expectedTag' is incomplete and cannot be repaired in place."
+    }
+    foreach ($assetName in $missingAssets) {
+        Invoke-GhCommand -Arguments @(
+            'release'
+            'upload'
+            $expectedTag
+            (Join-Path $resolvedPreparedDirectory $assetName)
+            '--repo'
+            $Repository
+        )
+    }
+
+    $release = Get-ReleaseView -TagName $expectedTag
+    Assert-GitHubReleaseBinding `
+        -Release $release `
+        -TagName $expectedTag `
+        -CommitSha ([string]$selectedRun.headSha)
+    [void](Assert-GitHubReleaseAssets -Release $release -State $preparedState)
+    if ([bool]$release.isDraft) {
+        Assert-PromotionPreconditionsStillHold `
+            -WorkflowDatabaseId ([uint64]$workflowDefinition.id) `
+            -WorkflowRunId $selectedRunId `
+            -RunNumber $selectedRunNumber `
+            -RunAttempt $selectedRunAttempt `
+            -CommitSha ([string]$selectedRun.headSha) `
+            -ReleaseSequence $expectedSequence `
+            -TagName $expectedTag
+        $promotionFailure = $null
+        try {
+            Invoke-GhCommand -Arguments @(
+                'release'
+                'edit'
+                $expectedTag
+                '--repo'
+                $Repository
+                '--draft=false'
+                '--latest'
+            )
+        }
+        catch {
+            $promotionFailure = $_.Exception.Message
+        }
+        $release = Get-ReleaseView -TagName $expectedTag
+        if ([bool]$release.isDraft) {
+            throw "Release promotion did not complete and the release remains a recoverable draft. $promotionFailure"
+        }
+    }
+
+    Assert-GitHubReleaseBinding `
+        -Release $release `
+        -TagName $expectedTag `
+        -CommitSha ([string]$selectedRun.headSha)
+    [void](Assert-GitHubReleaseAssets -Release $release -State $preparedState)
+    if ([bool]$release.isDraft -or [bool]$release.isPrerelease) {
+        throw "Release '$expectedTag' was not published as a stable release."
     }
 
     $latestRelease = Invoke-GhJson -Arguments @(
@@ -735,6 +1545,32 @@ try {
         '--json'
         'tagName'
     )
+    if ([string]$latestRelease.tagName -ne $expectedTag) {
+        Assert-PromotionPreconditionsStillHold `
+            -WorkflowDatabaseId ([uint64]$workflowDefinition.id) `
+            -WorkflowRunId $selectedRunId `
+            -RunNumber $selectedRunNumber `
+            -RunAttempt $selectedRunAttempt `
+            -CommitSha ([string]$selectedRun.headSha) `
+            -ReleaseSequence $expectedSequence `
+            -TagName $expectedTag
+        Invoke-GhCommand -Arguments @(
+            'release'
+            'edit'
+            $expectedTag
+            '--repo'
+            $Repository
+            '--latest'
+        )
+        $latestRelease = Invoke-GhJson -Arguments @(
+            'release'
+            'view'
+            '--repo'
+            $Repository
+            '--json'
+            'tagName'
+        )
+    }
     if ([string]$latestRelease.tagName -ne $expectedTag) {
         throw "The published release '$expectedTag' was not selected as the latest release."
     }
@@ -750,23 +1586,42 @@ try {
     }
 
     [pscustomobject]@{
+        Mode = 'Promoted'
         Repository = $Repository
         WorkflowRunId = $selectedRunId
         Release = $expectedTag
         PackageVersion = $expectedVersion
         CommitSha = [string]$selectedRun.headSha
         SignerThumbprint = $certificate.Thumbprint
-        ReleaseUrl = [string]$publishedRelease.url
+        PreparedDirectory = $resolvedPreparedDirectory
+        ReleaseUrl = [string]$release.url
     } | ConvertTo-Json
 }
+catch {
+    $operationFailure = $_
+    throw
+}
 finally {
-    if (Test-Path -LiteralPath $resolvedWorkingDirectory) {
-        $cleanupPath = [IO.Path]::GetFullPath($resolvedWorkingDirectory)
-        if (-not $cleanupPath.StartsWith(
-                $temporaryRoot + '\',
-                [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to clean unsafe temporary path '$cleanupPath'."
+    if ($cleanupWorkingDirectory -and (Test-Path -LiteralPath $resolvedWorkingDirectory)) {
+        try {
+            $cleanupPath = [IO.Path]::GetFullPath($resolvedWorkingDirectory)
+            $cleanupParent = [IO.Path]::GetFullPath(
+                [IO.Path]::GetDirectoryName($resolvedPreparedDirectory)).TrimEnd('\')
+            if (-not $cleanupPath.StartsWith(
+                    $cleanupParent + '\',
+                    [StringComparison]::OrdinalIgnoreCase) -or
+                [IO.Path]::GetFileName($cleanupPath) -notmatch '^\..+\.preparing-[0-9a-f]{32}$') {
+                throw "Refusing to clean unsafe temporary path '$cleanupPath'."
+            }
+            Remove-Item -LiteralPath $cleanupPath -Recurse -Force
         }
-        Remove-Item -LiteralPath $cleanupPath -Recurse -Force
+        catch {
+            if ($null -ne $operationFailure) {
+                Write-Warning "Preparation failed and staging cleanup also failed: $($_.Exception.Message)"
+            }
+            else {
+                throw
+            }
+        }
     }
 }

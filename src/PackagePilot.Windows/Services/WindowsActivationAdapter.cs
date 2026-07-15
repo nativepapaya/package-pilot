@@ -27,6 +27,10 @@ public sealed class WindowsActivationAdapter
                 _router.ParseNotificationArguments(notification.Argument),
             ExtendedActivationKind.CommandLineLaunch when activation.Data is ICommandLineActivatedEventArgs commandLine =>
                 ParseArguments(commandLine.Operation.Arguments),
+            ExtendedActivationKind.StartupTask when activation.Data is IStartupTaskActivatedEventArgs startupTask =>
+                ParseStartupTask(startupTask.TaskId),
+            ExtendedActivationKind.StartupTask =>
+                ActivationParseResult.Rejected("The startup-task activation payload is missing."),
             ExtendedActivationKind.Launch when activation.Data is ILaunchActivatedEventArgs launch =>
                 ParseArguments(launch.Arguments),
             ExtendedActivationKind.Launch =>
@@ -37,6 +41,17 @@ public sealed class WindowsActivationAdapter
 
     public ActivationParseResult ParseNotification(AppNotificationActivatedEventArgs args) =>
         _router.ParseNotificationArguments(args.Argument);
+
+    internal static ActivationParseResult ParseStartupTask(string? taskId) =>
+        string.Equals(
+            taskId,
+            WindowsIntegrationConstants.StartupTaskId,
+            StringComparison.Ordinal)
+            ? ActivationParseResult.Accepted(new AppActivationRequest
+            {
+                IsStartupTaskActivation = true
+            })
+            : ActivationParseResult.Rejected("The startup-task activation identifier is not supported.");
 
     private ActivationParseResult ParseArguments(string? commandLine)
     {

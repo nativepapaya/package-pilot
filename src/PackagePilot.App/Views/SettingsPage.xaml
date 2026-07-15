@@ -81,6 +81,48 @@
                 </StackPanel>
 
                 <StackPanel Spacing="8">
+                    <TextBlock Style="{StaticResource PackagePilotSectionTitleStyle}" Text="Windows integration" />
+                    <Border Style="{StaticResource PackagePilotCardStyle}">
+                        <StackPanel Spacing="16">
+                            <ToggleSwitch
+                                x:Name="NotificationAreaToggle"
+                                AutomationProperties.Name="Keep Package Pilot in the notification area"
+                                Header="Keep Package Pilot in the notification area"
+                                OffContent="Close exits Package Pilot"
+                                OnContent="Close hides; Minimize stays on the taskbar"
+                                Toggled="OnNotificationAreaToggled" />
+                            <Rectangle Height="1" Fill="{ThemeResource PackagePilotStrokeBrush}" />
+                            <ToggleSwitch
+                                x:Name="StartWithWindowsToggle"
+                                AutomationProperties.Name="Start Package Pilot with Windows"
+                                Header="Start with Windows"
+                                IsEnabled="False"
+                                OffContent="Do not start at sign-in"
+                                OnContent="Start hidden in the notification area"
+                                Toggled="OnStartWithWindowsToggled" />
+                            <TextBlock
+                                x:Name="StartupStateText"
+                                Style="{StaticResource PackagePilotCaptionStyle}"
+                                Text="Windows startup state has not been loaded."
+                                TextWrapping="Wrap" />
+                            <Button
+                                x:Name="StartupSettingsButton"
+                                HorizontalAlignment="Left"
+                                AutomationProperties.Name="Open Windows Startup apps settings"
+                                Click="OnOpenStartupAppsSettingsClick"
+                                Content="Open Startup apps settings"
+                                Visibility="Collapsed" />
+                            <InfoBar
+                                x:Name="AppLifetimeInfoBar"
+                                AutomationProperties.LiveSetting="Polite"
+                                IsClosable="True"
+                                IsOpen="False"
+                                Severity="Informational" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Spacing="8">
                     <TextBlock Style="{StaticResource PackagePilotSectionTitleStyle}" Text="Install preferences" />
                     <Border Style="{StaticResource PackagePilotCardStyle}">
                         <StackPanel Spacing="18">

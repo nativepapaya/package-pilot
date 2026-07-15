@@ -15,6 +15,8 @@
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
     <EnableMsixTooling>true</EnableMsixTooling>
+    <!-- App instancing must run before XAML constructs the Application object. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
     <!-- ComInterop's static factory shim activates WinGet's out-of-process COM server. -->
     <MicrosoftManagementDeployment-FactoryLinkage>static</MicrosoftManagementDeployment-FactoryLinkage>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -71,6 +73,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\PackagePilot.Core\PackagePilot.Core.csproj" />
+    <ProjectReference Include="..\PackagePilot.Windows.ReadOnly\PackagePilot.Windows.ReadOnly.csproj" />
     <ProjectReference Include="..\PackagePilot.Windows\PackagePilot.Windows.csproj" />
     <ProjectReference Include="..\PackagePilot.Background\PackagePilot.Background.csproj"
                       ReferenceOutputAssembly="false"

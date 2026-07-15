@@ -5,6 +5,7 @@
     <Project Path="src/PackagePilot.Core/PackagePilot.Core.csproj" />
     <Project Path="src/PackagePilot.SourceAdmin/PackagePilot.SourceAdmin.csproj" />
     <Project Path="src/PackagePilot.Windows/PackagePilot.Windows.csproj" />
+    <Project Path="src/PackagePilot.Windows.ReadOnly/PackagePilot.Windows.ReadOnly.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/PackagePilot.Tests/PackagePilot.Tests.csproj" />

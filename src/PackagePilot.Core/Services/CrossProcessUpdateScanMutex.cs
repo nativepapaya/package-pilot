@@ -18,15 +18,20 @@ public sealed class CrossProcessUpdateScanMutex
 
     public Task<T> RunExclusiveAsync<T>(
         Func<CancellationToken, Task<T>> operation,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TimeSpan? acquisitionTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(operation);
+        if (acquisitionTimeout is { } timeout && timeout < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(acquisitionTimeout));
+        }
 
         // LongRunning gives the kernel mutex a dedicated owner thread. Releasing a Mutex from
         // an arbitrary async continuation is invalid and can leave foreground/background scans
         // racing one another.
         return Task.Factory.StartNew(
-            () => RunOnOwnerThread(operation, cancellationToken),
+            () => RunOnOwnerThread(operation, cancellationToken, acquisitionTimeout),
             CancellationToken.None,
             TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach,
             TaskScheduler.Default);
@@ -34,7 +39,8 @@ public sealed class CrossProcessUpdateScanMutex
 
     private T RunOnOwnerThread<T>(
         Func<CancellationToken, Task<T>> operation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? acquisitionTimeout)
     {
         using var mutex = new Mutex(initiallyOwned: false, _name);
         var acquired = false;
@@ -45,10 +51,24 @@ public sealed class CrossProcessUpdateScanMutex
             {
                 if (cancellationToken.CanBeCanceled)
                 {
-                    var signaled = WaitHandle.WaitAny([mutex, cancellationToken.WaitHandle]);
+                    var signaled = acquisitionTimeout is { } timeout
+                        ? WaitHandle.WaitAny([mutex, cancellationToken.WaitHandle], timeout)
+                        : WaitHandle.WaitAny([mutex, cancellationToken.WaitHandle]);
+                    if (signaled == WaitHandle.WaitTimeout)
+                    {
+                        throw new CrossProcessUpdateScanBusyException();
+                    }
+
                     if (signaled != 0)
                     {
                         throw new OperationCanceledException(cancellationToken);
+                    }
+                }
+                else if (acquisitionTimeout is { } timeout)
+                {
+                    if (!mutex.WaitOne(timeout))
+                    {
+                        throw new CrossProcessUpdateScanBusyException();
                     }
                 }
                 else
@@ -74,5 +94,14 @@ public sealed class CrossProcessUpdateScanMutex
                 mutex.ReleaseMutex();
             }
         }
+    }
+}
+
+/// <summary>An automatic scan could not acquire the shared scan mutex within its time budget.</summary>
+public sealed class CrossProcessUpdateScanBusyException : TimeoutException
+{
+    public CrossProcessUpdateScanBusyException()
+        : base("Another update check is already running.")
+    {
     }
 }

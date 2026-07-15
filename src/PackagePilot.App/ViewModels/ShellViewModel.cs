@@ -17,7 +17,10 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     private readonly UpdateScanWorker _updateScanWorker;
     private readonly IInstalledAppInventory? _installedAppInventory;
     private readonly ISourceManagementService? _sourceManagementService;
+    private readonly IAppLifetimeActivityGate _lifetimeActivityGate;
     private readonly DispatcherQueue _dispatcher;
+    private readonly Func<UpdateMonitoringCadence> _getUpdateMonitoringCadence;
+    private readonly IWindowActivityService? _windowActivityService;
     private readonly HashSet<Guid> _observedCompletions = [];
     private readonly Dictionary<string, string> _acceptedSourceAgreementFingerprints =
         new(StringComparer.OrdinalIgnoreCase);
@@ -52,13 +55,20 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         ISourceManagementService? sourceManagementService = null,
         bool notificationRegistrationSupported = false,
         bool notificationRegistered = false,
-        BackgroundMonitoringState backgroundMonitoringState = BackgroundMonitoringState.Disabled)
+        BackgroundMonitoringState backgroundMonitoringState = BackgroundMonitoringState.Disabled,
+        Func<UpdateMonitoringCadence>? getUpdateMonitoringCadence = null,
+        IWindowActivityService? windowActivityService = null,
+        IAppLifetimeActivityGate? lifetimeActivityGate = null)
     {
         _wingetClient = wingetClient;
         _operationQueue = operationQueue;
         _dispatcher = dispatcher;
         _installedAppInventory = installedAppInventory;
         _sourceManagementService = sourceManagementService;
+        _lifetimeActivityGate = lifetimeActivityGate ?? new AppLifetimeActivityGate();
+        _getUpdateMonitoringCadence = getUpdateMonitoringCadence
+            ?? (() => UpdateMonitoringCadence.Daily);
+        _windowActivityService = windowActivityService;
         _windowsIntegrationCapabilities = new WindowsIntegrationCapabilities
         {
             NotificationRegistrationSupported = notificationRegistrationSupported,
@@ -298,7 +308,11 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         try
         {
             _updateSnapshot = await _updateCoordinator.LoadAsync(_lifetimeCancellation.Token).ConfigureAwait(true);
-            ApplyUpdateSnapshot(_updateSnapshot, _updateCoordinator.GetState(_updateSnapshot));
+            ApplyUpdateSnapshot(
+                _updateSnapshot,
+                _updateCoordinator.GetState(
+                    _updateSnapshot,
+                    _getUpdateMonitoringCadence()));
 
             await _operationQueue.Initialization.ConfigureAwait(true);
             ApplyQueueSnapshot(_operationQueue.Snapshot);
@@ -311,12 +325,17 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             }
 
             var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
-            var sourcesTask = _wingetClient.GetSourcesAsync(_lifetimeCancellation.Token);
+            var sourcesTask = LoadSourceStatusesAsync();
             await Task.WhenAll(installedTask, sourcesTask).ConfigureAwait(true);
 
             ApplyInstalledApps(await installedTask.ConfigureAwait(true));
-            ReplaceAll(SourceStatuses, await sourcesTask.ConfigureAwait(true));
-            scheduleAutomaticUpdateCheck = _updateCoordinator.ShouldAutomaticallyCheck(_updateSnapshot);
+            if (await sourcesTask.ConfigureAwait(true) is { } sources)
+            {
+                ReplaceAll(SourceStatuses, sources);
+            }
+            var cadence = _getUpdateMonitoringCadence();
+            scheduleAutomaticUpdateCheck = cadence != UpdateMonitoringCadence.Manual
+                && _updateCoordinator.ShouldAutomaticallyCheck(_updateSnapshot, cadence);
             StatusMessage = "Ready";
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
@@ -442,11 +461,14 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         try
         {
             var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
-            var sourcesTask = _wingetClient.GetSourcesAsync(_lifetimeCancellation.Token);
+            var sourcesTask = LoadSourceStatusesAsync();
             var updatesTask = RefreshUpdatesCoreAsync(UpdateCheckReason.Manual);
             await Task.WhenAll(installedTask, sourcesTask).ConfigureAwait(true);
             ApplyInstalledApps(await installedTask.ConfigureAwait(true));
-            ReplaceAll(SourceStatuses, await sourcesTask.ConfigureAwait(true));
+            if (await sourcesTask.ConfigureAwait(true) is { } sources)
+            {
+                ReplaceAll(SourceStatuses, sources);
+            }
             await updatesTask.ConfigureAwait(true);
             StatusMessage = "Package information is up to date.";
         }
@@ -502,9 +524,14 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         StatusMessage = "Refreshing package sources…";
         try
         {
-            ReplaceAll(
-                SourceStatuses,
-                await _wingetClient.GetSourcesAsync(_lifetimeCancellation.Token).ConfigureAwait(true));
+            var sources = await LoadSourceStatusesAsync().ConfigureAwait(true);
+            if (sources is null)
+            {
+                SetSourceOperationBusyStatus();
+                return;
+            }
+
+            ReplaceAll(SourceStatuses, sources);
             StatusMessage = "Package sources are up to date.";
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
@@ -524,6 +551,14 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     {
         if (_sourceManagementService is null || IsManagingSources)
         {
+            return;
+        }
+
+        using var activity = _lifetimeActivityGate.TryEnter(
+            AppLifetimeActivityKind.SourceRefresh);
+        if (activity is null)
+        {
+            SetSourceOperationBusyStatus();
             return;
         }
 
@@ -548,6 +583,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         }
         finally
         {
+            activity.Dispose();
             IsManagingSources = false;
         }
     }
@@ -556,6 +592,14 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     {
         if (_sourceManagementService is null || IsManagingSources)
         {
+            return null;
+        }
+
+        using var activity = _lifetimeActivityGate.TryEnter(
+            AppLifetimeActivityKind.SourceRefresh);
+        if (activity is null)
+        {
+            SetSourceOperationBusyStatus();
             return null;
         }
 
@@ -570,6 +614,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         }
         finally
         {
+            activity.Dispose();
             IsManagingSources = false;
         }
     }
@@ -578,6 +623,29 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         SelectPackageCoreAsync(
             package,
             package is not null && IsSourceAgreementAccepted(package.Key.SourceId));
+
+    private async Task<IReadOnlyList<PackageSourceStatus>?> LoadSourceStatusesAsync()
+    {
+        using var activity = _lifetimeActivityGate.TryEnter(
+            AppLifetimeActivityKind.SourceRefresh);
+        if (activity is null)
+        {
+            return null;
+        }
+
+        return await _wingetClient.GetSourcesAsync(_lifetimeCancellation.Token)
+            .ConfigureAwait(true);
+    }
+
+    private void SetSourceOperationBusyStatus()
+    {
+        if (!_lifetimeCancellation.IsCancellationRequested)
+        {
+            StatusMessage = _lifetimeActivityGate.Snapshot.IsShutdownCommitted
+                ? "Package Pilot is closing; no new source work was started."
+                : "Another package-source operation is already running.";
+        }
+    }
 
     public Task SelectPackageAcceptingSourceAgreementsAsync(PackageSummary package) =>
         SelectPackageCoreAsync(package, acceptSourceAgreements: true);
@@ -736,11 +804,19 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         UpdateCheckError = null;
         try
         {
-            var execution = await _updateScanWorker.RunAsync(
-                reason,
-                isForegroundWindowActive: true,
-                SourceStatuses.ToArray(),
-                _lifetimeCancellation.Token).ConfigureAwait(true);
+            var execution = _windowActivityService is null
+                ? await _updateScanWorker.RunAsync(
+                    reason,
+                    isForegroundWindowActive: true,
+                    SourceStatuses.ToArray(),
+                    _lifetimeCancellation.Token,
+                    _getUpdateMonitoringCadence()).ConfigureAwait(true)
+                : await _updateScanWorker.RunAsync(
+                    reason,
+                    _windowActivityService,
+                    SourceStatuses.ToArray(),
+                    _lifetimeCancellation.Token,
+                    _getUpdateMonitoringCadence()).ConfigureAwait(true);
             var result = execution.Check;
             _updateSnapshot = result.Snapshot;
             ApplyUpdateSnapshot(result.Snapshot, result.State);

@@ -9,4 +9,6 @@ public interface IBackgroundUpdateRegistrationService
         CancellationToken cancellationToken = default);
 
     BackgroundMonitoringResult GetCurrent();
+
+    BackgroundMonitoringStatus GetStatus(BackgroundUpdateRunStatus? lastRun = null);
 }

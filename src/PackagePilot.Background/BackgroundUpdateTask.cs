@@ -19,17 +19,42 @@ public sealed class BackgroundUpdateTask : IBackgroundTask
     public void Run(IBackgroundTaskInstance taskInstance)
     {
         ArgumentNullException.ThrowIfNull(taskInstance);
-        var deferral = taskInstance.GetDeferral();
-        if (Interlocked.Exchange(ref _started, 1) != 0)
+        Program.SignalActivation(RequestCancellation);
+        BackgroundTaskDeferral deferral;
+        try
         {
-            deferral.Complete();
-            Program.SignalExit();
+            deferral = taskInstance.GetDeferral();
+        }
+        catch (Exception exception)
+        {
+            _ = RecordFailureAndSignalExitAsync(exception);
             return;
         }
 
-        taskInstance.Progress = 0;
-        taskInstance.Canceled += OnCanceled;
-        _ = RunAndCompleteAsync(taskInstance, deferral);
+        if (Interlocked.Exchange(ref _started, 1) != 0)
+        {
+            try
+            {
+                deferral.Complete();
+            }
+            catch
+            {
+                // The first invocation still owns the host lifetime.
+            }
+
+            return;
+        }
+
+        try
+        {
+            TryReportProgress(taskInstance, 0);
+            taskInstance.Canceled += OnCanceled;
+            _ = RunAndCompleteAsync(taskInstance, deferral);
+        }
+        catch (Exception exception)
+        {
+            _ = RecordFailureAndCompleteAsync(taskInstance, deferral, exception);
+        }
     }
 
     private async Task RunAndCompleteAsync(
@@ -38,29 +63,126 @@ public sealed class BackgroundUpdateTask : IBackgroundTask
     {
         try
         {
-            taskInstance.Progress = 10;
+            TryReportProgress(taskInstance, 10);
             var status = await BackgroundHostFactory.CreateRunner()
                 .RunOnceAsync(_cancellation.Token)
                 .ConfigureAwait(false);
-            taskInstance.Progress = status.State == BackgroundUpdateRunState.Cancelled ? 0u : 100u;
+            // Progress is optional broker telemetry. In particular, the broker can revoke
+            // this interface as the asynchronous operation completes. A late COM failure
+            // must not replace the runner-authored result or turn a successful scan into a
+            // host failure.
+            TryReportProgress(
+                taskInstance,
+                status.State == BackgroundUpdateRunState.Cancelled ? 0u : 100u);
         }
-        catch
+        catch (Exception exception)
         {
-            // BackgroundUpdateRunner records expected scan failures. Any failure before its
-            // service graph exists is non-actionable here; the foreground freshness policy
-            // will perform the deferred check on the next launch.
+            // BackgroundUpdateRunner records expected scan failures. This catches failures
+            // before or around construction of that service graph.
+            await BackgroundHostStatusReporter.TryRecordAsync(
+                BackgroundUpdateRunState.Failed,
+                exception).ConfigureAwait(false);
         }
         finally
         {
-            taskInstance.Canceled -= OnCanceled;
-            _cancellation.Dispose();
-            deferral.Complete();
-            Program.SignalExit();
+            CompleteHost(taskInstance, deferral);
         }
     }
 
     [MTAThread]
     private void OnCanceled(
         IBackgroundTaskInstance sender,
-        BackgroundTaskCancellationReason reason) => _cancellation.Cancel();
+        BackgroundTaskCancellationReason reason) => RequestCancellation();
+
+    private void RequestCancellation()
+    {
+        try
+        {
+            _cancellation.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Completion won the race with Windows or the host watchdog.
+        }
+    }
+
+    private async Task RecordFailureAndCompleteAsync(
+        IBackgroundTaskInstance taskInstance,
+        BackgroundTaskDeferral deferral,
+        Exception exception)
+    {
+        try
+        {
+            await BackgroundHostStatusReporter.TryRecordAsync(
+                BackgroundUpdateRunState.Failed,
+                exception).ConfigureAwait(false);
+        }
+        finally
+        {
+            CompleteHost(taskInstance, deferral);
+        }
+    }
+
+    private static async Task RecordFailureAndSignalExitAsync(Exception exception)
+    {
+        try
+        {
+            await BackgroundHostStatusReporter.TryRecordAsync(
+                BackgroundUpdateRunState.Failed,
+                exception).ConfigureAwait(false);
+        }
+        finally
+        {
+            Program.SignalExit();
+        }
+    }
+
+    private void CompleteHost(
+        IBackgroundTaskInstance taskInstance,
+        BackgroundTaskDeferral deferral)
+    {
+        try
+        {
+            try
+            {
+                taskInstance.Canceled -= OnCanceled;
+            }
+            catch
+            {
+                // COM cleanup must not strand the process.
+            }
+
+            _cancellation.Dispose();
+            try
+            {
+                deferral.Complete();
+            }
+            catch
+            {
+                // Windows may already have cancelled or disconnected the task.
+            }
+        }
+        finally
+        {
+            Program.SignalExit();
+        }
+    }
+
+    private static void TryReportProgress(
+        IBackgroundTaskInstance taskInstance,
+        uint progress)
+    {
+        try
+        {
+            taskInstance.Progress = progress;
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            // Progress is advisory. Discovery, its durable status, and deferral completion
+            // remain authoritative if the broker has already disconnected this interface.
+        }
+    }
+
+    private static bool IsFatal(Exception exception) =>
+        exception is OutOfMemoryException or StackOverflowException or AccessViolationException;
 }

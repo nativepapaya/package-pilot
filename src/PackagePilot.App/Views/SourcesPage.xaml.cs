@@ -29,6 +29,7 @@ public sealed partial class SourcesPage : Page
         LoadingRing.Visibility = isLoading ? Visibility.Visible : Visibility.Collapsed;
         RefreshButton.IsEnabled = !isLoading;
         AddButton.IsEnabled = _canAdd && !isLoading;
+        SourceList.IsEnabled = !isLoading;
     }
 
     public void SetCapabilitySummary(string summary) => CapabilityText.Text = summary;
@@ -61,7 +62,8 @@ public sealed partial class SourcesPage : Page
         object sender,
         EventHandler<SourceCommandRequestedEventArgs>? handler)
     {
-        if (sender is FrameworkElement { Tag: string id }
+        if (SourceList.IsEnabled
+            && sender is FrameworkElement { Tag: string id }
             && Sources.FirstOrDefault(source => string.Equals(source.Id, id, StringComparison.Ordinal)) is { } source)
         {
             handler?.Invoke(this, new SourceCommandRequestedEventArgs(source));

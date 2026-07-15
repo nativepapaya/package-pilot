@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PackagePilot.Core\PackagePilot.Core.csproj" />
+    <ProjectReference Include="..\..\src\PackagePilot.Windows.ReadOnly\PackagePilot.Windows.ReadOnly.csproj" />
     <ProjectReference Include="..\..\src\PackagePilot.Windows\PackagePilot.Windows.csproj" />
   </ItemGroup>
 

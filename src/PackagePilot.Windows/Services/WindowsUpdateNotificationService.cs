@@ -16,16 +16,20 @@ public sealed class WindowsUpdateNotificationService : IUpdateNotificationSink
         _manager = manager ?? AppNotificationManager.Default;
     }
 
-    public void Apply(UpdateNotificationDecision decision)
+    public async Task ApplyAsync(
+        UpdateNotificationDecision decision,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(decision);
+        cancellationToken.ThrowIfCancellationRequested();
         UpdateBadge(decision.BadgeCount);
 
         if (decision.ClearNotification)
         {
-            _ = _manager.RemoveByTagAndGroupAsync(
+            await _manager.RemoveByTagAndGroupAsync(
                 WindowsIntegrationConstants.NotificationTag,
                 WindowsIntegrationConstants.NotificationGroup);
+            cancellationToken.ThrowIfCancellationRequested();
             return;
         }
 
@@ -54,15 +58,6 @@ public sealed class WindowsUpdateNotificationService : IUpdateNotificationSink
             Group = WindowsIntegrationConstants.NotificationGroup
         };
         _manager.Show(notification);
-    }
-
-    public Task ApplyAsync(
-        UpdateNotificationDecision decision,
-        CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        Apply(decision);
-        return Task.CompletedTask;
     }
 
     public static void SetBadgeCount(int count) => WindowsBadgeService.SetCount(count);

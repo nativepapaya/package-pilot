@@ -117,6 +117,10 @@ foreach ($requiredText in @(
     'Microsoft.WindowsAppRuntime.2.arm64.msix'
     'New-MsixBundle.ps1'
     'Assert-PackagePayload'
+    'PackagePilot.Windows.ReadOnly.dll'
+    'Microsoft.Management.Deployment.CsWinRTProjection.dll'
+    'Microsoft.Management.Deployment.dll'
+    'Microsoft.Management.Deployment.winmd'
     'Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.dll'
 )) {
     Assert-True -Condition ($workflow.Contains($requiredText)) `

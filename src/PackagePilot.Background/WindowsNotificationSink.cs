@@ -53,9 +53,8 @@ internal sealed class WindowsNotificationSink : IUpdateNotificationSink
             Group = WindowsIntegrationConstants.NotificationGroup
         };
 
-        ToastNotificationManager.History.Remove(
-            WindowsIntegrationConstants.NotificationTag,
-            WindowsIntegrationConstants.NotificationGroup);
+        // Windows replaces an existing toast with the same tag and group atomically. Do not
+        // remove first: if Show fails, the last known nonzero notification must remain.
         ToastNotificationManager.CreateToastNotifier().Show(notification);
         return Task.CompletedTask;
     }

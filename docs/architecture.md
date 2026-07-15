@@ -4,7 +4,8 @@
 
 - `PackagePilot.App` owns the WinUI shell, review dialogs, activation handoff, and identity-scoped application state.
 - `PackagePilot.Core` contains provider-neutral records, interfaces, exact inventory merging, update coordination, queueing, migration, and atomic JSON stores.
-- `PackagePilot.Windows` is the reusable Windows infrastructure layer for WinGet COM, notification/badge integration, and identity-bound constants.
+- `PackagePilot.Windows.ReadOnly` contains update discovery, badge integration, and identity-bound constants shared by the foreground app and isolated background host.
+- `PackagePilot.Windows` is the mutation-capable Windows infrastructure layer for WinGet COM, unified inventory, source administration, startup registration, notifications, and notification-area integration.
 - `PackagePilot.Background` is the packaged, read-only update-discovery COM host.
 - `PackagePilot.SourceAdmin` is the short-lived elevated source-administration helper.
 - `PackagePilot.Tests` contains deterministic tests plus opt-in read-only WinGet integration tests.
@@ -17,7 +18,7 @@ All package mutations pass through `IOperationQueue` and require foreground revi
 
 Source refresh runs normally. Add, remove, reset-one, and explicit-source edits cross a random, one-shot, authenticated named pipe to `PackagePilot.SourceAdmin`, which validates an allowlisted request, performs one WinGet COM operation after UAC approval, returns one result, and exits. There is no reset-all or arbitrary-command representation.
 
-The background host can only discover updates. Foreground and background checks share a named mutex and atomically replace the same snapshot. Background failures are recorded for a deferred foreground retry; no tray process or Task Scheduler fallback exists.
+The background host can only discover updates. Foreground and background checks share a named mutex and atomically replace the same snapshot. Background failures are recorded for a deferred foreground retry. There is no separate tray executable or Task Scheduler fallback; when notification-area mode is enabled, the main app can remain as a lightweight resident host and creates the mutation-capable foreground graph only when a window is opened.
 
 ## Inventory and update flow
 
@@ -34,6 +35,7 @@ The background host can only discover updates. Foreground and background checks 
 - `ApplicationData.LocalFolder/update-snapshot.json`: versioned update rows, timestamps, fingerprints, and source health
 - `ApplicationData.LocalFolder/background-update-status.json`: last opportunistic background-host outcome
 - `ApplicationData.LocalCacheFolder/PackagePilot/Icons`: HTTPS-only, size-bounded, decoder-validated package icons
-- `%LOCALAPPDATA%/Package Pilot/Identity Migration`: atomic one-time settings/history handoff between the retiring development identity and the permanent production identity
+
+The neutral identity-migration service and its deterministic tests are retained as deferred infrastructure for a future production identity. The current GitHub package does not run an export or import hook.
 
 No Package Pilot telemetry pipeline is present.
