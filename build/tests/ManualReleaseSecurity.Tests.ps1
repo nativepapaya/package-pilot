@@ -69,7 +69,9 @@ function New-TestApplicationMsixBytes {
         [ValidateSet('x64', 'arm64')]
         [string]$Architecture,
 
-        [switch]$OmitReadOnlyPayload
+        [switch]$OmitReadOnlyPayload,
+
+        [switch]$Signed
     )
 
     $memory = [IO.MemoryStream]::new()
@@ -100,6 +102,12 @@ function New-TestApplicationMsixBytes {
                 -Name $payloadName `
                 -Content ([Text.UTF8Encoding]::new($false).GetBytes("test:$payloadName"))
         }
+        if ($Signed) {
+            Add-TestZipEntry `
+                -Archive $archive `
+                -Name 'AppxSignature.p7x' `
+                -Content ([byte[]](1, 2, 3, 4))
+        }
     }
     finally {
         $archive.Dispose()
@@ -124,7 +132,11 @@ function New-TestMsixBundle {
         [switch]$OmitArm64ReadOnlyPayload,
 
         [ValidateSet('x64', 'arm64')]
-        [string]$Arm64InnerArchitecture = 'arm64'
+        [string]$Arm64InnerArchitecture = 'arm64',
+
+        [switch]$Signed,
+
+        [switch]$OmitArm64Signature
     )
 
     $packageRecords = @(
@@ -179,13 +191,23 @@ $packageXml
             -Content ([Text.UTF8Encoding]::new($false).GetBytes($bundleManifest))
 
         foreach ($packageRecord in $packageRecords) {
+            $packageSigned = $Signed -and
+                (-not $OmitArm64Signature -or
+                    $packageRecord.ManifestArchitecture -ne 'arm64')
             $packageBytes = New-TestApplicationMsixBytes `
                 -Architecture $packageRecord.InnerArchitecture `
-                -OmitReadOnlyPayload:$packageRecord.OmitReadOnlyPayload
+                -OmitReadOnlyPayload:$packageRecord.OmitReadOnlyPayload `
+                -Signed:$packageSigned
             Add-TestZipEntry `
                 -Archive $archive `
                 -Name $packageRecord.FileName `
                 -Content $packageBytes
+        }
+        if ($Signed) {
+            Add-TestZipEntry `
+                -Archive $archive `
+                -Name 'AppxSignature.p7x' `
+                -Content ([byte[]](1, 2, 3, 4))
         }
     }
     finally {
@@ -449,6 +471,13 @@ $getMsixBundleIdentityFunction = $publisherAst.Find(
             $node.Name -eq 'Get-MsixBundleIdentity'
     },
     $true)
+$assertEmbeddedSignaturesFunction = $publisherAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Assert-MsixBundleEmbeddedSignatures'
+    },
+    $true)
 $getNewerBlockingRunsFunction = $publisherAst.Find(
     {
         param($node)
@@ -505,6 +534,7 @@ Assert-True -Condition (
     $null -ne $requiredPayloadAssignment -and
     $null -ne $getMsixIdentityFromArchiveFunction -and
     $null -ne $getMsixBundleIdentityFunction -and
+    $null -ne $assertEmbeddedSignaturesFunction -and
     $null -ne $getNewerBlockingRunsFunction -and
     $null -ne $assertPromotionPreconditionsFunction -and
     $null -ne $newPreparedFileRecordFunction -and
@@ -513,6 +543,11 @@ Assert-True -Condition (
     $null -ne $assertPreparedDirectoryFunction -and
     $null -ne $assertGitHubAssetsFunction) `
     -Message 'The certificate validation functions could not be loaded for a runtime compatibility test.'
+Assert-True -Condition (
+    $assertEmbeddedSignaturesFunction.Extent.Text -match 'Get-AuthenticodeSignature' -and
+    $assertEmbeddedSignaturesFunction.Extent.Text -match 'SignerCertificate\.Thumbprint' -and
+    $publisher -match '(?s)Assert-MsixBundleEmbeddedSignatures.*?-Path\s+\$packagePath.*?-Certificate\s+\$certificate') `
+    -Message 'The publisher must independently verify both extracted embedded package signatures with the exact release certificate.'
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -685,8 +720,35 @@ try {
     Assert-True `
         -Condition (
             $validBundleIdentity.EmbeddedPackages.Count -eq 2 -and
+            -not $validBundleIdentity.HasSignature -and
+            @($validBundleIdentity.EmbeddedPackages | Where-Object HasSignature).Count -eq 0 -and
             ($validBundleIdentity.Architectures -join ',') -eq 'arm64,x64') `
         -Message 'A valid two-architecture bundle did not pass embedded identity and payload validation.'
+
+    $signedBundlePath = Join-Path $bundleTestDirectory 'signed-state.msixbundle'
+    New-TestMsixBundle -Path $signedBundlePath -Signed
+    $signedBundleIdentity = Get-MsixBundleIdentity -Path $signedBundlePath
+    Assert-True `
+        -Condition (
+            $signedBundleIdentity.HasSignature -and
+            @($signedBundleIdentity.EmbeddedPackages | Where-Object HasSignature).Count -eq 2) `
+        -Message 'A consistently signed bundle did not retain both embedded signature states.'
+
+    $mixedSignatureBundlePath = Join-Path $bundleTestDirectory 'mixed-signature.msixbundle'
+    New-TestMsixBundle `
+        -Path $mixedSignatureBundlePath `
+        -Signed `
+        -OmitArm64Signature
+    $expectedMixedSignatureFailure = $null
+    try {
+        [void](Get-MsixBundleIdentity -Path $mixedSignatureBundlePath)
+    }
+    catch {
+        $expectedMixedSignatureFailure = $_.Exception.Message
+    }
+    Assert-True `
+        -Condition ($expectedMixedSignatureFailure -like '*signature state inconsistent with its bundle*') `
+        -Message "A mixed outer/embedded bundle signature state was not rejected: '$expectedMixedSignatureFailure'"
 
     $extraPackageBundlePath = Join-Path $bundleTestDirectory 'extra-package.msixbundle'
     New-TestMsixBundle -Path $extraPackageBundlePath -PackageCount 3
@@ -730,7 +792,7 @@ try {
         $expectedArchitectureFailure = $_.Exception.Message
     }
     Assert-True `
-        -Condition ($expectedArchitectureFailure -like '*invalid identity, architecture, version, or nested signature state*') `
+        -Condition ($expectedArchitectureFailure -like '*invalid identity, architecture, or version*') `
         -Message "A manifest-to-embedded-package architecture mismatch was not rejected: '$expectedArchitectureFailure'"
 
     $PreparedStateFileName = 'prepared-release.json'
