@@ -310,6 +310,45 @@ Assert-True -Condition (
     $publisher -match [regex]::Escape('Get-SelectedRun -WorkflowRunId $WorkflowRunId') -and
     $publisher -match [regex]::Escape('[uint64]$currentRun.attempt -ne $RunAttempt')) `
     -Message 'Pagination instability and selected-run reruns must fail closed before publication.'
+$matchingArtifactsAssignment = $publisherAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -eq '$matchingArtifacts'
+    },
+    $true)
+Assert-True -Condition (
+    $null -ne $matchingArtifactsAssignment -and
+    $matchingArtifactsAssignment.Right -is
+        [System.Management.Automation.Language.CommandExpressionAst] -and
+    $matchingArtifactsAssignment.Right.Expression -is
+        [System.Management.Automation.Language.ArrayExpressionAst]) `
+    -Message 'Artifact filtering must retain array semantics when exactly one artifact matches under Windows PowerShell strict mode.'
+$expectedArtifactName = 'expected-artifact'
+foreach ($artifactCount in 0..2) {
+    $artifactResponse = [pscustomobject]@{
+        artifacts = @(
+            for ($index = 0; $index -lt $artifactCount; $index++) {
+                [pscustomobject]@{
+                    id = $index + 1
+                    name = $expectedArtifactName
+                    expired = $false
+                }
+            }
+            [pscustomobject]@{
+                id = 100
+                name = 'other-artifact'
+                expired = $false
+            }
+        )
+    }
+    $matchingArtifacts = $null
+    Invoke-Expression $matchingArtifactsAssignment.Extent.Text
+    Assert-True -Condition (
+        $matchingArtifacts -is [array] -and
+        $matchingArtifacts.Count -eq $artifactCount) `
+        -Message "Artifact filtering did not retain array semantics for $artifactCount matching artifacts."
+}
 $draftPublishIndex = $publisher.IndexOf("'--draft=false'", [StringComparison]::Ordinal)
 $draftStaleCheckIndex = if ($draftPublishIndex -ge 0) {
     $publisher.LastIndexOf(
