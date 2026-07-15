@@ -27,11 +27,45 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.7705" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
-    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.28.240" />
+    <!--
+      The read-only discovery assembly is compiled against the WinGet CsWinRT projection,
+      but keeps that package private so mutation-capable APIs do not flow transitively. The
+      background host therefore declares the exact projection as a runtime-only dependency;
+      otherwise its .deps.json cannot resolve WindowsUpdateDiscoveryClient when Windows wakes it.
+    -->
+    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop"
+                      Version="1.28.240"
+                      IncludeAssets="runtime"
+                      PrivateAssets="all" />
   </ItemGroup>
+
+  <Target Name="ValidateBackgroundWinGetRuntimeDependency"
+          AfterTargets="GenerateBuildDependencyFile"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <Error Condition="!Exists('$(ProjectDepsFilePath)')"
+           Text="The background host dependency manifest was not generated." />
+    <Error Condition="$([System.IO.File]::ReadAllText('$(ProjectDepsFilePath)').Contains('Microsoft.Management.Deployment.CsWinRTProjection')) != 'True'"
+           Text="The background host dependency manifest does not include the WinGet CsWinRT projection." />
+  </Target>
+
+  <Target Name="ValidateBackgroundWinGetCompileIsolation"
+          AfterTargets="ResolveReferences"
+          BeforeTargets="CoreCompile"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(IsCrossTargetingBuild)' != 'true'">
+    <ItemGroup>
+      <_BackgroundForbiddenWinGetCompileReference
+        Include="@(ReferencePath)"
+        Condition="'%(Filename)' == 'Microsoft.Management.Deployment.CsWinRTProjection'" />
+      <_BackgroundForbiddenWinGetCompileReference
+        Include="@(WindowsMetadataReference)"
+        Condition="'%(Filename)' == 'Microsoft.Management.Deployment'" />
+    </ItemGroup>
+    <Error Condition="'@(_BackgroundForbiddenWinGetCompileReference)' != ''"
+           Text="The mutation-capable WinGet projection must remain outside the background host compile surface." />
+  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\PackagePilot.Core\PackagePilot.Core.csproj" />
-    <ProjectReference Include="..\PackagePilot.Windows\PackagePilot.Windows.csproj" />
+    <ProjectReference Include="..\PackagePilot.Windows.ReadOnly\PackagePilot.Windows.ReadOnly.csproj" />
   </ItemGroup>
 </Project>

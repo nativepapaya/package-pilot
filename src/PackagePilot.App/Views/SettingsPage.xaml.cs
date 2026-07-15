@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using PackagePilot.Core.Abstractions;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
@@ -15,8 +16,12 @@ public sealed partial class SettingsPage : Page
 {
     private readonly ApplicationDataContainer _settings = ApplicationData.Current.LocalSettings;
     private readonly WindowsBackgroundUpdateRegistrationService _backgroundRegistration = new();
+    private IAppLifetimeController? _appLifetimeController;
+    private IAppLifetimeActivityGate? _lifetimeActivityGate;
     private bool _isLoading = true;
     private bool _backgroundStatusLoaded;
+    private bool _appLifetimeMutationInProgress;
+    private int _appLifetimeRefreshVersion;
 
     public SettingsPage()
     {
@@ -32,39 +37,75 @@ public sealed partial class SettingsPage : Page
 
     public void SetCapabilitySummary(string summary) => CapabilityText.Text = summary;
 
+    internal void ConfigureAppLifetime(
+        IAppLifetimeController? controller,
+        IAppLifetimeActivityGate? lifetimeActivityGate)
+    {
+        _appLifetimeController = controller;
+        _lifetimeActivityGate = lifetimeActivityGate;
+        _ = RefreshAppLifetimeStateAsync();
+    }
+
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        await RefreshAppLifetimeStateAsync();
         if (_backgroundStatusLoaded)
         {
             return;
         }
 
         _backgroundStatusLoaded = true;
+        await RefreshBackgroundMonitoringStatusAsync(showAlerts: true);
+    }
+
+    private async Task<BackgroundMonitoringStatus> RefreshBackgroundMonitoringStatusAsync(
+        bool showAlerts)
+    {
         var store = new JsonBackgroundUpdateRunStatusStore(Path.Combine(
             ApplicationData.Current.LocalFolder.Path,
             "background-update-status.json"));
         var status = await store.LoadAsync();
-        if (status is null)
+        var monitoring = _backgroundRegistration.GetStatus(status);
+        string schedule = monitoring.DesiredCadence == monitoring.ActualCadence
+            ? $"Schedule: {DescribeCadence(monitoring.DesiredCadence)}."
+            : $"Requested: {DescribeCadence(monitoring.DesiredCadence)}; Windows currently has {DescribeCadence(monitoring.ActualCadence)}.";
+        string run = status is null
+            ? "No background check has run yet."
+            : status.State == BackgroundUpdateRunState.Completed
+                ? $"Last background check {status.AttemptedAt.ToLocalTime():g}: {status.UpdateCount} update{(status.UpdateCount == 1 ? string.Empty : "s")} found."
+                : $"Last background attempt {status.AttemptedAt.ToLocalTime():g}: {status.State}.";
+        BackgroundStatusText.Text = $"{schedule} {run}";
+
+        if (showAlerts && !monitoring.RegistrationHealthy)
         {
-            BackgroundStatusText.Text = "No background check has run yet.";
-            return;
+            BackgroundMonitoringInfoBar.Title = "Background schedule needs attention";
+            BackgroundMonitoringInfoBar.Message = monitoring.Error
+                ?? "Windows did not confirm the requested Package Pilot background schedule.";
+            BackgroundMonitoringInfoBar.Severity = monitoring.RegistrationState
+                == BackgroundMonitoringState.Denied
+                    ? InfoBarSeverity.Warning
+                    : InfoBarSeverity.Error;
+            BackgroundMonitoringInfoBar.IsOpen = true;
         }
-
-        var localAttempt = status.AttemptedAt.ToLocalTime();
-        BackgroundStatusText.Text = status.State == BackgroundUpdateRunState.Completed
-            ? $"Last background check {localAttempt:g}: {status.UpdateCount} update{(status.UpdateCount == 1 ? string.Empty : "s")} found."
-            : $"Last background attempt {localAttempt:g}: {status.State}.";
-
-        if (status.ForegroundFallbackRequired)
+        else if (showAlerts && monitoring.ForegroundFallbackRequired)
         {
             BackgroundMonitoringInfoBar.Title = "Background WinGet access unavailable";
-            BackgroundMonitoringInfoBar.Message = string.IsNullOrWhiteSpace(status.Message)
+            BackgroundMonitoringInfoBar.Message = string.IsNullOrWhiteSpace(monitoring.Error)
                 ? "Windows could not activate WinGet in the background host. Package Pilot will defer discovery until the foreground app runs."
-                : $"{status.Message} Package Pilot will defer discovery until the foreground app runs.";
+                : $"{monitoring.Error} Package Pilot will defer discovery until the foreground app runs.";
             BackgroundMonitoringInfoBar.Severity = InfoBarSeverity.Warning;
             BackgroundMonitoringInfoBar.IsOpen = true;
         }
+
+        return monitoring;
     }
+
+    private static string DescribeCadence(UpdateMonitoringCadence cadence) => cadence switch
+    {
+        UpdateMonitoringCadence.Manual => "Manual",
+        UpdateMonitoringCadence.EverySixHours => "Every 6 hours",
+        _ => "Daily"
+    };
 
     private void LoadPreferences()
     {
@@ -99,10 +140,227 @@ public sealed partial class SettingsPage : Page
     private void OnScopeChanged(object sender, SelectionChangedEventArgs e) => SaveComboSetting("installScope", ScopeBox);
     private void OnArchitectureChanged(object sender, SelectionChangedEventArgs e) => SaveComboSetting("architecture", ArchitectureBox);
 
+    private async void OnNotificationAreaToggled(object sender, RoutedEventArgs e)
+    {
+        if (_isLoading || _appLifetimeController is null)
+        {
+            return;
+        }
+
+        _appLifetimeMutationInProgress = true;
+        _appLifetimeRefreshVersion++;
+        SetAppLifetimeControlsEnabled(false);
+        try
+        {
+            bool enable = NotificationAreaToggle.IsOn;
+            var result = await _appLifetimeController.SetNotificationAreaEnabledAsync(enable);
+            bool succeeded = enable ? result.IsVisible : result.State == NotificationAreaIconState.Hidden;
+            if (!succeeded)
+            {
+                ShowAppLifetimeStatus(
+                    "Notification-area mode unavailable",
+                    result.Message ?? "Windows could not apply this setting.",
+                    InfoBarSeverity.Error);
+            }
+            else
+            {
+                ShowAppLifetimeStatus(
+                    enable ? "Notification-area mode enabled" : "Notification-area mode disabled",
+                    enable
+                        ? "Close now hides Package Pilot. Minimize continues to use the taskbar, and Exit Package Pilot fully quits."
+                        : "Close now exits Package Pilot normally. Start with Windows is also off.",
+                    InfoBarSeverity.Success);
+            }
+        }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            ShowAppLifetimeStatus(
+                "Notification-area setting failed",
+                $"Package Pilot could not apply the setting (0x{exception.HResult:X8}).",
+                InfoBarSeverity.Error);
+        }
+        finally
+        {
+            _appLifetimeMutationInProgress = false;
+            await RefreshAppLifetimeStateAsync();
+        }
+    }
+
+    private async void OnStartWithWindowsToggled(object sender, RoutedEventArgs e)
+    {
+        if (_isLoading || _appLifetimeController is null)
+        {
+            return;
+        }
+
+        _appLifetimeMutationInProgress = true;
+        _appLifetimeRefreshVersion++;
+        SetAppLifetimeControlsEnabled(false);
+        try
+        {
+            var result = await _appLifetimeController.SetStartupEnabledAsync(
+                StartWithWindowsToggle.IsOn);
+            ShowStartupRegistrationStatus(result);
+        }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            ShowAppLifetimeStatus(
+                "Start with Windows failed",
+                $"Package Pilot could not change Windows startup registration (0x{exception.HResult:X8}).",
+                InfoBarSeverity.Error);
+        }
+        finally
+        {
+            _appLifetimeMutationInProgress = false;
+            await RefreshAppLifetimeStateAsync();
+        }
+    }
+
+    private async void OnOpenStartupAppsSettingsClick(object sender, RoutedEventArgs e)
+    {
+        if (_appLifetimeController is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _appLifetimeController.OpenWindowsStartupSettingsAsync();
+        }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            ShowAppLifetimeStatus(
+                "Windows Startup apps could not open",
+                $"Open Settings > Apps > Startup manually (0x{exception.HResult:X8}).",
+                InfoBarSeverity.Error);
+        }
+    }
+
+    private async Task RefreshAppLifetimeStateAsync()
+    {
+        int refreshVersion = ++_appLifetimeRefreshVersion;
+        SetAppLifetimeControlsEnabled(false);
+        if (_appLifetimeController is null)
+        {
+            if (refreshVersion != _appLifetimeRefreshVersion
+                || _appLifetimeMutationInProgress)
+            {
+                return;
+            }
+
+            _isLoading = true;
+            NotificationAreaToggle.IsOn = false;
+            StartWithWindowsToggle.IsOn = false;
+            _isLoading = false;
+            NotificationAreaToggle.IsEnabled = false;
+            StartWithWindowsToggle.IsEnabled = false;
+            StartupSettingsButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        StartupRegistrationResult startup;
+        try
+        {
+            startup = await _appLifetimeController.GetStartupRegistrationAsync();
+        }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            startup = new StartupRegistrationResult
+            {
+                State = StartupRegistrationState.Failed,
+                Message = $"Windows startup state is unavailable (0x{exception.HResult:X8})."
+            };
+        }
+
+        if (refreshVersion != _appLifetimeRefreshVersion
+            || _appLifetimeMutationInProgress)
+        {
+            return;
+        }
+
+        bool notificationAreaEnabled =
+            _appLifetimeController.BehaviorSettings.UsesNotificationAreaIcon;
+        _isLoading = true;
+        try
+        {
+            NotificationAreaToggle.IsOn = notificationAreaEnabled;
+            StartWithWindowsToggle.IsOn = startup.IsEnabled;
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+
+        NotificationAreaToggle.IsEnabled = startup.State != StartupRegistrationState.EnabledByPolicy;
+        StartWithWindowsToggle.IsEnabled = notificationAreaEnabled
+            && startup.State is StartupRegistrationState.Disabled or StartupRegistrationState.Enabled;
+        StartupSettingsButton.Visibility = startup.RequiresWindowsSettings
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        StartupSettingsButton.IsEnabled = true;
+        StartupStateText.Text = startup.Message ?? "Windows startup state is unavailable.";
+    }
+
+    private void SetAppLifetimeControlsEnabled(bool enabled)
+    {
+        NotificationAreaToggle.IsEnabled = enabled;
+        StartWithWindowsToggle.IsEnabled = enabled && NotificationAreaToggle.IsOn;
+        StartupSettingsButton.IsEnabled = enabled;
+    }
+
+    private void ShowStartupRegistrationStatus(StartupRegistrationResult result)
+    {
+        var severity = result.State switch
+        {
+            StartupRegistrationState.Enabled or StartupRegistrationState.Disabled =>
+                InfoBarSeverity.Success,
+            StartupRegistrationState.DisabledByUser
+                or StartupRegistrationState.DisabledByPolicy
+                or StartupRegistrationState.EnabledByPolicy => InfoBarSeverity.Warning,
+            _ => InfoBarSeverity.Error
+        };
+        ShowAppLifetimeStatus(
+            result.IsEnabled ? "Start with Windows enabled" : "Start with Windows not enabled",
+            result.Message ?? "Windows returned no startup-registration detail.",
+            severity);
+    }
+
+    private void ShowAppLifetimeStatus(string title, string message, InfoBarSeverity severity)
+    {
+        AppLifetimeInfoBar.Title = title;
+        AppLifetimeInfoBar.Message = message;
+        AppLifetimeInfoBar.Severity = severity;
+        AppLifetimeInfoBar.IsOpen = true;
+    }
+
     private async void OnUpdateCadenceChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_isLoading || UpdateCadenceBox.SelectedItem is not ComboBoxItem { Tag: string value })
         {
+            return;
+        }
+
+        using var activity = _lifetimeActivityGate?.TryEnter(
+            AppLifetimeActivityKind.WindowsIntegration);
+        if (_lifetimeActivityGate is not null && activity is null)
+        {
+            _isLoading = true;
+            try
+            {
+                SelectByTag(
+                    UpdateCadenceBox,
+                    ReadString("updateMonitoringCadence", "daily"));
+            }
+            finally
+            {
+                _isLoading = false;
+            }
+
+            BackgroundMonitoringInfoBar.Title = "Finish the current operation first";
+            BackgroundMonitoringInfoBar.Message =
+                "Package Pilot did not change the background schedule while another source or Windows integration operation was active.";
+            BackgroundMonitoringInfoBar.Severity = InfoBarSeverity.Informational;
+            BackgroundMonitoringInfoBar.IsOpen = true;
             return;
         }
 
@@ -119,6 +377,12 @@ public sealed partial class SettingsPage : Page
         try
         {
             var result = await _backgroundRegistration.ConfigureAsync(cadence);
+            var monitoring = await RefreshBackgroundMonitoringStatusAsync(showAlerts: false);
+            SettingChanged?.Invoke(
+                this,
+                new SettingChangedEventArgs(
+                    "backgroundMonitoringState",
+                    monitoring.RegistrationState));
             BackgroundMonitoringInfoBar.Title = result.State switch
             {
                 BackgroundMonitoringState.Registered => "Background monitoring enabled",
@@ -250,4 +514,10 @@ public sealed partial class SettingsPage : Page
         _settings.Values["reduceMotion"] = ReduceMotionToggle.IsOn;
         SettingChanged?.Invoke(this, new SettingChangedEventArgs("reduceMotion", ReduceMotionToggle.IsOn));
     }
+
+    private static bool IsRecoverable(Exception exception) => exception is not
+        OperationCanceledException and not
+        OutOfMemoryException and not
+        StackOverflowException and not
+        AccessViolationException;
 }

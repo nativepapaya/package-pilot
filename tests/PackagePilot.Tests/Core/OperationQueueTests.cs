@@ -9,6 +9,98 @@ namespace PackagePilot.Tests.Core;
 public sealed class OperationQueueTests
 {
     [Fact]
+    public async Task TryBeginShutdownIfIdle_ClosesQueueAtomically()
+    {
+        await using var queue = new OperationQueue(new FakeWingetClient());
+
+        Assert.True(queue.TryBeginShutdownIfIdle());
+        Assert.True(queue.TryBeginShutdownIfIdle());
+        Assert.Throws<InvalidOperationException>(() =>
+            queue.Enqueue(Operation("Package.AfterShutdownGate")));
+    }
+
+    [Fact]
+    public async Task TryBeginShutdownIfIdle_RefusesWhileBusyAndLeavesQueueUsable()
+    {
+        var started = NewSource();
+        var release = NewSource();
+        var client = new FakeWingetClient
+        {
+            Execute = async (operation, _, cancellationToken) =>
+            {
+                if (operation.Package.Id == "Package.Active")
+                {
+                    started.TrySetResult();
+                    await release.Task.WaitAsync(cancellationToken);
+                }
+
+                return Success(operation);
+            }
+        };
+        await using var queue = new OperationQueue(client);
+
+        queue.Enqueue(Operation("Package.Active"));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(queue.TryBeginShutdownIfIdle());
+        queue.Enqueue(Operation("Package.StillAccepted"));
+
+        release.TrySetResult();
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(queue.TryBeginShutdownIfIdle());
+    }
+
+    [Fact]
+    public async Task TryBeginShutdownIfIdle_RacingEnqueueHasExactlyOneWinner()
+    {
+        for (var iteration = 0; iteration < 64; iteration++)
+        {
+            var release = NewSource();
+            var client = new FakeWingetClient
+            {
+                Execute = async (operation, _, cancellationToken) =>
+                {
+                    await release.Task.WaitAsync(cancellationToken);
+                    return Success(operation);
+                }
+            };
+            await using var queue = new OperationQueue(client);
+            using var start = new ManualResetEventSlim(false);
+
+            Task<bool> shutdown = Task.Run(() =>
+            {
+                start.Wait();
+                return queue.TryBeginShutdownIfIdle();
+            });
+            Task<bool> enqueue = Task.Run(() =>
+            {
+                start.Wait();
+                try
+                {
+                    queue.Enqueue(Operation($"Package.Race.{iteration}"));
+                    return true;
+                }
+                catch (InvalidOperationException)
+                {
+                    return false;
+                }
+            });
+
+            start.Set();
+            bool shutdownAccepted = await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
+            bool enqueueAccepted = await enqueue.WaitAsync(TimeSpan.FromSeconds(5));
+            release.TrySetResult();
+
+            Assert.NotEqual(shutdownAccepted, enqueueAccepted);
+            if (enqueueAccepted)
+            {
+                await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.True(queue.TryBeginShutdownIfIdle());
+            }
+        }
+    }
+
+    [Fact]
     public async Task Queue_ExecutesOperationsInOrderAndNeverOverlapsThem()
     {
         var client = new FakeWingetClient();

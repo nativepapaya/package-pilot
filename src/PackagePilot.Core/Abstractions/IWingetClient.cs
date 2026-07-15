@@ -6,7 +6,7 @@ namespace PackagePilot.Core.Abstractions;
 /// Framework-neutral boundary around Microsoft.Management.Deployment. Implementations must not
 /// leak COM or WinRT types through this interface.
 /// </summary>
-public interface IWingetClient
+public interface IWingetClient : IUpdateDiscoveryClient
 {
     Task<WingetCapabilities> GetCapabilitiesAsync(CancellationToken cancellationToken = default);
 
@@ -18,9 +18,6 @@ public interface IWingetClient
         CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<PackageSummary>> GetInstalledPackagesAsync(
-        CancellationToken cancellationToken = default);
-
-    Task<IReadOnlyList<PackageSummary>> GetAvailableUpdatesAsync(
         CancellationToken cancellationToken = default);
 
     Task<PackageDetails?> GetPackageDetailsAsync(

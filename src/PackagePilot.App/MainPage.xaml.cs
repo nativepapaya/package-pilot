@@ -9,6 +9,7 @@ using PackagePilot.App.ViewModels;
 using PackagePilot.App.Views;
 using PackagePilot.Core.Abstractions;
 using PackagePilot.Core.Models;
+using PackagePilot.Core.Services;
 using Windows.System;
 using Windows.Storage;
 
@@ -28,13 +29,19 @@ public sealed partial class MainPage : Page
     private bool _syncScheduled;
     private bool _synchronizingNavigationSelection;
     private readonly IPrivilegedSourceManagementBroker? _sourceManagementBroker;
+    private readonly IAppLifetimeController? _appLifetimeController;
+    private readonly IAppLifetimeActivityGate _lifetimeActivityGate;
 
     public MainPage(
         ShellViewModel viewModel,
-        IPrivilegedSourceManagementBroker? sourceManagementBroker = null)
+        IPrivilegedSourceManagementBroker? sourceManagementBroker = null,
+        IAppLifetimeController? appLifetimeController = null,
+        IAppLifetimeActivityGate? lifetimeActivityGate = null)
     {
         ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _sourceManagementBroker = sourceManagementBroker;
+        _appLifetimeController = appLifetimeController;
+        _lifetimeActivityGate = lifetimeActivityGate ?? new AppLifetimeActivityGate();
         InitializeComponent();
 
         ContentFrame.CacheSize = 8;
@@ -59,6 +66,7 @@ public sealed partial class MainPage : Page
     }
 
     public ShellViewModel ViewModel { get; }
+    internal event EventHandler<SettingChangedEventArgs>? AppSettingChanged;
 
     public Task ActivateAsync(AppActivationRequest request)
     {
@@ -247,6 +255,9 @@ public sealed partial class MainPage : Page
                 {
                     _settingsPage = page;
                     page.NavigationCacheMode = NavigationCacheMode.Required;
+                    page.ConfigureAppLifetime(
+                        _appLifetimeController,
+                        _lifetimeActivityGate);
                     page.SettingChanged += OnSettingChanged;
                 }
                 break;
@@ -643,6 +654,17 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        var activity = _lifetimeActivityGate.TryEnter(
+            AppLifetimeActivityKind.SourceMutation);
+        if (activity is null)
+        {
+            _sourcesPage?.ShowStatus(
+                "Source operation already running",
+                "Wait for the current package-source operation to finish before starting another.",
+                InfoBarSeverity.Informational);
+            return;
+        }
+
         _sourcesPage?.SetLoading(true);
         SourceOperationResult result;
         try
@@ -659,6 +681,7 @@ public sealed partial class MainPage : Page
         }
         finally
         {
+            activity.Dispose();
             await ViewModel.RefreshManagedSourcesAsync();
             _sourcesPage?.SetLoading(false);
         }
@@ -850,6 +873,15 @@ public sealed partial class MainPage : Page
                 _ => ElementTheme.Default
             };
         }
+
+        if (e.Key == "backgroundMonitoringState"
+            && e.Value is BackgroundMonitoringState backgroundState)
+        {
+            ViewModel.SetBackgroundMonitoringState(backgroundState);
+            SyncViewData();
+        }
+
+        AppSettingChanged?.Invoke(this, e);
     }
 
     private void OnOpenActivityClick(object sender, RoutedEventArgs e)
@@ -1112,7 +1144,9 @@ public sealed partial class MainPage : Page
             _sourcesPage.SetCapabilitySummary(capabilities.IsAvailable
                 ? $"WinGet source contract {capabilities.ContractVersion}. Changes request administrator approval."
                 : capabilities.UnavailableReason ?? "Source management is unavailable.");
-            _sourcesPage.SetLoading(ViewModel.IsManagingSources);
+            _sourcesPage.SetLoading(
+                ViewModel.IsManagingSources
+                || _lifetimeActivityGate.Snapshot.HasSourceActivity);
             _sourcesPage.SetCanAdd(capabilities.SupportsAdd);
             ReplaceAll(_sourcesPage.Sources, ViewModel.ManagedSources.Select(source => new SourceManagementListItem
             {

@@ -9,109 +9,119 @@ namespace PackagePilot.Core.Services;
 /// </summary>
 public sealed class UpdateCoordinator : IUpdateCoordinator
 {
-    public static readonly TimeSpan DefaultFreshness = TimeSpan.FromHours(24);
-    public static readonly TimeSpan DefaultFailureRetryDelay = TimeSpan.FromHours(1);
+    public static readonly TimeSpan DefaultFreshness = UpdateMonitoringPolicy.DailyFreshness;
+    public static readonly TimeSpan DefaultFailureRetryDelay = UpdateMonitoringPolicy.FailureRetryDelay;
 
-    private readonly IWingetClient _wingetClient;
+    private readonly IUpdateDiscoveryClient _updateDiscoveryClient;
     private readonly IUpdateSnapshotStore _store;
     private readonly TimeProvider _timeProvider;
-    private readonly TimeSpan _freshness;
+    private readonly TimeSpan? _freshnessOverride;
     private readonly TimeSpan _failureRetryDelay;
     private readonly object _checkGate = new();
     private Task<UpdateCheckResult>? _activeCheck;
 
     public UpdateCoordinator(
-        IWingetClient wingetClient,
+        IUpdateDiscoveryClient updateDiscoveryClient,
         IUpdateSnapshotStore store,
         TimeProvider? timeProvider = null,
         TimeSpan? freshness = null,
         TimeSpan? failureRetryDelay = null)
     {
-        _wingetClient = wingetClient ?? throw new ArgumentNullException(nameof(wingetClient));
+        _updateDiscoveryClient = updateDiscoveryClient
+            ?? throw new ArgumentNullException(nameof(updateDiscoveryClient));
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _timeProvider = timeProvider ?? TimeProvider.System;
-        _freshness = freshness ?? DefaultFreshness;
+        _freshnessOverride = freshness;
         _failureRetryDelay = failureRetryDelay ?? DefaultFailureRetryDelay;
 
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(_freshness, TimeSpan.Zero);
+        if (_freshnessOverride is { } configuredFreshness)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(configuredFreshness, TimeSpan.Zero);
+        }
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(_failureRetryDelay, TimeSpan.Zero);
     }
 
     public Task<UpdateSnapshot?> LoadAsync(CancellationToken cancellationToken = default) =>
         _store.LoadAsync(cancellationToken);
 
-    public UpdateCheckState GetState(UpdateSnapshot? snapshot)
-    {
-        if (snapshot is null)
-        {
-            return UpdateCheckState.NotChecked;
-        }
+    public UpdateCheckState GetState(
+        UpdateSnapshot? snapshot,
+        UpdateMonitoringCadence cadence = UpdateMonitoringCadence.Daily) =>
+        UpdateMonitoringPolicy.GetState(
+            snapshot,
+            cadence,
+            _timeProvider.GetUtcNow(),
+            _freshnessOverride);
 
-        if (!string.IsNullOrWhiteSpace(snapshot.LastError)
-            && snapshot.LastAttemptAt is { } failedAt
-            && (snapshot.LastSuccessAt is null || failedAt >= snapshot.LastSuccessAt.Value))
-        {
-            return UpdateCheckState.Failed;
-        }
-
-        if (snapshot.LastSuccessAt is not { } succeededAt)
-        {
-            return UpdateCheckState.NotChecked;
-        }
-
-        return _timeProvider.GetUtcNow() >= succeededAt + _freshness
-            ? UpdateCheckState.Stale
-            : UpdateCheckState.Current;
-    }
-
-    public bool ShouldAutomaticallyCheck(UpdateSnapshot? snapshot)
-    {
-        if (snapshot is null)
-        {
-            return true;
-        }
-
-        if (GetState(snapshot) == UpdateCheckState.Failed
-            && snapshot.LastAttemptAt is { } attemptedAt
-            && _timeProvider.GetUtcNow() < attemptedAt + _failureRetryDelay)
-        {
-            return false;
-        }
-
-        return GetState(snapshot) is UpdateCheckState.NotChecked or UpdateCheckState.Stale or UpdateCheckState.Failed;
-    }
+    public bool ShouldAutomaticallyCheck(
+        UpdateSnapshot? snapshot,
+        UpdateMonitoringCadence cadence = UpdateMonitoringCadence.Daily) =>
+        UpdateMonitoringPolicy.ShouldAutomaticallyCheck(
+            snapshot,
+            cadence,
+            _timeProvider.GetUtcNow(),
+            _freshnessOverride,
+            _failureRetryDelay);
 
     public Task<UpdateCheckResult> CheckAsync(
         UpdateCheckReason reason,
         IReadOnlyList<PackageSourceStatus>? sourceStatuses = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        UpdateMonitoringCadence cadence = UpdateMonitoringCadence.Daily)
     {
         Task<UpdateCheckResult> check;
         lock (_checkGate)
         {
             if (_activeCheck is not null)
             {
-                return _activeCheck.WaitAsync(cancellationToken);
+                return WaitForActiveThenRetryIfNeededAsync(
+                    _activeCheck,
+                    reason,
+                    sourceStatuses,
+                    cancellationToken,
+                    cadence);
             }
 
-            check = CheckAndReleaseAsync(reason, sourceStatuses, cancellationToken);
+            check = CheckAndReleaseAsync(reason, sourceStatuses, cancellationToken, cadence);
             _activeCheck = check;
         }
 
         return check;
     }
 
+    private async Task<UpdateCheckResult> WaitForActiveThenRetryIfNeededAsync(
+        Task<UpdateCheckResult> activeCheck,
+        UpdateCheckReason reason,
+        IReadOnlyList<PackageSourceStatus>? sourceStatuses,
+        CancellationToken cancellationToken,
+        UpdateMonitoringCadence cadence)
+    {
+        var result = await activeCheck.WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (result.PerformedCheck)
+        {
+            return result;
+        }
+
+        var mustRetry = reason != UpdateCheckReason.Automatic
+            || ShouldAutomaticallyCheck(result.Snapshot, cadence);
+        return mustRetry
+            ? await CheckAsync(reason, sourceStatuses, cancellationToken, cadence)
+                .ConfigureAwait(false)
+            : result;
+    }
+
     private async Task<UpdateCheckResult> CheckAndReleaseAsync(
         UpdateCheckReason reason,
         IReadOnlyList<PackageSourceStatus>? sourceStatuses,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        UpdateMonitoringCadence cadence)
     {
         // Ensure _activeCheck is assigned before this method can reach its finally block.
         await Task.Yield();
 
         try
         {
-            return await CheckCoreAsync(reason, sourceStatuses, cancellationToken).ConfigureAwait(false);
+            return await CheckCoreAsync(reason, sourceStatuses, cancellationToken, cadence).ConfigureAwait(false);
         }
         finally
         {
@@ -125,24 +135,27 @@ public sealed class UpdateCoordinator : IUpdateCoordinator
     private async Task<UpdateCheckResult> CheckCoreAsync(
         UpdateCheckReason reason,
         IReadOnlyList<PackageSourceStatus>? sourceStatuses,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        UpdateMonitoringCadence cadence)
     {
         var previous = await _store.LoadAsync(cancellationToken).ConfigureAwait(false);
-        if (reason == UpdateCheckReason.Automatic && !ShouldAutomaticallyCheck(previous))
+        if (reason == UpdateCheckReason.Automatic && !ShouldAutomaticallyCheck(previous, cadence))
         {
             return new UpdateCheckResult
             {
                 Snapshot = previous ?? new UpdateSnapshot(),
-                State = GetState(previous),
+                State = GetState(previous, cadence),
                 PerformedCheck = false
             };
         }
 
-        var attemptedAt = _timeProvider.GetUtcNow();
         try
         {
-            var updates = await _wingetClient.GetAvailableUpdatesAsync(cancellationToken).ConfigureAwait(false);
+            var updates = await _updateDiscoveryClient
+                .GetAvailableUpdatesAsync(cancellationToken)
+                .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
+            var completedAt = _timeProvider.GetUtcNow();
 
             var normalizedUpdates = updates
                 .GroupBy(
@@ -160,8 +173,10 @@ public sealed class UpdateCoordinator : IUpdateCoordinator
 
             var snapshot = new UpdateSnapshot
             {
-                LastAttemptAt = attemptedAt,
-                LastSuccessAt = attemptedAt,
+                // Freshness and retry windows start when discovery completes. Using the
+                // start time can make a long-running check stale (or retryable) immediately.
+                LastAttemptAt = completedAt,
+                LastSuccessAt = completedAt,
                 Updates = normalizedUpdates,
                 Sources = CaptureSources(sourceStatuses, normalizedUpdates),
                 Fingerprints = normalizedUpdates
@@ -186,10 +201,12 @@ public sealed class UpdateCoordinator : IUpdateCoordinator
         }
         catch (Exception exception)
         {
+            var failedAt = _timeProvider.GetUtcNow();
             var snapshot = (previous ?? new UpdateSnapshot()) with
             {
-                LastAttemptAt = attemptedAt,
-                LastError = NormalizeError(exception.Message)
+                LastAttemptAt = failedAt,
+                LastError = NormalizeError(exception.Message),
+                Sources = CaptureFailureSources(previous, sourceStatuses)
             };
 
             try
@@ -213,6 +230,13 @@ public sealed class UpdateCoordinator : IUpdateCoordinator
             };
         }
     }
+
+    private static IReadOnlyList<UpdateSourceHealthSnapshot> CaptureFailureSources(
+        UpdateSnapshot? previous,
+        IReadOnlyList<PackageSourceStatus>? sourceStatuses) =>
+        sourceStatuses is { Count: > 0 }
+            ? CaptureSources(sourceStatuses, previous?.Updates ?? Array.Empty<PackageSummary>())
+            : previous?.Sources ?? Array.Empty<UpdateSourceHealthSnapshot>();
 
     private static IReadOnlyList<UpdateSourceHealthSnapshot> CaptureSources(
         IReadOnlyList<PackageSourceStatus>? sourceStatuses,

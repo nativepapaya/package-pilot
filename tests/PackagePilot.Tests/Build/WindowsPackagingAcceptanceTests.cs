@@ -112,6 +112,19 @@ public sealed class WindowsPackagingAcceptanceTests
             aliasExtension.Descendants(Uap5 + "ExecutionAlias"));
         Assert.Equal("packagepilot.exe", (string?)executionAlias.Attribute("Alias"));
 
+        XElement startupExtension = Assert.Single(
+            applicationExtensions.Elements(Desktop + "Extension"),
+            element => HasAttribute(element, "Category", "windows.startupTask"));
+        Assert.Equal("PackagePilot.App.exe", (string?)startupExtension.Attribute("Executable"));
+        Assert.Equal(
+            "Windows.FullTrustApplication",
+            (string?)startupExtension.Attribute("EntryPoint"));
+        XElement startupTask = Assert.Single(startupExtension.Elements(Desktop + "StartupTask"));
+        Assert.Equal("PackagePilot.Startup", (string?)startupTask.Attribute("TaskId"));
+        Assert.Equal("false", (string?)startupTask.Attribute("Enabled"));
+        Assert.Equal("Package Pilot", (string?)startupTask.Attribute("DisplayName"));
+        Assert.Null(startupTask.Attribute("ImmediateRegistration"));
+
         XElement notificationExtension = Assert.Single(
             applicationExtensions.Elements(Desktop + "Extension"),
             element => HasAttribute(element, "Category", "windows.toastNotificationActivation"));
@@ -212,6 +225,79 @@ public sealed class WindowsPackagingAcceptanceTests
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         Assert.Contains("x64", platformTargets);
         Assert.Contains("ARM64", platformTargets);
+    }
+
+    [Fact]
+    public void AppResolvesInstancingBeforeXamlAndKeepsStartupActivationLazy()
+    {
+        string repositoryRoot = FindRepositoryRoot();
+        string appDirectory = Path.Combine(repositoryRoot, "src", "PackagePilot.App");
+        string projectText = File.ReadAllText(
+            Path.Combine(appDirectory, "PackagePilot.App.csproj"));
+        string programText = File.ReadAllText(Path.Combine(appDirectory, "Program.cs"));
+        string appText = File.ReadAllText(Path.Combine(appDirectory, "App.xaml.cs"));
+
+        Assert.Contains("DISABLE_XAML_GENERATED_MAIN", projectText, StringComparison.Ordinal);
+
+        int registrationIndex = programText.IndexOf(
+            "AppInstance.FindOrRegisterForKey",
+            StringComparison.Ordinal);
+        int xamlStartIndex = programText.IndexOf("Application.Start", StringComparison.Ordinal);
+        Assert.True(registrationIndex >= 0, "Program must register the primary app instance.");
+        Assert.True(
+            xamlStartIndex > registrationIndex,
+            "Instance redirection must happen before the XAML application starts.");
+        Assert.Contains("UnregisterKey()", programText, StringComparison.Ordinal);
+
+        Assert.Contains(
+            "protected override void OnLaunched",
+            appText,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "protected override async void OnLaunched",
+            appText,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("RunIdentityMigrationAsync", appText, StringComparison.Ordinal);
+
+        int startupActivationIndex = appText.IndexOf(
+            "IsStartupTaskActivation: true",
+            StringComparison.Ordinal);
+        int startupResidentIndex = appText.IndexOf(
+            "StartHiddenResidentAsync",
+            startupActivationIndex,
+            StringComparison.Ordinal);
+        int foregroundGraphIndex = appText.IndexOf(
+            "private MainWindow EnsureWindow()",
+            StringComparison.Ordinal);
+        int wingetConstructionIndex = appText.IndexOf(
+            "new WingetClient()",
+            StringComparison.Ordinal);
+        Assert.True(startupActivationIndex >= 0, "OnLaunched must recognize startup-task activation.");
+        Assert.True(
+            startupResidentIndex > startupActivationIndex,
+            "Startup-task activation must select the hidden resident path.");
+        Assert.True(
+            wingetConstructionIndex > foregroundGraphIndex,
+            "WinGet must only be constructed inside the lazy foreground graph.");
+
+        int activationMethodIndex = appText.IndexOf(
+            "private async Task ActivateRequestAsync",
+            StringComparison.Ordinal);
+        int windowActivationIndex = appText.IndexOf(
+            "if (!window.ShowAndActivate())",
+            activationMethodIndex,
+            StringComparison.Ordinal);
+        int postLaunchIndex = appText.IndexOf(
+            "EnsureResidentInitializationAsync(configureJumpList: true)",
+            windowActivationIndex,
+            StringComparison.Ordinal);
+        Assert.True(windowActivationIndex > activationMethodIndex, "Foreground activation must show the window.");
+        Assert.True(
+            postLaunchIndex > windowActivationIndex,
+            "The main window must be active before asynchronous shell work begins.");
+
+        Assert.Contains("RedirectTimeoutMilliseconds = 5_000", programText, StringComparison.Ordinal);
+        Assert.Contains("MaximumPendingActivations", programText, StringComparison.Ordinal);
     }
 
     private static IEnumerable<XElement> FindExeServers(XElement applicationExtensions) =>

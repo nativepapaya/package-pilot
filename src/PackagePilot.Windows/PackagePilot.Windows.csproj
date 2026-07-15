@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PackagePilot.Core\PackagePilot.Core.csproj" />
+    <ProjectReference Include="..\PackagePilot.Windows.ReadOnly\PackagePilot.Windows.ReadOnly.csproj" />
   </ItemGroup>
 
 </Project>

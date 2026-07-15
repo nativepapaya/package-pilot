@@ -58,6 +58,15 @@
             <uap5:ExecutionAlias Alias="packagepilot.exe" />
           </uap5:AppExecutionAlias>
         </uap5:Extension>
+        <desktop:Extension
+          Category="windows.startupTask"
+          Executable="PackagePilot.App.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask
+            TaskId="PackagePilot.Startup"
+            Enabled="false"
+            DisplayName="Package Pilot" />
+        </desktop:Extension>
         <desktop:Extension Category="windows.toastNotificationActivation">
           <desktop:ToastNotificationActivation ToastActivatorCLSID="B298CA11-E900-4713-AF52-0A9B104A01DA" />
         </desktop:Extension>

@@ -28,6 +28,7 @@ public sealed class OperationQueue : IOperationQueue
     private Exception? _lastPersistenceError;
     private Task _persistenceTail = Task.CompletedTask;
     private bool _historyWasCleared;
+    private bool _acceptingOperations = true;
     private bool _disposed;
 
     public OperationQueue(
@@ -100,6 +101,11 @@ public sealed class OperationQueue : IOperationQueue
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!_acceptingOperations)
+            {
+                item.Dispose();
+                throw new InvalidOperationException("The operation queue is shutting down and no longer accepts work.");
+            }
 
             if ((_current?.Operation.Id == operation.Id)
                 || _pending.Any(candidate => candidate.Operation.Id == operation.Id))
@@ -132,6 +138,25 @@ public sealed class OperationQueue : IOperationQueue
         }
 
         return operation.Id;
+    }
+
+    public bool TryBeginShutdownIfIdle()
+    {
+        lock (_gate)
+        {
+            if (_disposed || !_acceptingOperations)
+            {
+                return true;
+            }
+
+            if (_pending.Count > 0 || _current is not null)
+            {
+                return false;
+            }
+
+            _acceptingOperations = false;
+            return true;
+        }
     }
 
     public bool TryCancel(Guid operationId)
@@ -236,6 +261,7 @@ public sealed class OperationQueue : IOperationQueue
             }
 
             _disposed = true;
+            _acceptingOperations = false;
             cancellableIds = _pending.Select(item => item.Operation.Id).ToList();
             if (_current?.Progress.CanCancel == true)
             {

@@ -11,7 +11,7 @@ public sealed class UpdateCoordinatorTests
     public async Task ManualCheck_PersistsNormalizedVersionedSnapshot()
     {
         var time = new ManualTimeProvider();
-        var client = new FakeWingetClient
+        var client = new FakeUpdateDiscoveryClient
         {
             GetUpdates = _ => Task.FromResult<IReadOnlyList<PackageSummary>>(
             [
@@ -61,7 +61,7 @@ public sealed class UpdateCoordinatorTests
             }]
         };
         var store = new InMemoryUpdateSnapshotStore(previous);
-        var client = new FakeWingetClient
+        var client = new FakeUpdateDiscoveryClient
         {
             GetUpdates = _ => Task.FromException<IReadOnlyList<PackageSummary>>(
                 new IOException("Source is offline."))
@@ -88,6 +88,117 @@ public sealed class UpdateCoordinatorTests
     }
 
     [Fact]
+    public async Task FailureRetryDelayStartsWhenDiscoveryFinishes()
+    {
+        var time = new ManualTimeProvider();
+        var client = new FakeUpdateDiscoveryClient
+        {
+            GetUpdates = _ =>
+            {
+                time.Advance(TimeSpan.FromHours(2));
+                return Task.FromException<IReadOnlyList<PackageSummary>>(
+                    new IOException("Source timed out."));
+            }
+        };
+        var coordinator = new UpdateCoordinator(
+            client,
+            new InMemoryUpdateSnapshotStore(),
+            time);
+
+        var failed = await coordinator.CheckAsync(UpdateCheckReason.Manual);
+
+        Assert.Equal(time.GetUtcNow(), failed.Snapshot.LastAttemptAt);
+        Assert.False(coordinator.ShouldAutomaticallyCheck(failed.Snapshot));
+        time.Advance(TimeSpan.FromHours(1) - TimeSpan.FromMilliseconds(1));
+        Assert.False(coordinator.ShouldAutomaticallyCheck(failed.Snapshot));
+        time.Advance(TimeSpan.FromMilliseconds(1));
+        Assert.True(coordinator.ShouldAutomaticallyCheck(failed.Snapshot));
+    }
+
+    [Fact]
+    public async Task SuccessfulFreshnessStartsWhenDiscoveryFinishes()
+    {
+        var time = new ManualTimeProvider();
+        var client = new FakeUpdateDiscoveryClient
+        {
+            GetUpdates = _ =>
+            {
+                time.Advance(TimeSpan.FromMinutes(45));
+                return Task.FromResult<IReadOnlyList<PackageSummary>>(
+                    Array.Empty<PackageSummary>());
+            }
+        };
+        var coordinator = new UpdateCoordinator(
+            client,
+            new InMemoryUpdateSnapshotStore(),
+            time);
+
+        var result = await coordinator.CheckAsync(UpdateCheckReason.Manual);
+
+        Assert.Equal(time.GetUtcNow(), result.Snapshot.LastAttemptAt);
+        Assert.Equal(time.GetUtcNow(), result.Snapshot.LastSuccessAt);
+        time.Advance(TimeSpan.FromHours(24) - TimeSpan.FromMilliseconds(1));
+        Assert.False(coordinator.ShouldAutomaticallyCheck(result.Snapshot));
+    }
+
+    [Fact]
+    public async Task FailedCheckPreservesRowsButCapturesCurrentSourceHealth()
+    {
+        var time = new ManualTimeProvider();
+        var cachedUpdate = Update("Contoso.Tool", "winget", "1.5", "Contoso Tool");
+        var fingerprint = new UpdateFingerprint
+        {
+            SourceId = "winget",
+            PackageId = "contoso.tool",
+            AvailableVersion = "1.5"
+        };
+        var previous = new UpdateSnapshot
+        {
+            LastAttemptAt = time.GetUtcNow().AddHours(-25),
+            LastSuccessAt = time.GetUtcNow().AddHours(-25),
+            Updates = [cachedUpdate],
+            Fingerprints = [fingerprint],
+            Sources =
+            [
+                new UpdateSourceHealthSnapshot
+                {
+                    Id = "winget",
+                    Name = "winget",
+                    Health = SourceHealth.Healthy
+                }
+            ]
+        };
+        var client = new FakeUpdateDiscoveryClient
+        {
+            GetUpdates = _ => Task.FromException<IReadOnlyList<PackageSummary>>(
+                new IOException("Source is offline."))
+        };
+        var coordinator = new UpdateCoordinator(
+            client,
+            new InMemoryUpdateSnapshotStore(previous),
+            time);
+
+        var result = await coordinator.CheckAsync(
+            UpdateCheckReason.Manual,
+            [
+                new PackageSourceStatus
+                {
+                    Id = "winget",
+                    Name = "winget",
+                    Health = SourceHealth.Unavailable,
+                    Message = "Source is offline."
+                }
+            ]);
+
+        Assert.Equal(UpdateCheckState.Failed, result.State);
+        Assert.Same(cachedUpdate, Assert.Single(result.Snapshot.Updates));
+        Assert.Same(fingerprint, Assert.Single(result.Snapshot.Fingerprints));
+        var source = Assert.Single(result.Snapshot.Sources);
+        Assert.Equal(SourceHealth.Unavailable, source.Health);
+        Assert.Equal("Source is offline.", source.Message);
+    }
+
+    [Fact]
     public async Task FreshAutomaticCheckIsSkipped_ButManualCheckBypassesFreshness()
     {
         var time = new ManualTimeProvider();
@@ -96,7 +207,7 @@ public sealed class UpdateCoordinatorTests
             LastAttemptAt = time.GetUtcNow().AddMinutes(-10),
             LastSuccessAt = time.GetUtcNow().AddMinutes(-10)
         };
-        var client = new FakeWingetClient();
+        var client = new FakeUpdateDiscoveryClient();
         var coordinator = new UpdateCoordinator(
             client,
             new InMemoryUpdateSnapshotStore(snapshot),
@@ -115,7 +226,7 @@ public sealed class UpdateCoordinatorTests
     {
         var time = new ManualTimeProvider();
         var coordinator = new UpdateCoordinator(
-            new FakeWingetClient(),
+            new FakeUpdateDiscoveryClient(),
             new InMemoryUpdateSnapshotStore(),
             time);
         var snapshot = new UpdateSnapshot
@@ -131,10 +242,86 @@ public sealed class UpdateCoordinatorTests
     }
 
     [Fact]
+    public async Task EverySixHours_BecomesEligibleAtSixHours()
+    {
+        var time = new ManualTimeProvider();
+        var snapshot = new UpdateSnapshot
+        {
+            LastAttemptAt = time.GetUtcNow(),
+            LastSuccessAt = time.GetUtcNow()
+        };
+        var client = new FakeUpdateDiscoveryClient();
+        var coordinator = new UpdateCoordinator(
+            client,
+            new InMemoryUpdateSnapshotStore(snapshot),
+            time);
+
+        time.Advance(TimeSpan.FromHours(6) - TimeSpan.FromMilliseconds(1));
+        Assert.Equal(
+            UpdateCheckState.Current,
+            coordinator.GetState(snapshot, UpdateMonitoringCadence.EverySixHours));
+        Assert.False(coordinator.ShouldAutomaticallyCheck(
+            snapshot,
+            UpdateMonitoringCadence.EverySixHours));
+
+        time.Advance(TimeSpan.FromMilliseconds(1));
+        var result = await coordinator.CheckAsync(
+            UpdateCheckReason.Automatic,
+            cadence: UpdateMonitoringCadence.EverySixHours);
+
+        Assert.True(result.PerformedCheck);
+        Assert.Equal(1, client.UpdateCallCount);
+    }
+
+    [Fact]
+    public async Task ManualCadence_DisablesAutomaticChecksButNotExplicitChecks()
+    {
+        var client = new FakeUpdateDiscoveryClient();
+        var coordinator = new UpdateCoordinator(
+            client,
+            new InMemoryUpdateSnapshotStore());
+
+        var automatic = await coordinator.CheckAsync(
+            UpdateCheckReason.Automatic,
+            cadence: UpdateMonitoringCadence.Manual);
+        var manual = await coordinator.CheckAsync(
+            UpdateCheckReason.Manual,
+            cadence: UpdateMonitoringCadence.Manual);
+
+        Assert.False(automatic.PerformedCheck);
+        Assert.True(manual.PerformedCheck);
+        Assert.Equal(1, client.UpdateCallCount);
+    }
+
+    [Theory]
+    [InlineData(UpdateMonitoringCadence.Daily)]
+    [InlineData(UpdateMonitoringCadence.EverySixHours)]
+    public void AutomaticFailureRetryDelayRemainsOneHour(UpdateMonitoringCadence cadence)
+    {
+        var time = new ManualTimeProvider();
+        var snapshot = new UpdateSnapshot
+        {
+            LastAttemptAt = time.GetUtcNow(),
+            LastSuccessAt = time.GetUtcNow().AddHours(-25),
+            LastError = "source unavailable"
+        };
+        var coordinator = new UpdateCoordinator(
+            new FakeUpdateDiscoveryClient(),
+            new InMemoryUpdateSnapshotStore(snapshot),
+            time);
+
+        Assert.False(coordinator.ShouldAutomaticallyCheck(snapshot, cadence));
+        time.Advance(TimeSpan.FromHours(1) - TimeSpan.FromMilliseconds(1));
+        Assert.False(coordinator.ShouldAutomaticallyCheck(snapshot, cadence));
+        time.Advance(TimeSpan.FromMilliseconds(1));
+        Assert.True(coordinator.ShouldAutomaticallyCheck(snapshot, cadence));
+    }
+
+    [Fact]
     public async Task CancellationDoesNotPersistAnAttempt()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var client = new FakeWingetClient
+        var client = new FakeUpdateDiscoveryClient
         {
             GetUpdates = async cancellationToken =>
             {
@@ -161,7 +348,7 @@ public sealed class UpdateCoordinatorTests
         var nativeResult = new TaskCompletionSource<IReadOnlyList<PackageSummary>>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var client = new FakeWingetClient
+        var client = new FakeUpdateDiscoveryClient
         {
             GetUpdates = _ =>
             {
@@ -180,6 +367,30 @@ public sealed class UpdateCoordinatorTests
         Assert.Equal(1, client.UpdateCallCount);
         Assert.All(results, result => Assert.True(result.PerformedCheck));
         Assert.Same(results[0].Snapshot, results[1].Snapshot);
+    }
+
+    [Fact]
+    public async Task ManualRequestConcurrentWithFreshAutomaticSkipStillPerformsCheck()
+    {
+        var time = new ManualTimeProvider();
+        var snapshot = new UpdateSnapshot
+        {
+            LastAttemptAt = time.GetUtcNow(),
+            LastSuccessAt = time.GetUtcNow()
+        };
+        var client = new FakeUpdateDiscoveryClient();
+        var coordinator = new UpdateCoordinator(
+            client,
+            new InMemoryUpdateSnapshotStore(snapshot),
+            time);
+
+        var automatic = coordinator.CheckAsync(UpdateCheckReason.Automatic);
+        var manual = coordinator.CheckAsync(UpdateCheckReason.Manual);
+        var results = await Task.WhenAll(automatic, manual);
+
+        Assert.False(results[0].PerformedCheck);
+        Assert.True(results[1].PerformedCheck);
+        Assert.Equal(1, client.UpdateCallCount);
     }
 
     private static PackageSummary Update(string id, string source, string version, string name) => new()
@@ -220,7 +431,7 @@ public sealed class UpdateCoordinatorTests
         }
     }
 
-    private sealed class FakeWingetClient : IWingetClient
+    private sealed class FakeUpdateDiscoveryClient : IUpdateDiscoveryClient
     {
         private int _updateCallCount;
 
@@ -229,42 +440,10 @@ public sealed class UpdateCoordinatorTests
         public Func<CancellationToken, Task<IReadOnlyList<PackageSummary>>> GetUpdates { get; set; } =
             _ => Task.FromResult<IReadOnlyList<PackageSummary>>(Array.Empty<PackageSummary>());
 
-        public Task<WingetCapabilities> GetCapabilitiesAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(new WingetCapabilities { IsAvailable = true, ContractVersion = 6 });
-
-        public Task<PackageSearchResult> SearchAsync(PackageQuery query, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new PackageSearchResult());
-
-        public Task<IReadOnlyList<PackageSourceStatus>> GetSourcesAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<PackageSourceStatus>>(Array.Empty<PackageSourceStatus>());
-
-        public Task<IReadOnlyList<PackageSummary>> GetInstalledPackagesAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<IReadOnlyList<PackageSummary>>(Array.Empty<PackageSummary>());
-
         public Task<IReadOnlyList<PackageSummary>> GetAvailableUpdatesAsync(CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref _updateCallCount);
             return GetUpdates(cancellationToken);
         }
-
-        public Task<PackageDetails?> GetPackageDetailsAsync(
-            PackageKey package,
-            InstallPreferences? preferences = null,
-            CancellationToken cancellationToken = default) => Task.FromResult<PackageDetails?>(null);
-
-        public Task<OperationResult> InstallAsync(
-            PackageOperation operation,
-            IProgress<OperationProgress>? progress = null,
-            CancellationToken cancellationToken = default) => throw new NotSupportedException();
-
-        public Task<OperationResult> UpgradeAsync(
-            PackageOperation operation,
-            IProgress<OperationProgress>? progress = null,
-            CancellationToken cancellationToken = default) => throw new NotSupportedException();
-
-        public Task<OperationResult> UninstallAsync(
-            PackageOperation operation,
-            IProgress<OperationProgress>? progress = null,
-            CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 }

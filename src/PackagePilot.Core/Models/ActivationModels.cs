@@ -20,6 +20,11 @@ public sealed record AppActivationRequest
     public AppDestination Destination { get; init; } = AppDestination.Discover;
     public string? SearchQuery { get; init; }
     public bool CheckForUpdates { get; init; }
+    /// <summary>
+    /// True only for Package Pilot's allowlisted packaged login task. The app can use this
+    /// signal to initialize resident shell services without constructing or activating UI.
+    /// </summary>
+    public bool IsStartupTaskActivation { get; init; }
 }
 
 public sealed record ActivationParseResult

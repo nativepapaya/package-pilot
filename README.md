@@ -7,6 +7,7 @@ Package Pilot is a native Windows 11 application hub. It combines WinGet, curren
 - Discover, Installed, Updates, Activity, Sources, and Settings destinations
 - Cached, page-local update state that never blocks startup; daily read-only background discovery by default, with six-hour and Manual options
 - One deduplicated update notification, taskbar/Start badge, Jump List tasks, protocol activation, execution alias, and single-instance redirection
+- Optional native notification-area mode, off by default; Close hides only when enabled, Minimize stays conventional, and the dependent Start with Windows option launches a lightweight hidden resident host
 - Unified installed-app inventory from WinGet, MSIX/Store, and HKCU/HKLM 32/64-bit uninstall metadata, merged only by exact package identities
 - Safe routing to WinGet, current-user MSIX removal, Microsoft Store updates, or Windows Installed Apps according to provider capability
 - WinGet contract 6+ capability gate with friendly App Installer, policy, network, authentication, installer, elevation, cancellation, and reboot states
@@ -56,42 +57,81 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File .\build\Initialize-ManualReleaseCertificate.ps1
 ```
 
-After a successful `Release` workflow run, review the trusted checkout and publish the oldest unpublished payload from a normal PowerShell window. The publisher requires an authenticated GitHub CLI session (`gh auth login`):
+After a successful `Release` workflow run, review the trusted checkout and select that exact run ID. Preparation requires the run to be the newest successful `Release` run and its commit to still be the exact current `main` commit. It downloads and validates the unsigned artifact, signs it locally, and atomically moves the result into a new durable directory without creating a tag or GitHub release. The publisher requires an authenticated GitHub CLI session (`gh auth login`):
 
 ```powershell
+$runId = <workflow-run-id>
+$runNumber = [uint64](gh run view $runId `
+  --repo nativepapaya/package-pilot `
+  --json number `
+  --jq .number)
+$tag = "v1.0.$($runNumber + 4)"
+$certificateThumbprint = '<initializer-output-thumbprint>'
+$preparedDirectory = Join-Path `
+  $env:USERPROFILE `
+  "Documents\PackagePilot-Releases\$tag"
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\build\Publish-ManualRelease.ps1
+  -File .\build\Publish-ManualRelease.ps1 `
+  -Prepare `
+  -RunId $runId `
+  -PreparedDirectory $preparedDirectory `
+  -CertificateThumbprint $certificateThumbprint
 ```
 
-Failed or cancelled workflow runs may leave sequence gaps; the publisher safely chooses the oldest successful run newer than the current release. To deliberately skip an obsolete successful payload, pass its replacement as `-RunId <workflow-run-id>`. Publishing the newer run permanently prevents older versions from being released afterward.
+Preparation fails rather than overwriting an existing directory. The directory contains the exact signed assets, the hosted `release-metadata.json`, and a detached, certificate-signed `prepared-release.json` that binds the run, commit, version, signer, file sizes, and SHA-256 hashes. Keep the directory unchanged while completing the packaged startup, tray, background-wake, performance, and staged N-to-N+1 servicing gates.
 
-The hosted workflow produces separate unsigned x64 and ARM64 packages, validates their identities, and combines them with the Windows SDK's `MakeAppx` tool. The publisher downloads and validates that artifact, signs `PackagePilot.msixbundle` with the non-exportable local key, verifies the bundle identity, both architecture entries, and both signed runtime dependencies, creates checksums, and publishes the matching `v1.0.<release-sequence>` release. It refuses to replace an existing release. Stable asset names let the App Installer feed follow the latest release without embedding credentials or GitHub API tokens in the app.
+When every pre-publication gate passes, promote only that prepared directory. `-RunId`, the exact derived `-ConfirmTag`, and the tested bundle hash are mandatory safety tokens:
+
+```powershell
+$bundleSha256 = (Get-FileHash `
+  -LiteralPath (Join-Path $preparedDirectory 'PackagePilot.msixbundle') `
+  -Algorithm SHA256).Hash.ToLowerInvariant()
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\build\Publish-ManualRelease.ps1 `
+  -Promote `
+  -RunId $runId `
+  -ConfirmTag $tag `
+  -ConfirmBundleSha256 $bundleSha256 `
+  -PreparedDirectory $preparedDirectory `
+  -CertificateThumbprint $certificateThumbprint
+```
+
+Promotion revalidates the signed state, local assets, certificate, current `main`, workflow attempt, release high-water mark, and App Installer policy before any GitHub mutation. It creates a non-latest draft, uploads only missing assets without replacing an existing asset, verifies every GitHub digest, and then publishes it as the latest stable release. Rerunning promotion safely resumes an exact matching draft or verifies an already-published exact release; a conflicting tag, asset, signer, run attempt, newer successful run, or modified prepared file fails closed.
+
+Failed or cancelled workflow runs may leave sequence gaps because the release sequence is the workflow run number plus four. Never create the version tag manually and never prepare an older successful run while a newer successful run exists. A newer `main` commit makes an already-prepared candidate intentionally stale and requires preparing its new workflow run.
+
+The hosted workflow produces separate unsigned x64 and ARM64 packages, validates their identities and required read-only/background payloads, and combines them with the Windows SDK's `MakeAppx` tool. Stable asset names let the App Installer feed follow the latest release without embedding credentials or GitHub API tokens in the app.
+
+> [!IMPORTANT]
+> GitHub draft assets are not an anonymous update channel, while the production `PackagePilot.appinstaller` deliberately points to `releases/latest/download`. The exact signed bundle can be tested before promotion, but an end-to-end test through the production GitHub/App Installer URL necessarily happens only after that release becomes public/latest. Use a disposable local HTTPS staging feed for pre-publication App Installer mechanics, then perform the production-feed check immediately after promotion and issue a newer release rather than altering a published asset if it fails.
 
 Copies installed through `PackagePilot.appinstaller` perform a quiet launch check no more than once every 24 hours, never block activation, and also register App Installer's background check. Settings shows the installed version and can query the same App Installer association. If a copy was installed directly from the bundle, use **Get update installer** once to connect it to the feed.
 
 The certificate initializer sets `KeyExportPolicy` to `NonExportable`; neither a PFX nor a signing password is created or stored in GitHub. Losing the Windows profile or machine can permanently lose this release key unless a verified system-level backup preserves non-exportable keys.
 
-The repository still uses the development identity `PackagePilot.Desktop` / `CN=PackagePilot.Dev`. Production publication is intentionally blocked until a permanent certificate-backed publisher is selected. Freeze the final package `Name` and certificate-matching `Publisher` together before distributing to users; changing the publisher later is a new package identity and requires installing the new trusted package rather than an in-place MSIX update. The retiring development build writes an atomic settings/history handoff under non-package LocalAppData; the replacement identity imports that handoff once and removes it only after a durable import. Before distributing Package Pilot beyond trusted testers, replace development signing with a publicly trusted signing service.
+The repository still uses the development identity `PackagePilot.Desktop` / `CN=PackagePilot.Dev`. Production publication is intentionally blocked until a permanent certificate-backed publisher is selected. Freeze the final package `Name` and certificate-matching `Publisher` together before distributing to users; changing the publisher later is a new package identity and requires installing the new trusted package rather than an in-place MSIX update. A neutral migration service is retained and tested as deferred infrastructure, but the current GitHub package does not run an identity export or import hook. Before distributing Package Pilot beyond trusted testers, replace development signing with a publicly trusted signing service.
 
 ## Build and test
 
-This workspace has a project-local SDK in `.dotnet`. If .NET 10 is installed system-wide, replace `.\.dotnet\dotnet.exe` with `dotnet`.
+Install the .NET SDK version pinned by `global.json`, then use `dotnet` from your normal development shell.
 
 ```powershell
 $env:DOTNET_CLI_HOME = Join-Path $PWD '.dotnet-home'
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 
-.\.dotnet\dotnet.exe restore PackagePilot.slnx
-.\.dotnet\dotnet.exe build PackagePilot.slnx -c Release
-.\.dotnet\dotnet.exe build src\PackagePilot.App\PackagePilot.App.csproj -c Release -r win-arm64 -p:Platform=ARM64
-.\.dotnet\dotnet.exe test tests\PackagePilot.Tests\PackagePilot.Tests.csproj -c Release
+dotnet restore PackagePilot.slnx
+dotnet build PackagePilot.slnx -c Release
+dotnet build src\PackagePilot.App\PackagePilot.App.csproj -c Release -r win-arm64 -p:Platform=ARM64
+dotnet test tests\PackagePilot.Tests\PackagePilot.Tests.csproj -c Release
 ```
 
 The eight live integration tests are read-only and opt-in. They activate WinGet COM, exercise the concurrent startup read model, enumerate sources, search, read installed inventory and metadata, detect updates, and compare combined-catalog results with the per-source reference path; they never install or remove packages.
 
 ```powershell
 $env:PACKAGEPILOT_RUN_LIVE_WINGET_TESTS = '1'
-.\.dotnet\dotnet.exe test tests\PackagePilot.Tests\PackagePilot.Tests.csproj -c Release --filter 'FullyQualifiedName~PackagePilot.Tests.Integration'
+dotnet test tests\PackagePilot.Tests\PackagePilot.Tests.csproj -c Release --filter 'FullyQualifiedName~PackagePilot.Tests.Integration'
 ```
 
 ## Create the MSIX
@@ -105,7 +145,7 @@ foreach ($build in @(
   @{ Platform = 'ARM64'; Runtime = 'win-arm64' }
 )) {
   $packageRoots[$build.Platform] = Join-Path $PWD "artifacts\$($build.Platform)"
-  .\.dotnet\dotnet.exe publish src\PackagePilot.App\PackagePilot.App.csproj `
+  dotnet publish src\PackagePilot.App\PackagePilot.App.csproj `
     -c Release -r $build.Runtime --self-contained false `
     -p:Platform=$($build.Platform) `
     -p:GenerateAppxPackageOnBuild=true `
