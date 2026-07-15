@@ -55,3 +55,7 @@ jobs:
         run: |
           ./build/tests/New-AppInstaller.Tests.ps1
           ./build/tests/Set-PackageVersion.Tests.ps1
+
+      - name: Test manual release security on Windows PowerShell 5.1
+        shell: powershell
+        run: ./build/tests/ManualReleaseSecurity.Tests.ps1

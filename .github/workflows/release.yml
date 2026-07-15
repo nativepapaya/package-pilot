@@ -85,6 +85,10 @@ jobs:
           ./build/tests/New-AppInstaller.Tests.ps1
           ./build/tests/Set-PackageVersion.Tests.ps1
 
+      - name: Test manual release security on Windows PowerShell 5.1
+        shell: powershell
+        run: ./build/tests/ManualReleaseSecurity.Tests.ps1
+
       - name: Set package version
         shell: pwsh
         env:
@@ -214,289 +218,124 @@ jobs:
               -OutputPath (Join-Path $stagingDirectory 'PackagePilot.appinstaller') `
               -Repository $env:GITHUB_REPOSITORY | Out-Null
 
+      - name: Create release metadata
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          RELEASE_SEQUENCE: ${{ steps.version.outputs.release_sequence }}
+          TAG_NAME: ${{ steps.version.outputs.tag_name }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_COMMIT_SHA: ${{ github.sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_NUMBER: ${{ github.run_number }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          ARTIFACT_NAME: package-pilot-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          WORKFLOW_NAME: Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          [uint64]$releaseSequence = 0
+          if (-not [uint64]::TryParse($env:RELEASE_SEQUENCE, [ref]$releaseSequence) -or $releaseSequence -lt 5) {
+              throw "The calculated release sequence '$env:RELEASE_SEQUENCE' is invalid."
+          }
+
+          $expectedBuild = [Math]::Floor($releaseSequence / 65536)
+          $expectedRevision = $releaseSequence % 65536
+          $expectedPackageVersion = "1.0.$expectedBuild.$expectedRevision"
+          if ($env:PACKAGE_VERSION -ne $expectedPackageVersion) {
+              throw "Package version '$env:PACKAGE_VERSION' does not match release sequence $releaseSequence."
+          }
+
+          $expectedTagName = "v1.0.$releaseSequence"
+          if ($env:TAG_NAME -ne $expectedTagName) {
+              throw "Tag name '$env:TAG_NAME' does not match release sequence $releaseSequence."
+          }
+          if ($env:SOURCE_REPOSITORY -notmatch '^[^/\s]+/[^/\s]+$') {
+              throw "GitHub supplied an invalid repository name: '$env:SOURCE_REPOSITORY'."
+          }
+          if ($env:SOURCE_COMMIT_SHA -notmatch '^[0-9a-fA-F]{40}$') {
+              throw "GitHub supplied an invalid commit SHA: '$env:SOURCE_COMMIT_SHA'."
+          }
+
+          [uint64]$runId = 0
+          if (-not [uint64]::TryParse($env:WORKFLOW_RUN_ID, [ref]$runId) -or $runId -lt 1) {
+              throw "GitHub supplied an invalid workflow run ID: '$env:WORKFLOW_RUN_ID'."
+          }
+          [uint64]$runNumber = 0
+          if (-not [uint64]::TryParse($env:WORKFLOW_RUN_NUMBER, [ref]$runNumber) -or $runNumber -lt 1) {
+              throw "GitHub supplied an invalid workflow run number: '$env:WORKFLOW_RUN_NUMBER'."
+          }
+          [uint64]$runAttempt = 0
+          if (-not [uint64]::TryParse($env:WORKFLOW_RUN_ATTEMPT, [ref]$runAttempt) -or $runAttempt -lt 1) {
+              throw "GitHub supplied an invalid workflow run attempt: '$env:WORKFLOW_RUN_ATTEMPT'."
+          }
+
+          $expectedArtifactName = "package-pilot-unsigned-$runId-$runAttempt"
+          if ($env:ARTIFACT_NAME -ne $expectedArtifactName) {
+              throw "Artifact name '$env:ARTIFACT_NAME' does not match '$expectedArtifactName'."
+          }
+          if ($env:WORKFLOW_NAME -ne 'Release') {
+              throw "Workflow name '$env:WORKFLOW_NAME' is invalid."
+          }
+
+          $stagingDirectory = Join-Path $env:RUNNER_TEMP 'package-pilot-unsigned'
+          foreach ($fileName in @(
+              'PackagePilot.msix'
+              'Microsoft.WindowsAppRuntime.2.msix'
+              'PackagePilot.appinstaller'
+          )) {
+              if (-not (Test-Path -LiteralPath (Join-Path $stagingDirectory $fileName) -PathType Leaf)) {
+                  throw "Unsigned release asset '$fileName' is missing."
+              }
+          }
+
+          $generatedAtUtc = [DateTimeOffset]::UtcNow.ToString(
+              'o',
+              [Globalization.CultureInfo]::InvariantCulture)
+          $metadata = [ordered]@{
+              schemaVersion = 1
+              packageVersion = $env:PACKAGE_VERSION
+              releaseSequence = $releaseSequence
+              tagName = $env:TAG_NAME
+              repository = $env:SOURCE_REPOSITORY
+              commitSha = $env:SOURCE_COMMIT_SHA.ToLowerInvariant()
+              runId = $runId
+              runNumber = $runNumber
+              runAttempt = $runAttempt
+              artifactName = $env:ARTIFACT_NAME
+              workflowName = $env:WORKFLOW_NAME
+              generatedAtUtc = $generatedAtUtc
+          }
+
+          $metadataPath = Join-Path $stagingDirectory 'release-metadata.json'
+          $metadataJson = $metadata | ConvertTo-Json -Depth 3
+          [IO.File]::WriteAllText(
+              $metadataPath,
+              $metadataJson + [Environment]::NewLine,
+              [Text.UTF8Encoding]::new($false))
+
+          $validatedMetadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+          if ($validatedMetadata.schemaVersion -ne 1 -or
+              $validatedMetadata.packageVersion -ne $env:PACKAGE_VERSION -or
+              $validatedMetadata.releaseSequence -ne $releaseSequence -or
+              $validatedMetadata.tagName -ne $env:TAG_NAME -or
+              $validatedMetadata.repository -ne $env:SOURCE_REPOSITORY -or
+              $validatedMetadata.commitSha -ne $env:SOURCE_COMMIT_SHA.ToLowerInvariant() -or
+              $validatedMetadata.runId -ne $runId -or
+              $validatedMetadata.runNumber -ne $runNumber -or
+              $validatedMetadata.runAttempt -ne $runAttempt -or
+              $validatedMetadata.artifactName -ne $env:ARTIFACT_NAME -or
+              $validatedMetadata.workflowName -ne $env:WORKFLOW_NAME -or
+              $validatedMetadata.generatedAtUtc -ne $generatedAtUtc) {
+              throw 'The generated release metadata failed validation.'
+          }
+
       - name: Upload unsigned release payload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: package-pilot-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\package-pilot-unsigned
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 30
           compression-level: 0
-
-  sign_release:
-    name: Sign and publish release
-    needs: build_release
-    if: github.ref == 'refs/heads/main'
-    runs-on: windows-2025
-    timeout-minutes: 90
-    permissions:
-      contents: write
-    environment: release-signing
-    env:
-      PACKAGE_VERSION: ${{ needs.build_release.outputs.package_version }}
-      RELEASE_SEQUENCE: ${{ needs.build_release.outputs.release_sequence }}
-      TAG_NAME: ${{ needs.build_release.outputs.tag_name }}
-
-    steps:
-      - name: Wait for the preceding release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          [uint64]$sequence = 0
-          if (-not [uint64]::TryParse($env:RELEASE_SEQUENCE, [ref]$sequence) -or $sequence -lt 5) {
-              throw "The calculated release sequence '$env:RELEASE_SEQUENCE' is invalid."
-          }
-
-          if ($sequence -gt 5) {
-              $predecessorTag = "v1.0.$($sequence - 1)"
-              $deadline = (Get-Date).AddMinutes(60)
-              do {
-                  gh release view $predecessorTag --repo $env:GITHUB_REPOSITORY *> $null
-                  if ($LASTEXITCODE -eq 0) {
-                      Write-Host "Preceding release $predecessorTag is available."
-                      break
-                  }
-
-                  if ((Get-Date) -ge $deadline) {
-                      throw "Timed out waiting for preceding release $predecessorTag. Rerun its failed or cancelled workflow first."
-                  }
-
-                  Start-Sleep -Seconds 15
-              } while ($true)
-          }
-
-      - name: Download unsigned release payload
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: package-pilot-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}\package-pilot-release
-
-      - name: Sign and verify Package Pilot
-        shell: pwsh
-        env:
-          RELEASE_DIRECTORY: ${{ runner.temp }}\package-pilot-release
-          SIGNING_PFX_BASE64: ${{ secrets.PACKAGEPILOT_SIGNING_PFX_BASE64 }}
-          SIGNING_PFX_PASSWORD: ${{ secrets.PACKAGEPILOT_SIGNING_PFX_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'PackagePilot.Signing.pfx'
-          $importedCertificates = @()
-          $trustedCertificates = @()
-          $signingThumbprint = $null
-
-          try {
-              if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64)) {
-                  throw 'The PACKAGEPILOT_SIGNING_PFX_BASE64 release-signing environment secret is not configured.'
-              }
-              if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PASSWORD)) {
-                  throw 'The PACKAGEPILOT_SIGNING_PFX_PASSWORD release-signing environment secret is not configured.'
-              }
-
-              try {
-                  $pfxBytes = [Convert]::FromBase64String($env:SIGNING_PFX_BASE64)
-                  [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
-              }
-              catch {
-                  throw 'The signing PFX secret is not valid Base64.'
-              }
-
-              $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
-              $signingThumbprint = (Get-PfxCertificate -FilePath $pfxPath -Password $password).Thumbprint
-              $importedCertificates = @(Import-PfxCertificate `
-                  -FilePath $pfxPath `
-                  -CertStoreLocation 'Cert:\CurrentUser\My' `
-                  -Password $password)
-
-              $certificate = $importedCertificates |
-                  Where-Object { $_.HasPrivateKey -and $_.Subject -eq 'CN=PackagePilot.Dev' } |
-                  Select-Object -First 1
-
-              if ($null -eq $certificate) {
-                  throw 'The signing PFX did not contain the Package Pilot private key.'
-              }
-              if ($certificate.Subject -ne $certificate.Issuer) {
-                  throw 'The development signing certificate must be self-signed.'
-              }
-              if ($certificate.NotBefore -gt (Get-Date) -or $certificate.NotAfter -le (Get-Date).AddDays(30)) {
-                  throw 'The signing certificate is not yet valid, is expired, or expires within 30 days.'
-              }
-              $codeSigningUsage = $certificate.EnhancedKeyUsageList |
-                  Where-Object { $_.ObjectId.Value -eq '1.3.6.1.5.5.7.3.3' }
-              if ($null -eq $codeSigningUsage) {
-                  throw 'The signing certificate is not valid for code signing.'
-              }
-
-              $certificatePath = Join-Path $env:RELEASE_DIRECTORY 'PackagePilot.cer'
-              Export-Certificate -Cert $certificate -FilePath $certificatePath -Force | Out-Null
-              # Windows validates self-signed MSIX certificates from the computer
-              # TrustedPeople store. The hosted runner is ephemeral and this copy
-              # is removed in the finally block below.
-              $trustedCertificates = @(Import-Certificate `
-                  -FilePath $certificatePath `
-                  -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople')
-
-              $kitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
-              $signTool = Get-ChildItem -LiteralPath $kitsRoot -Recurse -File -Filter 'signtool.exe' |
-                  Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
-                  Sort-Object FullName -Descending |
-                  Select-Object -First 1
-              if ($null -eq $signTool) {
-                  throw 'SignTool.exe was not found in the Windows SDK.'
-              }
-
-              $packagePath = Join-Path $env:RELEASE_DIRECTORY 'PackagePilot.msix'
-              & $signTool.FullName sign /fd SHA256 /sha1 $certificate.Thumbprint $packagePath
-              if ($LASTEXITCODE -ne 0) {
-                  throw "SignTool failed with exit code $LASTEXITCODE."
-              }
-
-              $signature = Get-AuthenticodeSignature -FilePath $packagePath
-              if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-                  throw "The signed Package Pilot MSIX did not validate: $($signature.StatusMessage)"
-              }
-              if ($signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
-                  throw 'The Package Pilot MSIX signer does not match the protected signing certificate.'
-              }
-
-              & $signTool.FullName verify /pa /all /v $packagePath
-              if ($LASTEXITCODE -ne 0) {
-                  throw "SignTool verification failed with exit code $LASTEXITCODE."
-              }
-
-              Add-Type -AssemblyName System.IO.Compression.FileSystem
-              $archive = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
-              try {
-                  if ($null -eq $archive.GetEntry('AppxSignature.p7x')) {
-                      throw 'The signed MSIX does not contain AppxSignature.p7x.'
-                  }
-
-                  $manifestEntry = $archive.GetEntry('AppxManifest.xml')
-                  $reader = [IO.StreamReader]::new($manifestEntry.Open())
-                  try {
-                      [xml]$manifest = $reader.ReadToEnd()
-                  }
-                  finally {
-                      $reader.Dispose()
-                  }
-
-                  $identity = $manifest.Package.Identity
-                  if ([string]$identity.Name -ne 'PackagePilot.Desktop' -or
-                      [string]$identity.Publisher -ne 'CN=PackagePilot.Dev' -or
-                      [string]$identity.Version -ne $env:PACKAGE_VERSION -or
-                      [string]$identity.ProcessorArchitecture -ne 'x64') {
-                      throw 'The signed MSIX identity does not match the expected Package Pilot release.'
-                  }
-              }
-              finally {
-                  $archive.Dispose()
-              }
-
-              $runtimePath = Join-Path $env:RELEASE_DIRECTORY 'Microsoft.WindowsAppRuntime.2.msix'
-              $runtimeSignature = Get-AuthenticodeSignature -FilePath $runtimePath
-              if ($runtimeSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
-                  throw "The Microsoft Windows App Runtime signature did not validate: $($runtimeSignature.StatusMessage)"
-              }
-
-              [xml]$appInstaller = Get-Content `
-                  -LiteralPath (Join-Path $env:RELEASE_DIRECTORY 'PackagePilot.appinstaller') `
-                  -Raw
-              $namespaceManager = [Xml.XmlNamespaceManager]::new($appInstaller.NameTable)
-              $namespaceManager.AddNamespace('ai', 'http://schemas.microsoft.com/appx/appinstaller/2021')
-              $feedRoot = $appInstaller.SelectSingleNode('/ai:AppInstaller', $namespaceManager)
-              $feedPackage = $appInstaller.SelectSingleNode('/ai:AppInstaller/ai:MainPackage', $namespaceManager)
-              $expectedFeedUri = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/PackagePilot.appinstaller"
-              if ($null -eq $feedRoot -or $null -eq $feedPackage -or
-                  $feedRoot.GetAttribute('Version') -ne $env:PACKAGE_VERSION -or
-                  $feedRoot.GetAttribute('Uri') -ne $expectedFeedUri -or
-                  $feedPackage.GetAttribute('Version') -ne $env:PACKAGE_VERSION) {
-                  throw 'The App Installer feed does not match the signed release.'
-              }
-          }
-          finally {
-              foreach ($trustedCertificate in $trustedCertificates) {
-                  Remove-Item `
-                      -LiteralPath "Cert:\LocalMachine\TrustedPeople\$($trustedCertificate.Thumbprint)" `
-                      -Force `
-                      -ErrorAction SilentlyContinue
-              }
-              foreach ($importedCertificate in $importedCertificates) {
-                  Remove-Item `
-                      -LiteralPath "Cert:\CurrentUser\My\$($importedCertificate.Thumbprint)" `
-                      -Force `
-                      -ErrorAction SilentlyContinue
-              }
-              if (-not [string]::IsNullOrWhiteSpace($signingThumbprint)) {
-                  Remove-Item `
-                      -LiteralPath "Cert:\LocalMachine\TrustedPeople\$signingThumbprint" `
-                      -Force `
-                      -ErrorAction SilentlyContinue
-                  Remove-Item `
-                      -LiteralPath "Cert:\CurrentUser\My\$signingThumbprint" `
-                      -Force `
-                      -ErrorAction SilentlyContinue
-              }
-              if (Test-Path -LiteralPath $pfxPath) {
-                  Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
-              }
-              $env:SIGNING_PFX_BASE64 = $null
-              $env:SIGNING_PFX_PASSWORD = $null
-          }
-
-      - name: Create release checksums
-        shell: pwsh
-        env:
-          RELEASE_DIRECTORY: ${{ runner.temp }}\package-pilot-release
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $checksumFiles = @(
-              'PackagePilot.msix'
-              'Microsoft.WindowsAppRuntime.2.msix'
-              'PackagePilot.cer'
-              'PackagePilot.appinstaller'
-          )
-          $checksumLines = foreach ($fileName in $checksumFiles) {
-              $filePath = Join-Path $env:RELEASE_DIRECTORY $fileName
-              if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
-                  throw "Release asset '$fileName' is missing."
-              }
-              $hash = Get-FileHash -LiteralPath $filePath -Algorithm SHA256
-              "$($hash.Hash.ToLowerInvariant()) *$fileName"
-          }
-          $checksumLines | Set-Content `
-              -LiteralPath (Join-Path $env:RELEASE_DIRECTORY 'SHA256SUMS.txt') `
-              -Encoding ascii
-
-      - name: Publish GitHub release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_DIRECTORY: ${{ runner.temp }}\package-pilot-release
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $assets = @(
-              (Join-Path $env:RELEASE_DIRECTORY 'PackagePilot.msix')
-              (Join-Path $env:RELEASE_DIRECTORY 'Microsoft.WindowsAppRuntime.2.msix')
-              (Join-Path $env:RELEASE_DIRECTORY 'PackagePilot.cer')
-              (Join-Path $env:RELEASE_DIRECTORY 'PackagePilot.appinstaller')
-              (Join-Path $env:RELEASE_DIRECTORY 'SHA256SUMS.txt')
-          )
-
-          gh release view $env:TAG_NAME --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-              gh release upload $env:TAG_NAME @assets `
-                  --repo $env:GITHUB_REPOSITORY `
-                  --clobber
-          }
-          else {
-              gh release create $env:TAG_NAME @assets `
-                  --repo $env:GITHUB_REPOSITORY `
-                  --target $env:GITHUB_SHA `
-                  --title "Package Pilot 1.0.$env:RELEASE_SEQUENCE" `
-                  --generate-notes
-          }
-
-          if ($LASTEXITCODE -ne 0) {
-              throw "GitHub release publishing failed with exit code $LASTEXITCODE."
-          }

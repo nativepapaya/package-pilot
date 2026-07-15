@@ -42,16 +42,29 @@ Then open `PackagePilot.appinstaller`. Installing through this file registers th
 
 ## Releases and automatic updates
 
-Every successful push to `main` runs deterministic tests, assigns a monotonically increasing four-part MSIX version, builds and signs the x64 package, and publishes a matching `v1.0.<release-sequence>` GitHub release. The release sequence is encoded across the MSIX build and revision fields so no individual field exceeds Windows' 65,535 limit. Stable release asset names let the App Installer feed follow the latest release without embedding credentials or GitHub API tokens in the app.
+Every successful push to `main` runs deterministic tests, assigns a monotonically increasing four-part MSIX version, and retains an unsigned release payload as a GitHub Actions artifact for 30 days. The release sequence is encoded across the MSIX build and revision fields so no individual field exceeds Windows' 65,535 limit.
+
+The signing key never leaves the release maintainer's Windows certificate store. Initialize it once from an elevated PowerShell window:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\build\Initialize-ManualReleaseCertificate.ps1
+```
+
+After a successful `Release` workflow run, review the trusted checkout and publish the oldest unpublished payload from a normal PowerShell window. The publisher requires an authenticated GitHub CLI session (`gh auth login`):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\build\Publish-ManualRelease.ps1
+```
+
+Failed or cancelled workflow runs may leave sequence gaps; the publisher safely chooses the oldest successful run newer than the current release. To deliberately skip an obsolete successful payload, pass its replacement as `-RunId <workflow-run-id>`. Publishing the newer run permanently prevents older versions from being released afterward.
+
+The publisher downloads and validates the GitHub artifact, signs `PackagePilot.msix` with the non-exportable local key, verifies both package signatures and identities, creates checksums, and publishes the matching `v1.0.<release-sequence>` release. It refuses to replace an existing release. Stable asset names let the App Installer feed follow the latest release without embedding credentials or GitHub API tokens in the app.
 
 Copies installed through `PackagePilot.appinstaller` check for updates at launch without blocking activation and also register a background check. Settings shows the installed version and can query the same App Installer association. If a copy was installed directly from an MSIX, use **Get update installer** once to connect it to the feed.
 
-The release workflow reads two encrypted secrets from the `release-signing` GitHub environment, which permits deployments only from `main`:
-
-- `PACKAGEPILOT_SIGNING_PFX_BASE64`: the Base64-encoded development signing PFX
-- `PACKAGEPILOT_SIGNING_PFX_PASSWORD`: the PFX password
-
-Never commit the PFX or its password. Before distributing Package Pilot beyond trusted testers, replace development signing with a publicly trusted signing service or Microsoft Store signing.
+The certificate initializer sets `KeyExportPolicy` to `NonExportable`; neither a PFX nor a signing password is created or stored in GitHub. Losing the Windows profile or machine can permanently lose this release key unless a verified system-level backup preserves non-exportable keys. Before distributing Package Pilot beyond trusted testers, replace development signing with a publicly trusted signing service or Microsoft Store signing.
 
 ## Build and test
 
