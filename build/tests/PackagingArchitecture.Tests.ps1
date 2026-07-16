@@ -66,24 +66,28 @@ Assert-True -Condition (
     -Message 'The app project must map both Windows runtime identifiers.'
 
 $companionReferences = @($appProject.SelectNodes(
-    "/Project/ItemGroup/ProjectReference[contains(@Include, 'PackagePilot.Background') or contains(@Include, 'PackagePilot.SourceAdmin')]"))
+    "/Project/ItemGroup/ProjectReference[contains(@Include, 'PackagePilot.Background') or contains(@Include, 'PackagePilot.PackageAdmin') or contains(@Include, 'PackagePilot.SourceAdmin')]"))
 Assert-True -Condition (
-    $companionReferences.Count -eq 2 -and
+    $companionReferences.Count -eq 3 -and
     @($companionReferences | Where-Object {
         $_.GetAttribute('ReferenceOutputAssembly') -eq 'false' -and
         $_.GetAttribute('Private') -eq 'false'
-    }).Count -eq 2) `
+    }).Count -eq 3) `
     -Message 'Companion executables must be build-only references with publish traversal disabled.'
 
 $packagedCompanionLinks = @($appProject.SelectNodes('/Project/ItemGroup/Content/@Link') |
     ForEach-Object Value |
-    Where-Object { $_ -match '^PackagePilot\.(Background|SourceAdmin)\.' })
+    Where-Object { $_ -match '^PackagePilot\.(Background|PackageAdmin|SourceAdmin)\.' })
 foreach ($requiredPayload in @(
     'PackagePilot.Background.exe'
     'PackagePilot.Background.dll'
     'PackagePilot.Background.deps.json'
     'PackagePilot.Background.runtimeconfig.json'
     'PackagePilot.Background.pri'
+    'PackagePilot.PackageAdmin.exe'
+    'PackagePilot.PackageAdmin.dll'
+    'PackagePilot.PackageAdmin.deps.json'
+    'PackagePilot.PackageAdmin.runtimeconfig.json'
     'PackagePilot.SourceAdmin.exe'
     'PackagePilot.SourceAdmin.dll'
     'PackagePilot.SourceAdmin.deps.json'
@@ -104,8 +108,9 @@ Assert-True -Condition (
 $solutionProjects = @($solution.SelectNodes('/Solution/Folder/Project') | ForEach-Object Path)
 Assert-True -Condition (
     $solutionProjects -contains 'src/PackagePilot.Background/PackagePilot.Background.csproj' -and
+    $solutionProjects -contains 'src/PackagePilot.PackageAdmin/PackagePilot.PackageAdmin.csproj' -and
     $solutionProjects -contains 'src/PackagePilot.SourceAdmin/PackagePilot.SourceAdmin.csproj') `
-    -Message 'Both packaged companion projects must participate in solution validation.'
+    -Message 'All packaged companion projects must participate in solution validation.'
 
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $ci = Get-Content -LiteralPath $ciPath -Raw
@@ -118,6 +123,10 @@ foreach ($requiredText in @(
     'New-MsixBundle.ps1'
     'Assert-PackagePayload'
     'PackagePilot.Windows.ReadOnly.dll'
+    'PackagePilot.PackageAdmin.exe'
+    'PackagePilot.PackageAdmin.dll'
+    'PackagePilot.PackageAdmin.deps.json'
+    'PackagePilot.PackageAdmin.runtimeconfig.json'
     'Microsoft.Management.Deployment.CsWinRTProjection.dll'
     'Microsoft.Management.Deployment.dll'
     'Microsoft.Management.Deployment.winmd'

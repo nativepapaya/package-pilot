@@ -28,6 +28,7 @@
          package builds use x64 or ARM64 and therefore gain a platform folder. -->
     <CompanionPlatformDirectory Condition="'$(Platform)' == 'x64' or '$(Platform)' == 'ARM64'">$(Platform)\</CompanionPlatformDirectory>
     <BackgroundOutputDirectory>$(MSBuildProjectDirectory)\..\PackagePilot.Background\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</BackgroundOutputDirectory>
+    <PackageAdminOutputDirectory>$(MSBuildProjectDirectory)\..\PackagePilot.PackageAdmin\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</PackageAdminOutputDirectory>
     <SourceAdminOutputDirectory>$(MSBuildProjectDirectory)\..\PackagePilot.SourceAdmin\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</SourceAdminOutputDirectory>
   </PropertyGroup>
 
@@ -78,6 +79,9 @@
     <ProjectReference Include="..\PackagePilot.Background\PackagePilot.Background.csproj"
                       ReferenceOutputAssembly="false"
                       Private="false" />
+    <ProjectReference Include="..\PackagePilot.PackageAdmin\PackagePilot.PackageAdmin.csproj"
+                      ReferenceOutputAssembly="false"
+                      Private="false" />
     <ProjectReference Include="..\PackagePilot.SourceAdmin\PackagePilot.SourceAdmin.csproj"
                       ReferenceOutputAssembly="false"
                       Private="false" />
@@ -106,6 +110,27 @@
              Visible="false" />
     <Content Include="$(BackgroundOutputDirectory)PackagePilot.Background.pri"
              Link="PackagePilot.Background.pri"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+
+    <Content Include="$(PackageAdminOutputDirectory)PackagePilot.PackageAdmin.exe"
+             Link="PackagePilot.PackageAdmin.exe"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(PackageAdminOutputDirectory)PackagePilot.PackageAdmin.dll"
+             Link="PackagePilot.PackageAdmin.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(PackageAdminOutputDirectory)PackagePilot.PackageAdmin.deps.json"
+             Link="PackagePilot.PackageAdmin.deps.json"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest"
+             Visible="false" />
+    <Content Include="$(PackageAdminOutputDirectory)PackagePilot.PackageAdmin.runtimeconfig.json"
+             Link="PackagePilot.PackageAdmin.runtimeconfig.json"
              CopyToOutputDirectory="PreserveNewest"
              CopyToPublishDirectory="PreserveNewest"
              Visible="false" />

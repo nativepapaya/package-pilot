@@ -1,7 +1,7 @@
 namespace PackagePilot.Core.Models;
 
 /// <summary>
-/// Identifies the supported diagnostic surface for a completed package operation. The
+/// Identifies the supported diagnostic surface for a package operation. The
 /// reference is intentionally opaque: persisted history never contains log text or a path.
 /// </summary>
 public sealed record OperationDiagnosticReference
@@ -26,4 +26,5 @@ public sealed record OperationDiagnosticDocument
     public bool IsTruncated { get; init; }
     public bool HasProviderLog { get; init; }
     public bool HasInstallerLog { get; init; }
+    public bool IsLive { get; init; }
 }

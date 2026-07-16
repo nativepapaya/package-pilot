@@ -43,6 +43,16 @@ public sealed class PackageListItemComparerTests
     }
 
     [Fact]
+    public void HaveSameRows_DetectsAdministratorRetryChanges()
+    {
+        var current = CreateItem();
+        var replacement = CreateItem();
+        replacement.RequiresAdministratorRetry = true;
+
+        Assert.False(PackageListItemComparer.HaveSameRows([current], [replacement]));
+    }
+
+    [Fact]
     public void SameRowsExceptFeedback_AllowsAnInPlaceTransition()
     {
         var current = CreateItem();
@@ -51,7 +61,9 @@ public sealed class PackageListItemComparerTests
         replacement.ActionLabel = "Queued";
         replacement.IsActionEnabled = false;
         replacement.OperationState = PackageOperationState.Queued;
+        replacement.OperationErrorKind = WingetErrorKind.AdministratorRequired;
         replacement.VerificationPhase = MutationVerificationPhase.OutcomeUnknown;
+        replacement.RequiresAdministratorRetry = true;
 
         Assert.True(PackageListItemComparer.HaveSameRowsExceptOperationFeedback(
             [current],
@@ -67,7 +79,9 @@ public sealed class PackageListItemComparerTests
         replacement.ActionLabel = "Queued";
         replacement.IsActionEnabled = false;
         replacement.OperationState = PackageOperationState.Queued;
+        replacement.OperationErrorKind = WingetErrorKind.AdministratorRequired;
         replacement.VerificationPhase = MutationVerificationPhase.OutcomeUnknown;
+        replacement.RequiresAdministratorRetry = true;
         var changed = new HashSet<string>();
         current.PropertyChanged += (_, args) => changed.Add(args.PropertyName!);
 
@@ -77,7 +91,9 @@ public sealed class PackageListItemComparerTests
         Assert.Contains(nameof(PackageListItem.ActionLabel), changed);
         Assert.Contains(nameof(PackageListItem.IsActionEnabled), changed);
         Assert.Contains(nameof(PackageListItem.OperationState), changed);
+        Assert.Contains(nameof(PackageListItem.OperationErrorKind), changed);
         Assert.Contains(nameof(PackageListItem.VerificationPhase), changed);
+        Assert.Contains(nameof(PackageListItem.RequiresAdministratorRetry), changed);
     }
 
     [Fact]

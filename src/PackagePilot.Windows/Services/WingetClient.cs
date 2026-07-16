@@ -24,14 +24,8 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
     private readonly object _capabilitiesLock = new();
     private readonly object _managerLock = new();
     private readonly WindowsUpdateDiscoveryClient _updateDiscoveryClient = new();
-    private readonly WindowsOperationDiagnosticsService? _operationDiagnostics;
     private WingetCapabilities? _supportedCapabilities;
     private PackageManager? _manager;
-
-    public WingetClient(WindowsOperationDiagnosticsService? operationDiagnostics = null)
-    {
-        _operationDiagnostics = operationDiagnostics;
-    }
 
     public Task<WingetCapabilities> GetCapabilitiesAsync(
         CancellationToken cancellationToken = default)
@@ -754,8 +748,6 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 PackageUninstallMode = PackageUninstallMode.Default,
                 PackageUninstallScope = ToUninstallScope(operation.Preferences.Scope)
             };
-            TryConfigureInstallerLog(options, operation.Id, operation.Package.SourceId);
-
             var asyncOperation = GetManager().UninstallPackageAsync(resolved.Package, options);
             var canCancel = 1;
             asyncOperation.Progress = (_, value) =>
@@ -788,11 +780,7 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         }
         catch (Exception exception) when (!IsFatal(exception))
         {
-            return FailedResult(operation, startedAt, FromException(exception), diagnostic);
-        }
-        finally
-        {
-            await FinalizeInstallerLogAsync(operation.Id).ConfigureAwait(false);
+            return FailedResult(operation, startedAt, FromException(exception, operation.Kind), diagnostic);
         }
     }
 
@@ -819,10 +807,16 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
 
             var installOptions = CreateInstallOptions(operation.Preferences, operation.Id);
             var packageAgreements = GetPackageAgreements(resolved.Package);
-            if (packageAgreements.Count > 0 && !operation.Preferences.AcceptPackageAgreements)
+            var packageAgreementSnapshot = PackageAgreementSnapshot.Create(
+                operation.Package,
+                packageAgreements);
+            if (packageAgreementSnapshot.HasAgreements
+                && (!operation.Preferences.AcceptPackageAgreements
+                    || !packageAgreementSnapshot.Matches(
+                        operation.Preferences.AcceptedPackageAgreementFingerprint)))
             {
                 throw AgreementRequired(
-                    "This package requires agreement acceptance before it can be installed.",
+                    "The current package agreements must be reviewed and accepted before this operation can continue.",
                     packageAgreements);
             }
 
@@ -836,10 +830,6 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 });
             }
 
-            TryConfigureInstallerLog(
-                installOptions,
-                operation.Id,
-                operation.Package.SourceId);
             var manager = GetManager();
             var asyncOperation = isUpgrade
                 ? manager.UpgradePackageAsync(resolved.Package, installOptions)
@@ -884,11 +874,7 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         }
         catch (Exception exception) when (!IsFatal(exception))
         {
-            return FailedResult(operation, startedAt, FromException(exception), diagnostic);
-        }
-        finally
-        {
-            await FinalizeInstallerLogAsync(operation.Id).ConfigureAwait(false);
+            return FailedResult(operation, startedAt, FromException(exception, operation.Kind), diagnostic);
         }
     }
 
@@ -1182,67 +1168,6 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         return options;
     }
 
-    private void TryConfigureInstallerLog(
-        InstallOptions options,
-        Guid operationId,
-        string sourceId)
-    {
-        if (IsMicrosoftStoreSource(sourceId)
-            || _operationDiagnostics?.TryPrepareWingetInstallerLog(operationId, out var logPath) != true)
-        {
-            return;
-        }
-
-        try
-        {
-            options.LogOutputPath = logPath;
-        }
-        catch (Exception exception) when (!IsFatal(exception))
-        {
-            // Optional diagnostics must never prevent or alter a package operation.
-        }
-    }
-
-    private void TryConfigureInstallerLog(
-        UninstallOptions options,
-        Guid operationId,
-        string sourceId)
-    {
-        if (IsMicrosoftStoreSource(sourceId)
-            || _operationDiagnostics?.TryPrepareWingetInstallerLog(operationId, out var logPath) != true)
-        {
-            return;
-        }
-
-        try
-        {
-            options.LogOutputPath = logPath;
-        }
-        catch (Exception exception) when (!IsFatal(exception))
-        {
-            // Optional diagnostics must never prevent or alter a package operation.
-        }
-    }
-
-    private async Task FinalizeInstallerLogAsync(Guid operationId)
-    {
-        if (_operationDiagnostics is null)
-        {
-            return;
-        }
-
-        try
-        {
-            await _operationDiagnostics
-                .FinalizeWingetInstallerLogAsync(operationId)
-                .ConfigureAwait(false);
-        }
-        catch (Exception exception) when (!IsFatal(exception))
-        {
-            // Optional diagnostic retention must never alter the package result.
-        }
-    }
-
     private static bool RequiresElevation(CatalogPackage package, InstallOptions options)
     {
         var installer = TryGetInstaller(package.DefaultInstallVersion, options);
@@ -1429,7 +1354,7 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
             return SuccessfulResult(operation, startedAt, result.RebootRequired, diagnostic);
         }
 
-        return FailedResult(operation, startedAt, MapInstallError(result), diagnostic);
+        return FailedResult(operation, startedAt, MapInstallError(result, operation.Kind), diagnostic);
     }
 
     private static OperationResult ToUninstallResult(
@@ -1443,7 +1368,7 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
             return SuccessfulResult(operation, startedAt, result.RebootRequired, diagnostic);
         }
 
-        return FailedResult(operation, startedAt, MapUninstallError(result), diagnostic);
+        return FailedResult(operation, startedAt, MapUninstallError(result, operation.Kind), diagnostic);
     }
 
     private static OperationResult SuccessfulResult(
@@ -1494,7 +1419,9 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         HResult = exception.HResult
     }, diagnostic);
 
-    private static WingetError MapInstallError(InstallResult result)
+    private static WingetError MapInstallError(
+        InstallResult result,
+        PackageOperationKind operationKind)
     {
         var hresult = TryGetInstallHResult(result);
         var (kind, message) = result.Status switch
@@ -1519,6 +1446,10 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 "The installer reported an error. No changes were made by Package Pilot."),
             _ => (ClassifyHResult(hresult), "WinGet could not complete the package operation.")
         };
+        if (kind == WingetErrorKind.AdministratorRequired)
+        {
+            message = WindowsPackageOperationErrors.GetAdministratorRequiredMessage(operationKind);
+        }
 
         return new WingetError
         {
@@ -1531,7 +1462,9 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         };
     }
 
-    private static WingetError MapUninstallError(UninstallResult result)
+    private static WingetError MapUninstallError(
+        UninstallResult result,
+        PackageOperationKind operationKind)
     {
         var hresult = TryGetUninstallHResult(result);
         var (kind, message) = result.Status switch
@@ -1548,6 +1481,10 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 "The uninstaller reported an error."),
             _ => (ClassifyHResult(hresult), "WinGet could not uninstall this package.")
         };
+        if (kind == WingetErrorKind.AdministratorRequired)
+        {
+            message = WindowsPackageOperationErrors.GetAdministratorRequiredMessage(operationKind);
+        }
 
         return new WingetError
         {
@@ -2030,7 +1967,9 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         _ => string.Empty
     };
 
-    private static WingetError FromException(Exception exception)
+    private static WingetError FromException(
+        Exception exception,
+        PackageOperationKind? operationKind = null)
     {
         var hresult = exception.HResult;
         var kind = ClassifyHResult(hresult);
@@ -2046,6 +1985,8 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 "The package source could not be reached. Check your connection and try again.",
             WingetErrorKind.ElevationDenied =>
                 "The Windows elevation prompt was cancelled or denied.",
+            WingetErrorKind.AdministratorRequired =>
+                WindowsPackageOperationErrors.GetAdministratorRequiredMessage(operationKind),
             WingetErrorKind.Cancelled =>
                 "The operation was cancelled.",
             _ => "Windows Package Manager encountered an unexpected error."
@@ -2060,7 +2001,7 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         };
     }
 
-    private static WingetErrorKind ClassifyHResult(int? hresult)
+    internal static WingetErrorKind ClassifyHResult(int? hresult)
     {
         if (hresult is null)
         {
@@ -2072,6 +2013,8 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
             0x80040154 => WingetErrorKind.AppInstallerMissing,
             0x80070005 => WingetErrorKind.PolicyBlocked,
             0x800704C7 => WingetErrorKind.ElevationDenied,
+            WindowsPackageOperationErrors.PackagedServiceRequiresAdministratorHResult =>
+                WingetErrorKind.AdministratorRequired,
             0x80072EE2 or 0x80072EE7 or 0x80072EFD or 0x80072EFE => WingetErrorKind.Network,
             0x800704C6 => WingetErrorKind.Authentication,
             0x800704C8 => WingetErrorKind.Cancelled,

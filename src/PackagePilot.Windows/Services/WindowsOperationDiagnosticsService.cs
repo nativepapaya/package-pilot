@@ -50,19 +50,6 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
             ?? throw new ArgumentNullException(nameof(deploymentEventLogReader));
     }
 
-    internal bool TryPrepareWingetInstallerLog(Guid operationId, out string logPath) =>
-        OperationDiagnosticFiles.TryPrepareInstallerLog(
-            _trustedOwnedRoot,
-            _ownedInstallerLogRoot,
-            operationId,
-            out logPath);
-
-    internal Task FinalizeWingetInstallerLogAsync(Guid operationId) =>
-        OperationDiagnosticFiles.FinalizeInstallerLogAsync(
-            _trustedOwnedRoot,
-            _ownedInstallerLogRoot,
-            operationId);
-
     public Task<OperationDiagnosticDocument> ReadAsync(
         OperationResult operation,
         CancellationToken cancellationToken = default)
@@ -89,6 +76,105 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
         };
     }
 
+    public async Task<OperationDiagnosticDocument> ReadLiveAsync(
+        OperationQueueEntry operation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var packageOperation = operation.Operation;
+        if (packageOperation.Id == Guid.Empty || packageOperation.EffectiveTarget is null)
+        {
+            return Unavailable(
+                "Live operation diagnostics",
+                "This queued activity does not contain a valid package-operation reference.");
+        }
+
+        var liveResult = new OperationResult
+        {
+            OperationId = packageOperation.Id,
+            Package = packageOperation.Package,
+            Target = packageOperation.EffectiveTarget,
+            Kind = packageOperation.Kind,
+            State = operation.Progress.State,
+            StartedAt = packageOperation.EnqueuedAt
+        };
+
+        if (packageOperation.EffectiveTarget is WingetTarget)
+        {
+            var diagnostic = new OperationDiagnosticReference
+            {
+                Provider = OperationDiagnosticProvider.Winget,
+                ReferenceId = packageOperation.Id
+            };
+            if (operation.Progress.State == PackageOperationState.Queued)
+            {
+                var providerLabel = IsMicrosoftStoreSource(packageOperation.Package.SourceId)
+                    ? "WinGet / Microsoft Store"
+                    : "WinGet";
+                var builder = CreateOperationHeader(
+                    liveResult,
+                    providerLabel,
+                    diagnostic.ReferenceId,
+                    isLive: true);
+                builder.AppendLine();
+                builder.AppendLine(
+                    "This operation is waiting in Package Pilot's sequential queue. No diagnostic " +
+                    "file is read until the operation starts.");
+                return new OperationDiagnosticDocument
+                {
+                    Title = "Queued WinGet diagnostics",
+                    ProviderLabel = providerLabel,
+                    Text = OperationDiagnosticRedactor.Redact(builder.ToString()),
+                    Notice = "Live status is available now. Log reads begin only after this queued " +
+                        $"operation starts. {SensitivityNotice}",
+                    IsLive = true
+                };
+            }
+
+            var document = await ReadWingetAsync(
+                    liveResult,
+                    diagnostic,
+                    cancellationToken,
+                    isLive: true)
+                .ConfigureAwait(false);
+            return document with
+            {
+                IsLive = true,
+                Notice = "Live view. The WinGet log appears only after WinGet begins writing; " +
+                    $"this snapshot shows status {operation.Progress.State}. {document.Notice}"
+            };
+        }
+
+        if (packageOperation.EffectiveTarget is MsixTarget)
+        {
+            var builder = CreateOperationHeader(
+                liveResult,
+                "Windows package deployment (MSIX)",
+                referenceId: null,
+                isLive: true);
+            builder.AppendLine();
+            builder.AppendLine(
+                "Windows returns the exact deployment Activity ID when this request completes. " +
+                "Package Pilot will use that ID for the event-log query after completion.");
+            return new OperationDiagnosticDocument
+            {
+                Title = "Live Windows deployment diagnostics",
+                ProviderLabel = "Windows package deployment (MSIX)",
+                Text = OperationDiagnosticRedactor.Redact(builder.ToString()),
+                Notice = "Live status is available now. Exact Windows deployment events become " +
+                    $"available only after Windows returns an Activity ID; current status is {operation.Progress.State}. " +
+                    SensitivityNotice,
+                IsLive = true
+            };
+        }
+
+        return Unavailable(
+            "Live operation diagnostics",
+            "This package provider does not expose an allowlisted live diagnostic surface.");
+    }
+
     public Task DeleteOwnedLogsAsync(
         IReadOnlyCollection<OperationDiagnosticReference> diagnostics,
         CancellationToken cancellationToken = default)
@@ -106,7 +192,8 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
     private async Task<OperationDiagnosticDocument> ReadWingetAsync(
         OperationResult operation,
         OperationDiagnosticReference diagnostic,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool isLive = false)
     {
         var wingetLogTask = OperationDiagnosticFiles.FindWingetComLogAsync(
             _wingetDiagnosticsRoot,
@@ -125,7 +212,11 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
         var installerLog = await installerLogTask.ConfigureAwait(false);
         var isStore = IsMicrosoftStoreSource(operation.Package.SourceId);
         var providerLabel = isStore ? "WinGet / Microsoft Store" : "WinGet";
-        var builder = CreateOperationHeader(operation, providerLabel, diagnostic.ReferenceId);
+        var builder = CreateOperationHeader(
+            operation,
+            providerLabel,
+            diagnostic.ReferenceId,
+            isLive);
 
         if (wingetLog is not null)
         {
@@ -139,7 +230,7 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
         {
             AppendLogSection(
                 builder,
-                "Installer log (requested through WinGet)",
+                "Legacy installer log (retained from an earlier Package Pilot version)",
                 installerLog);
         }
 
@@ -174,7 +265,8 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
         var builder = CreateOperationHeader(
             operation,
             "Windows package deployment (MSIX)",
-            diagnostic.ReferenceId);
+            diagnostic.ReferenceId,
+            isLive: false);
         builder.AppendLine($"Event channel: {events.ChannelName}");
         builder.AppendLine($"Deployment events: {events.EventCount}");
 
@@ -204,7 +296,8 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
     private static StringBuilder CreateOperationHeader(
         OperationResult operation,
         string providerLabel,
-        Guid referenceId)
+        Guid? referenceId,
+        bool isLive)
     {
         var packageId = operation.EffectiveTarget?.Id ?? operation.Package.Id;
         var builder = new StringBuilder();
@@ -217,11 +310,21 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
         }
 
         builder.AppendLine($"Action: {operation.Kind}");
-        builder.AppendLine($"Status: {operation.State}");
+        builder.AppendLine($"Status: {operation.State}{(isLive ? " (live)" : string.Empty)}");
         builder.AppendLine($"Operation ID: {operation.OperationId:D}");
-        builder.AppendLine($"Provider reference: {referenceId:D}");
-        builder.AppendLine($"Started: {operation.StartedAt:O}");
-        builder.AppendLine($"Completed: {operation.CompletedAt:O}");
+        if (referenceId is { } providerReference)
+        {
+            builder.AppendLine($"Provider reference: {providerReference:D}");
+        }
+        if (operation.StartedAt != default)
+        {
+            builder.AppendLine($"{(isLive ? "Queued" : "Started")}: {operation.StartedAt:O}");
+        }
+
+        if (!isLive && operation.CompletedAt != default)
+        {
+            builder.AppendLine($"Completed: {operation.CompletedAt:O}");
+        }
         if (operation.Error is { } error)
         {
             builder.AppendLine($"Result code: {error.Code}");
@@ -258,23 +361,27 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
     {
         var availability = (hasWingetLog, hasInstallerLog) switch
         {
-            (true, true) => "The correlated WinGet log and installer-native log are shown.",
+            (true, true) => "The correlated WinGet log and a retained legacy installer log are shown.",
             (true, false) when isStore =>
                 "The correlated WinGet Store-handoff log is shown. Microsoft Store does not expose a Store-owned log path through WinGet.",
             (true, false) =>
-                "The correlated WinGet log is shown. This installer did not produce a separate installer-native log.",
+                "The correlated WinGet log is shown.",
             (false, true) =>
-                "The installer-native log is shown. The correlated WinGet trace has expired or is unavailable.",
+                "A retained legacy installer log is shown. The correlated WinGet trace has expired or is unavailable.",
             _ when isStore =>
                 "No retained WinGet handoff log was found. Microsoft Store does not expose a Store-owned per-operation log through WinGet.",
             _ =>
-                "No retained WinGet or installer log was found. WinGet diagnostics expire, and some installer types do not produce installer-native logs."
+                "No retained WinGet or legacy installer log was found. WinGet diagnostics can expire."
         };
 
         var scopeNotice = hasWingetLog
             ? "The WinGet file was matched by the exact operation GUID, but it can contain surrounding WinGet COM context. "
             : string.Empty;
-        return $"{availability} {scopeNotice}{SensitivityNotice}";
+        var installerSafetyNotice = isStore
+            ? string.Empty
+            : "Package Pilot does not request new installer-native log files because an elevated " +
+                "installer could write to the supplied path; diagnostics remain read-only. ";
+        return $"{availability} {scopeNotice}{installerSafetyNotice}{SensitivityNotice}";
     }
 
     private static OperationDiagnosticDocument Unavailable(string title, string message) => new()

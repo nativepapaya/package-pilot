@@ -10,16 +10,42 @@ public sealed class PackageListItem : INotifyPropertyChanged
 {
     private string _status = string.Empty;
     private string _actionLabel = "Install";
+    private string _installedVersion = string.Empty;
+    private string _availableVersion = string.Empty;
     private bool _isActionEnabled = true;
     private PackageOperationState? _operationState;
+    private WingetErrorKind? _operationErrorKind;
     private MutationVerificationPhase? _verificationPhase;
+    private string _stateGlyph = string.Empty;
+    private bool _isPositiveState;
+    private bool _requiresAdministratorRetry;
 
     public string Name { get; set; } = string.Empty;
     public string Publisher { get; set; } = string.Empty;
     public string PackageId { get; set; } = string.Empty;
     public string Source { get; set; } = string.Empty;
-    public string InstalledVersion { get; set; } = string.Empty;
-    public string AvailableVersion { get; set; } = string.Empty;
+    public string InstalledVersion
+    {
+        get => _installedVersion;
+        set
+        {
+            if (SetProperty(ref _installedVersion, value))
+            {
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(VersionLabel)));
+            }
+        }
+    }
+    public string AvailableVersion
+    {
+        get => _availableVersion;
+        set
+        {
+            if (SetProperty(ref _availableVersion, value))
+            {
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(VersionLabel)));
+            }
+        }
+    }
     public string Status
     {
         get => _status;
@@ -58,10 +84,30 @@ public sealed class PackageListItem : INotifyPropertyChanged
         get => _operationState;
         set => SetProperty(ref _operationState, value);
     }
+    public WingetErrorKind? OperationErrorKind
+    {
+        get => _operationErrorKind;
+        set => SetProperty(ref _operationErrorKind, value);
+    }
     public MutationVerificationPhase? VerificationPhase
     {
         get => _verificationPhase;
         set => SetProperty(ref _verificationPhase, value);
+    }
+    public string StateGlyph
+    {
+        get => _stateGlyph;
+        set => SetProperty(ref _stateGlyph, value);
+    }
+    public bool IsPositiveState
+    {
+        get => _isPositiveState;
+        set => SetProperty(ref _isPositiveState, value);
+    }
+    public bool RequiresAdministratorRetry
+    {
+        get => _requiresAdministratorRetry;
+        set => SetProperty(ref _requiresAdministratorRetry, value);
     }
     public string? InstalledAppId { get; set; }
     public InstalledAppActionKind? InstalledActionKind { get; set; }
@@ -92,18 +138,31 @@ public sealed class PackageListItem : INotifyPropertyChanged
         ActionLabel = source.ActionLabel;
         IsActionEnabled = source.IsActionEnabled;
         OperationState = source.OperationState;
+        OperationErrorKind = source.OperationErrorKind;
         VerificationPhase = source.VerificationPhase;
+        StateGlyph = source.StateGlyph;
+        IsPositiveState = source.IsPositiveState;
+        RequiresAdministratorRetry = source.RequiresAdministratorRetry;
     }
 
-    private void SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+    internal void ApplyDiscoverState(PackageListItem source)
+    {
+        ApplyOperationFeedback(source);
+        InstalledVersion = source.InstalledVersion;
+        AvailableVersion = source.AvailableVersion;
+        RequestedOperationKind = source.RequestedOperationKind;
+    }
+
+    private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {
         if (EqualityComparer<T>.Default.Equals(field, value))
         {
-            return;
+            return false;
         }
 
         field = value;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        return true;
     }
 }
 
@@ -144,7 +203,11 @@ internal static class PackageListItemComparer
                         || !string.Equals(left.ActionLabel, right.ActionLabel, StringComparison.Ordinal)
                         || left.IsActionEnabled != right.IsActionEnabled
                         || left.OperationState != right.OperationState
-                        || left.VerificationPhase != right.VerificationPhase))
+                        || left.OperationErrorKind != right.OperationErrorKind
+                        || left.VerificationPhase != right.VerificationPhase
+                        || !string.Equals(left.StateGlyph, right.StateGlyph, StringComparison.Ordinal)
+                        || left.IsPositiveState != right.IsPositiveState
+                        || left.RequiresAdministratorRetry != right.RequiresAdministratorRetry))
                 || !string.Equals(left.IconGlyph, right.IconGlyph, StringComparison.Ordinal)
                 || left.RequiresElevation != right.RequiresElevation
                 || left.RequestedOperationKind != right.RequestedOperationKind
@@ -174,9 +237,13 @@ public sealed class OperationListItem
     public string Timestamp { get; set; } = string.Empty;
     public double Progress { get; set; }
     public bool IsActive { get; set; }
+    public bool IsHistory { get; set; }
     public bool IsIndeterminate { get; set; }
+    public bool ShowProgress { get; set; }
     public bool CanCancel { get; set; }
+    public bool ShowCancel { get; set; }
     public bool CanViewDiagnostic { get; set; }
+    public bool IsLiveDiagnostic { get; set; }
     public string DiagnosticProviderLabel { get; set; } = string.Empty;
     public string DiagnosticAutomationName { get; set; } = string.Empty;
     public string DiagnosticToolTip { get; set; } = string.Empty;

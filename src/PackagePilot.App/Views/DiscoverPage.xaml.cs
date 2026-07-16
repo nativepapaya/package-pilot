@@ -4,6 +4,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using PackagePilot.Core.Models;
 
 namespace PackagePilot.App.Views;
 
@@ -45,6 +46,17 @@ public sealed partial class DiscoverPage : Page
         var snapshot = results.ToArray();
         if (PackageListItemComparer.HaveSameRows(Results, snapshot))
         {
+            return;
+        }
+
+        SynchronizeSelectedPackageState(snapshot);
+        if (PackageListItemComparer.HaveSameRowsExceptOperationFeedback(Results, snapshot))
+        {
+            for (var index = 0; index < Results.Count; index++)
+            {
+                Results[index].ApplyOperationFeedback(snapshot[index]);
+            }
+            UpdateResultState();
             return;
         }
 
@@ -136,9 +148,10 @@ public sealed partial class DiscoverPage : Page
 
     private void OnPackageActionInvoked(object? sender, EventArgs e)
     {
-        if (sender is PackageRow row && row.Tag is string packageId)
+        if (sender is PackageRow row && row.Tag is PackageKey packageKey)
         {
-            var package = Results.FirstOrDefault(item => item.PackageId == packageId);
+            var package = Results.FirstOrDefault(item =>
+                item.WingetPackage is { } candidate && PackageKeysEqual(candidate, packageKey));
             if (package is not null)
             {
                 PackageActionRequested?.Invoke(this, new PackageActionRequestedEventArgs(package));
@@ -162,6 +175,25 @@ public sealed partial class DiscoverPage : Page
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e) => UpdateResponsiveDetails();
+
+    private void SynchronizeSelectedPackageState(IReadOnlyList<PackageListItem> snapshot)
+    {
+        if (_selectedPackage?.WingetPackage is not { } selectedKey)
+        {
+            return;
+        }
+
+        var replacement = snapshot.FirstOrDefault(item =>
+            item.WingetPackage is { } candidate && PackageKeysEqual(candidate, selectedKey));
+        if (replacement is not null)
+        {
+            _selectedPackage.ApplyDiscoverState(replacement);
+        }
+    }
+
+    private static bool PackageKeysEqual(PackageKey left, PackageKey right) =>
+        string.Equals(left.Id, right.Id, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(left.SourceId, right.SourceId, StringComparison.OrdinalIgnoreCase);
 
     private void UpdateResponsiveDetails()
     {

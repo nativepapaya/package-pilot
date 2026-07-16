@@ -52,6 +52,8 @@ public sealed class WindowsOperationDiagnosticsServiceTests : IDisposable
         Assert.Contains("[REDACTED]", document.Text);
         Assert.Contains("%USERPROFILE%", document.Text);
         Assert.Contains("surrounding WinGet COM context", document.Notice);
+        Assert.Contains("retained legacy installer log", document.Notice);
+        Assert.Contains("diagnostics remain read-only", document.Notice);
     }
 
     [Fact]
@@ -70,7 +72,8 @@ public sealed class WindowsOperationDiagnosticsServiceTests : IDisposable
         Assert.False(document.HasProviderLog);
         Assert.False(document.HasInstallerLog);
         Assert.DoesNotContain("Package text mentions", document.Text);
-        Assert.Contains("No retained WinGet or installer log", document.Notice);
+        Assert.Contains("No retained WinGet or legacy installer log", document.Notice);
+        Assert.Contains("diagnostics remain read-only", document.Notice);
     }
 
     [Fact]
@@ -156,6 +159,115 @@ public sealed class WindowsOperationDiagnosticsServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task LiveWingetRead_UsesTheExactOperationLogAndReportsCurrentState()
+    {
+        var operationId = Guid.NewGuid();
+        var package = new PackageKey("Contoso.App", "winget");
+        var entry = new OperationQueueEntry(
+            new PackageOperation
+            {
+                Id = operationId,
+                Package = package,
+                Target = new WingetTarget { Package = package },
+                Kind = PackageOperationKind.Upgrade,
+                DisplayName = "Contoso",
+                EnqueuedAt = DateTimeOffset.UtcNow.AddSeconds(-10)
+            },
+            new OperationProgress
+            {
+                OperationId = operationId,
+                State = PackageOperationState.Downloading,
+                Percent = 42
+            });
+        var owned = Path.Combine(_root, "owned");
+        Directory.CreateDirectory(owned);
+        await File.WriteAllTextAsync(
+            OperationDiagnosticFiles.GetInstallerLogPath(owned, operationId),
+            "live installer detail");
+
+        var document = await Service(owned, Path.Combine(_root, "winget"))
+            .ReadLiveAsync(entry);
+
+        Assert.True(document.IsLive);
+        Assert.True(document.HasInstallerLog);
+        Assert.Contains("Status: Downloading (live)", document.Text);
+        Assert.Contains("live installer detail", document.Text);
+        Assert.Contains("Live view", document.Notice);
+    }
+
+    [Fact]
+    public async Task QueuedWingetRead_DoesNotTouchProviderOrInstallerLogs()
+    {
+        var operationId = Guid.NewGuid();
+        var package = new PackageKey("Contoso.App", "winget");
+        var entry = new OperationQueueEntry(
+            new PackageOperation
+            {
+                Id = operationId,
+                Package = package,
+                Target = new WingetTarget { Package = package },
+                Kind = PackageOperationKind.Install,
+                DisplayName = "Contoso"
+            },
+            new OperationProgress
+            {
+                OperationId = operationId,
+                State = PackageOperationState.Queued
+            });
+        Directory.CreateDirectory(_root);
+        var blockingOwnedPath = Path.Combine(_root, "blocked-owned-root");
+        File.WriteAllText(blockingOwnedPath, "not a directory");
+        var blockingWingetPath = Path.Combine(_root, "blocked-winget-root");
+        File.WriteAllText(blockingWingetPath, "not a directory");
+        var service = Service(blockingOwnedPath, blockingWingetPath);
+
+        var document = await service.ReadLiveAsync(entry);
+
+        Assert.True(document.IsLive);
+        Assert.False(document.HasProviderLog);
+        Assert.False(document.HasInstallerLog);
+        Assert.Contains("No diagnostic file is read", document.Text);
+    }
+
+    [Fact]
+    public async Task LiveMsixRead_DoesNotQueryEventsBeforeWindowsReturnsActivityId()
+    {
+        var operationId = Guid.NewGuid();
+        var eventReader = new FakeDeploymentEventLogReader();
+        var entry = new OperationQueueEntry(
+            new PackageOperation
+            {
+                Id = operationId,
+                Target = new MsixTarget
+                {
+                    PackageFullName = "Contoso.App_1.0.0.0_x64__publisher",
+                    PackageFamilyName = "Contoso.App_publisher"
+                },
+                Kind = PackageOperationKind.Uninstall,
+                DisplayName = "Contoso",
+                EnqueuedAt = DateTimeOffset.UtcNow
+            },
+            new OperationProgress
+            {
+                OperationId = operationId,
+                State = PackageOperationState.Uninstalling,
+                CancellationSupported = false
+            });
+        var service = new WindowsOperationDiagnosticsService(
+            Path.Combine(_root, "owned"),
+            Path.Combine(_root, "winget"),
+            eventReader);
+
+        var document = await service.ReadLiveAsync(entry);
+
+        Assert.True(document.IsLive);
+        Assert.Equal(0, eventReader.ReadCount);
+        Assert.DoesNotContain("Provider reference:", document.Text);
+        Assert.Contains("Activity ID", document.Text);
+        Assert.Contains("Status: Uninstalling (live)", document.Text);
+    }
+
+    [Fact]
     public async Task DeleteOwnedLogs_DeletesOnlyExactAppOwnedWingetFiles()
     {
         var operation = WingetResult("winget");
@@ -172,46 +284,6 @@ public sealed class WindowsOperationDiagnosticsServiceTests : IDisposable
 
         Assert.False(File.Exists(ownedPath));
         Assert.True(File.Exists(providerPath));
-    }
-
-    [Fact]
-    public async Task FinalizeInstallerLog_ReplacesAnOversizedFileWithASafetyMarker()
-    {
-        var operationId = Guid.NewGuid();
-        var owned = Path.Combine(_root, "owned");
-        Directory.CreateDirectory(owned);
-        var path = OperationDiagnosticFiles.GetInstallerLogPath(owned, operationId);
-        await using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-        {
-            stream.SetLength(OperationDiagnosticFiles.MaximumIndividualOwnedLogBytes + 1);
-        }
-        var service = Service(owned, Path.Combine(_root, "winget"));
-
-        await service.FinalizeWingetInstallerLogAsync(operationId);
-
-        var marker = await File.ReadAllTextAsync(path);
-        Assert.Contains("exceeded Package Pilot's 16 MB safety limit", marker);
-        Assert.True(new FileInfo(path).Length < 1024);
-    }
-
-    [Fact]
-    public async Task FinalizeInstallerLog_RetainsAtMostTheHistoryLimit()
-    {
-        var owned = Path.Combine(_root, "owned");
-        Directory.CreateDirectory(owned);
-        foreach (var index in Enumerable.Range(0, OperationDiagnosticFiles.MaximumOwnedLogCount + 1))
-        {
-            var path = OperationDiagnosticFiles.GetInstallerLogPath(owned, Guid.CreateVersion7());
-            await File.WriteAllTextAsync(path, index.ToString());
-            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddSeconds(index));
-        }
-
-        await Service(owned, Path.Combine(_root, "winget"))
-            .FinalizeWingetInstallerLogAsync(Guid.NewGuid());
-
-        Assert.Equal(
-            OperationDiagnosticFiles.MaximumOwnedLogCount,
-            Directory.EnumerateFiles(owned, "*.log").Count());
     }
 
     [Fact]
@@ -239,58 +311,51 @@ public sealed class WindowsOperationDiagnosticsServiceTests : IDisposable
     {
         Assert.Equal(32, OperationDiagnosticFiles.MaximumCorrelationCandidates);
         Assert.Equal(512, OperationDiagnosticFiles.MaximumEnumeratedLogFiles);
-        Assert.Equal(100, OperationDiagnosticFiles.MaximumOwnedLogCount);
     }
 
     [Fact]
-    public void PrepareInstallerLog_VerifiesWriteAccessWithoutLeavingAProbe()
+    public async Task LegacyInstallerLogRead_RejectsAPathOutsideTheTrustedLocalRoot()
     {
-        Directory.CreateDirectory(_root);
-        var owned = Path.Combine(_root, "owned");
-        var service = new WindowsOperationDiagnosticsService(
-            owned,
-            Path.Combine(_root, "winget"),
-            new FakeDeploymentEventLogReader(),
-            _root);
-
-        var prepared = service.TryPrepareWingetInstallerLog(Guid.NewGuid(), out var logPath);
-
-        Assert.True(prepared);
-        Assert.StartsWith(owned, logPath, StringComparison.OrdinalIgnoreCase);
-        Assert.Empty(Directory.EnumerateFiles(owned, ".write-probe-*.tmp"));
-    }
-
-    [Fact]
-    public void PrepareInstallerLog_RejectsAPathOutsideTheTrustedLocalRoot()
-    {
+        var operation = WingetResult("winget");
         var trusted = Path.Combine(_root, "trusted");
         var outside = Path.Combine(_root, "outside", "installer-logs");
         Directory.CreateDirectory(trusted);
+        Directory.CreateDirectory(outside);
+        var path = OperationDiagnosticFiles.GetInstallerLogPath(outside, operation.OperationId);
+        await File.WriteAllTextAsync(path, "must not be read");
         var service = new WindowsOperationDiagnosticsService(
             outside,
             Path.Combine(_root, "winget"),
             new FakeDeploymentEventLogReader(),
             trusted);
 
-        var prepared = service.TryPrepareWingetInstallerLog(Guid.NewGuid(), out _);
+        var document = await service.ReadAsync(operation);
 
-        Assert.False(prepared);
-        Assert.False(Directory.Exists(outside));
+        Assert.False(document.HasInstallerLog);
+        Assert.DoesNotContain("must not be read", document.Text);
+        Assert.True(File.Exists(path));
     }
 
     [Fact]
-    public void PrepareInstallerLog_FailsClosedWhenAnAncestorIsNotADirectory()
+    public async Task LegacyInstallerLogDelete_RejectsAPathOutsideTheTrustedLocalRoot()
     {
-        Directory.CreateDirectory(_root);
-        var blockingPath = Path.Combine(_root, "operation-diagnostics");
-        File.WriteAllText(blockingPath, "not a directory");
+        var operation = WingetResult("winget");
+        var trusted = Path.Combine(_root, "trusted");
+        var outside = Path.Combine(_root, "outside", "installer-logs");
+        Directory.CreateDirectory(trusted);
+        Directory.CreateDirectory(outside);
+        var path = OperationDiagnosticFiles.GetInstallerLogPath(outside, operation.OperationId);
+        await File.WriteAllTextAsync(path, "must not be deleted");
         var service = new WindowsOperationDiagnosticsService(
-            Path.Combine(blockingPath, "installer-logs"),
+            outside,
             Path.Combine(_root, "winget"),
             new FakeDeploymentEventLogReader(),
-            _root);
+            trusted);
 
-        Assert.False(service.TryPrepareWingetInstallerLog(Guid.NewGuid(), out _));
+        await Assert.ThrowsAsync<IOException>(() =>
+            service.DeleteOwnedLogsAsync([operation.Diagnostic!]));
+
+        Assert.True(File.Exists(path));
     }
 
     public void Dispose()
@@ -328,6 +393,7 @@ public sealed class WindowsOperationDiagnosticsServiceTests : IDisposable
     private sealed class FakeDeploymentEventLogReader : IWindowsDeploymentEventLogReader
     {
         public Guid RequestedActivityId { get; private set; }
+        public int ReadCount { get; private set; }
         public WindowsDeploymentEventLogResult Result { get; init; } = new(
             Guid.Empty,
             WindowsDeploymentEventLogReader.ChannelName,
@@ -343,6 +409,7 @@ public sealed class WindowsOperationDiagnosticsServiceTests : IDisposable
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ReadCount++;
             RequestedActivityId = activityId;
             return Task.FromResult(Result);
         }

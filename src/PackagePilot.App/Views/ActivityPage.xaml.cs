@@ -22,9 +22,27 @@ public sealed partial class ActivityPage : Page
 
     public void SetOperations(IEnumerable<OperationListItem> operations)
     {
+        var snapshot = operations.ToArray();
+        if (Operations.Count == snapshot.Length
+            && Operations.Select(item => item.OperationId)
+                .SequenceEqual(snapshot.Select(item => item.OperationId)))
+        {
+            for (var index = 0; index < snapshot.Length; index++)
+            {
+                if (!OperationRowProjector.HaveSamePresentation(
+                        Operations[index],
+                        snapshot[index]))
+                {
+                    Operations[index] = snapshot[index];
+                }
+            }
+
+            return;
+        }
+
         Operations.CollectionChanged -= OnOperationsChanged;
         Operations.Clear();
-        foreach (var operation in operations)
+        foreach (var operation in snapshot)
         {
             Operations.Add(operation);
         }
@@ -38,17 +56,26 @@ public sealed partial class ActivityPage : Page
     {
         var hasOperations = Operations.Count > 0;
         var activeCount = Operations.Count(operation => operation.IsActive);
-        var cancellableCount = Operations.Count(operation => operation.CanCancel);
+        var queuedCount = Operations.Count(operation =>
+            !operation.IsHistory && !operation.IsActive);
+        var cancellableQueuedCount = Operations.Count(operation =>
+            !operation.IsHistory && !operation.IsActive && operation.CanCancel);
+        var completedCount = Operations.Count(operation => operation.IsHistory);
         ActivityList.Visibility = hasOperations ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Visibility = hasOperations ? Visibility.Collapsed : Visibility.Visible;
-        ClearHistoryButton.IsEnabled = Operations.Any(operation => !operation.IsActive);
-        CancelQueuedButton.IsEnabled = cancellableCount > 0;
-        QueueSummaryText.Text = activeCount switch
+        ClearHistoryButton.IsEnabled = completedCount > 0;
+        CancelQueuedButton.IsEnabled = cancellableQueuedCount > 0;
+        QueueSummaryText.Text = (activeCount, queuedCount) switch
         {
-            0 when cancellableCount == 0 => "Queue is idle",
-            0 => $"{cancellableCount} operation{(cancellableCount == 1 ? string.Empty : "s")} queued",
-            1 => "1 operation in progress",
-            _ => $"{activeCount} operations active"
+            (0, 0) => "Queue is idle",
+            (0, 1) => "1 operation queued",
+            (0, _) => $"{queuedCount} operations queued",
+            (1, 0) => "1 operation in progress",
+            (_, 0) => $"{activeCount} operations active",
+            (1, 1) => "1 operation in progress, 1 queued",
+            (1, _) => $"1 operation in progress, {queuedCount} queued",
+            (_, 1) => $"{activeCount} operations active, 1 queued",
+            _ => $"{activeCount} operations active, {queuedCount} queued"
         };
     }
 

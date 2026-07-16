@@ -8,6 +8,7 @@
 - `PackagePilot.Windows` is the mutation-capable Windows infrastructure layer for WinGet COM, unified inventory, source administration, startup registration, notifications, and notification-area integration.
 - `PackagePilot.Background` is the packaged, read-only update-discovery COM host.
 - `PackagePilot.SourceAdmin` is the short-lived elevated source-administration helper.
+- `PackagePilot.PackageAdmin` is the separate short-lived elevated helper for one exact, explicitly reviewed WinGet package retry.
 - `PackagePilot.Tests` contains deterministic tests plus opt-in read-only WinGet integration tests.
 
 ## Trust boundaries
@@ -17,6 +18,8 @@
 All package mutations pass through `IOperationQueue` and require foreground review. The queue accepts provider-neutral `WingetTarget` and `MsixTarget` values. MSIX removal stops honoring cancellation before `RemovePackageAsync` begins. Registry uninstall command values are never read or executed.
 
 Source refresh runs normally. Add, remove, reset-one, and explicit-source edits cross a random, one-shot, authenticated named pipe to `PackagePilot.SourceAdmin`, which validates an allowlisted request, performs one WinGet COM operation after UAC approval, returns one result, and exits. There is no reset-all or arbitrary-command representation.
+
+Package installs and updates normally remain in the unelevated app/WinGet path. An exact `AdministratorRequired` failure may be retried individually through `PackagePilot.PackageAdmin`; automatic and bulk elevation are not supported. Before queuing the retry, the UI reloads exact package details and fingerprints the package agreements the user accepts. A user-SID ACL, exact launched-process ID check, random HMAC challenge, separate package-admin protocol domain, registered package identity and protected-install-path verification, and a strict data-only request bind the elevated helper to one source-qualified package and one Install, Upgrade, or Uninstall action. Alternate-account elevation is rejected. The helper cannot represent shell commands, paths, arbitrary arguments, source mutations, headers, or registry actions, and it exits after one response. A lost result after dispatch is recorded as outcome-unknown and retains the mutation-recovery lock until package state is verified.
 
 The background host can only discover updates. Foreground and background checks share a named mutex and atomically replace the same snapshot. Background failures are recorded for a deferred foreground retry. There is no separate tray executable or Task Scheduler fallback; when notification-area mode is enabled, the main app can remain as a lightweight resident host and creates the mutation-capable foreground graph only when a window is opened.
 

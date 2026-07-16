@@ -21,6 +21,16 @@ public sealed partial class PackageRow : UserControl
         nameof(Version), typeof(string), typeof(PackageRow), new PropertyMetadata(string.Empty));
     public static readonly DependencyProperty StatusProperty = DependencyProperty.Register(
         nameof(Status), typeof(string), typeof(PackageRow), new PropertyMetadata(string.Empty));
+    public static readonly DependencyProperty StateGlyphProperty = DependencyProperty.Register(
+        nameof(StateGlyph),
+        typeof(string),
+        typeof(PackageRow),
+        new PropertyMetadata(string.Empty, OnStateVisualPropertyChanged));
+    public static readonly DependencyProperty IsPositiveStateProperty = DependencyProperty.Register(
+        nameof(IsPositiveState),
+        typeof(bool),
+        typeof(PackageRow),
+        new PropertyMetadata(false, OnStateVisualPropertyChanged));
     public static readonly DependencyProperty ActionLabelProperty = DependencyProperty.Register(
         nameof(ActionLabel),
         typeof(string),
@@ -37,6 +47,7 @@ public sealed partial class PackageRow : UserControl
     {
         InitializeComponent();
         UpdateActionAutomationName();
+        UpdateStateVisual();
     }
 
     public string PackageName { get => (string)GetValue(PackageNameProperty); set => SetValue(PackageNameProperty, value); }
@@ -45,6 +56,8 @@ public sealed partial class PackageRow : UserControl
     public string Source { get => (string)GetValue(SourceProperty); set => SetValue(SourceProperty, value); }
     public string Version { get => (string)GetValue(VersionProperty); set => SetValue(VersionProperty, value); }
     public string Status { get => (string)GetValue(StatusProperty); set => SetValue(StatusProperty, value); }
+    public string StateGlyph { get => (string)GetValue(StateGlyphProperty); set => SetValue(StateGlyphProperty, value); }
+    public bool IsPositiveState { get => (bool)GetValue(IsPositiveStateProperty); set => SetValue(IsPositiveStateProperty, value); }
     public string ActionLabel { get => (string)GetValue(ActionLabelProperty); set => SetValue(ActionLabelProperty, value); }
     public string IconGlyph { get => (string)GetValue(IconGlyphProperty); set => SetValue(IconGlyphProperty, value); }
     public Uri? IconUri { get => (Uri?)GetValue(IconUriProperty); set => SetValue(IconUriProperty, value); }
@@ -65,11 +78,37 @@ public sealed partial class PackageRow : UserControl
         }
     }
 
+    private static void OnStateVisualPropertyChanged(
+        DependencyObject sender,
+        DependencyPropertyChangedEventArgs args)
+    {
+        if (sender is PackageRow row)
+        {
+            row.UpdateStateVisual();
+        }
+    }
+
     private void UpdateActionAutomationName()
     {
         if (ActionButton is not null)
         {
             AutomationProperties.SetName(ActionButton, ActionAutomationName);
         }
+    }
+
+    private void UpdateStateVisual()
+    {
+        if (StateBadge is null || PlainStatusText is null)
+        {
+            return;
+        }
+
+        var hasState = !string.IsNullOrWhiteSpace(StateGlyph);
+        StateBadge.Visibility = hasState ? Visibility.Visible : Visibility.Collapsed;
+        PlainStatusText.Visibility = hasState ? Visibility.Collapsed : Visibility.Visible;
+        _ = VisualStateManager.GoToState(
+            this,
+            IsPositiveState ? "PositiveState" : "NeutralState",
+            useTransitions: false);
     }
 }

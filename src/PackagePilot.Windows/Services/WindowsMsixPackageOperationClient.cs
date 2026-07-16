@@ -118,7 +118,20 @@ public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationCli
         string message,
         int? hResult = null,
         DateTimeOffset? startedAt = null,
-        OperationDiagnosticReference? diagnostic = null) => new()
+        OperationDiagnosticReference? diagnostic = null)
+    {
+        var kind = code is "ProtectedPackage"
+            ? WingetErrorKind.PolicyBlocked
+            : WindowsPackageOperationErrors.ClassifyAdministratorRequirement(
+                hResult,
+                WingetErrorKind.ComFailure);
+        var effectiveMessage = kind == WingetErrorKind.AdministratorRequired
+            ? WindowsPackageOperationErrors.GetAdministratorRequiredMessage(operation.Kind)
+            : string.IsNullOrWhiteSpace(message)
+                ? "Windows could not remove this app."
+                : message;
+
+        return new OperationResult
         {
             OperationId = operation.Id,
             Package = operation.Package,
@@ -129,13 +142,14 @@ public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationCli
             CompletedAt = DateTimeOffset.UtcNow,
             Error = new WingetError
             {
-                Kind = code is "ProtectedPackage" ? WingetErrorKind.PolicyBlocked : WingetErrorKind.ComFailure,
+                Kind = kind,
                 Code = code,
-                Message = string.IsNullOrWhiteSpace(message) ? "Windows could not remove this app." : message,
+                Message = effectiveMessage,
                 HResult = hResult
             },
             Diagnostic = diagnostic
         };
+    }
 
     private static OperationDiagnosticReference? CreateDeploymentDiagnostic(Guid activityId) =>
         activityId == Guid.Empty

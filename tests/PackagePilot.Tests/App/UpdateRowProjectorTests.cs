@@ -8,6 +8,18 @@ public sealed class UpdateRowProjectorTests
 {
     private static readonly DateTimeOffset LastSuccessfulCheck =
         new(2026, 7, 15, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void AdministratorRetry_IsNeverEligibleForBulkUpdate()
+    {
+        var row = new PackageListItem
+        {
+            IsActionEnabled = true,
+            RequiresAdministratorRetry = true
+        };
+
+        Assert.False(UpdateRowProjector.IsBulkActionEligible(row));
+    }
     [Fact]
     public void QueuedUpgrade_DisablesOnlyTheExactPackageKey()
     {
@@ -123,6 +135,131 @@ public sealed class UpdateRowProjectorTests
         Assert.Equal("Retry", row.ActionLabel);
         Assert.True(row.IsActionEnabled);
         Assert.Equal(PackageOperationKind.Upgrade, row.RequestedOperationKind);
+    }
+
+    [Fact]
+    public void PackagedServiceAdministratorFailure_DoesNotOfferAnIneffectiveRetry()
+    {
+        var package = new PackageKey("Contoso.ServiceApp", "winget");
+        var failed = Result(
+            package,
+            PackageOperationState.Failed,
+            LastSuccessfulCheck.AddMinutes(1)) with
+        {
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.AdministratorRequired,
+                Code = "InstallError:-2147001048",
+                Message = "Windows requires administrator privileges.",
+                HResult = unchecked((int)0x80073D28)
+            }
+        };
+        var queue = new OperationQueueSnapshot { History = [failed] };
+
+        var row = UpdateRowProjector.Apply(
+            Row(package),
+            queue,
+            LastSuccessfulCheck);
+
+        Assert.Equal(PackageOperationState.Failed, row.OperationState);
+        Assert.Equal(WingetErrorKind.AdministratorRequired, row.OperationErrorKind);
+        Assert.Equal("Administrator required - see Activity for details", row.Status);
+        Assert.Equal("Admin required", row.ActionLabel);
+        Assert.False(row.IsActionEnabled);
+        Assert.True(row.RequiresAdministratorRetry);
+    }
+
+    [Fact]
+    public void PackagedServiceAdministratorFailure_OffersExplicitBrokerRetryWhenAvailable()
+    {
+        var package = new PackageKey("Contoso.ServiceApp", "winget");
+        var failed = Result(
+            package,
+            PackageOperationState.Failed,
+            LastSuccessfulCheck.AddMinutes(1)) with
+        {
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.AdministratorRequired,
+                Code = "InstallError:-2147001048",
+                Message = "Windows requires administrator privileges.",
+                HResult = unchecked((int)0x80073D28)
+            }
+        };
+
+        var row = UpdateRowProjector.Apply(
+            Row(package),
+            new OperationQueueSnapshot { History = [failed] },
+            LastSuccessfulCheck,
+            administratorRetryAvailable: true);
+
+        Assert.Equal("Retry as administrator", row.ActionLabel);
+        Assert.Equal("Administrator approval required - elevated retry available", row.Status);
+        Assert.True(row.IsActionEnabled);
+        Assert.True(row.RequiresAdministratorRetry);
+        Assert.Equal(PackageOperationKind.Upgrade, row.RequestedOperationKind);
+    }
+
+    [Fact]
+    public void CancelledAdministratorApproval_PreservesExplicitAdministratorRetry()
+    {
+        var package = new PackageKey("Contoso.ServiceApp", "winget");
+        var failed = Result(
+            package,
+            PackageOperationState.Failed,
+            LastSuccessfulCheck.AddMinutes(1)) with
+        {
+            AdministratorRetryRequested = true,
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.ElevationDenied,
+                Code = "ElevationCancelled",
+                Message = "Administrator approval was canceled."
+            }
+        };
+
+        var row = UpdateRowProjector.Apply(
+            Row(package),
+            new OperationQueueSnapshot { History = [failed] },
+            LastSuccessfulCheck,
+            administratorRetryAvailable: true);
+
+        Assert.Equal(PackageOperationState.Failed, row.OperationState);
+        Assert.Equal(WingetErrorKind.ElevationDenied, row.OperationErrorKind);
+        Assert.Equal("Administrator approval was canceled - elevated retry available", row.Status);
+        Assert.Equal("Retry as administrator", row.ActionLabel);
+        Assert.True(row.IsActionEnabled);
+        Assert.True(row.RequiresAdministratorRetry);
+        Assert.Equal(PackageOperationKind.Upgrade, row.RequestedOperationKind);
+    }
+
+    [Fact]
+    public void PackagedServiceAdministratorFailure_RemainsDisabledAfterSuccessfulRefresh()
+    {
+        var package = new PackageKey("Contoso.ServiceApp", "winget");
+        var failed = Result(
+            package,
+            PackageOperationState.Failed,
+            LastSuccessfulCheck.AddMinutes(1)) with
+        {
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.AdministratorRequired,
+                Code = "InstallError:-2147001048",
+                Message = "Windows requires administrator privileges.",
+                HResult = unchecked((int)0x80073D28)
+            }
+        };
+
+        var row = UpdateRowProjector.Apply(
+            Row(package),
+            new OperationQueueSnapshot { History = [failed] },
+            failed.CompletedAt.AddMinutes(1));
+
+        Assert.Equal(PackageOperationState.Failed, row.OperationState);
+        Assert.Equal(WingetErrorKind.AdministratorRequired, row.OperationErrorKind);
+        Assert.Equal("Admin required", row.ActionLabel);
+        Assert.False(row.IsActionEnabled);
     }
 
     [Fact]

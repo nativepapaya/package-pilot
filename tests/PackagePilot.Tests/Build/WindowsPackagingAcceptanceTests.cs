@@ -191,6 +191,9 @@ public sealed class WindowsPackagingAcceptanceTests
         Assert.Contains(
             capabilities.Elements(RestrictedCapabilities + "Capability"),
             capability => HasAttribute(capability, "Name", "packageQuery"));
+        Assert.Contains(
+            capabilities.Elements(RestrictedCapabilities + "Capability"),
+            capability => HasAttribute(capability, "Name", "allowElevation"));
     }
 
     [Fact]
@@ -358,6 +361,42 @@ public sealed class WindowsPackagingAcceptanceTests
     }
 
     [Fact]
+    public void DiscoverActionsUseExactPackageKeysAndLiveEnabledState()
+    {
+        string repositoryRoot = FindRepositoryRoot();
+        string discoverXaml = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "PackagePilot.App",
+            "Views",
+            "DiscoverPage.xaml"));
+        string discoverCode = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "PackagePilot.App",
+            "Views",
+            "DiscoverPage.xaml.cs"));
+
+        Assert.Contains(
+            "Tag=\"{x:Bind WingetPackage}\"",
+            discoverXaml,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Tag=\"{x:Bind PackageId}\"",
+            discoverXaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "IsActionEnabled=\"{x:Bind IsActionEnabled, Mode=OneWay}\"",
+            discoverXaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ActionLabel=\"{x:Bind ActionLabel, Mode=OneWay}\"",
+            discoverXaml,
+            StringComparison.Ordinal);
+        Assert.Contains("row.Tag is PackageKey packageKey", discoverCode, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MutationDiagnosticsUseSupportedExactProviderReferences()
     {
         string repositoryRoot = FindRepositoryRoot();
@@ -373,18 +412,159 @@ public sealed class WindowsPackagingAcceptanceTests
         string diagnostics = File.ReadAllText(Path.Combine(
             servicesDirectory,
             "WindowsOperationDiagnosticsService.cs"));
+        string diagnosticFiles = File.ReadAllText(Path.Combine(
+            servicesDirectory,
+            "OperationDiagnosticFiles.cs"));
 
         Assert.Contains("CorrelationData = CreateCorrelationData(operation.Id)", wingetClient, StringComparison.Ordinal);
-        Assert.Contains("options.LogOutputPath = logPath", wingetClient, StringComparison.Ordinal);
-        Assert.Contains("IsMicrosoftStoreSource(sourceId)", wingetClient, StringComparison.Ordinal);
+        Assert.DoesNotContain("LogOutputPath", wingetClient, StringComparison.Ordinal);
+        Assert.DoesNotContain("TryPrepareWingetInstallerLog", wingetClient, StringComparison.Ordinal);
+        Assert.DoesNotContain("FinalizeWingetInstallerLog", wingetClient, StringComparison.Ordinal);
+        Assert.DoesNotContain("TryPrepareWingetInstallerLog", diagnostics, StringComparison.Ordinal);
+        Assert.DoesNotContain("FinalizeWingetInstallerLog", diagnostics, StringComparison.Ordinal);
         Assert.Contains("result.ActivityId", msixClient, StringComparison.Ordinal);
         Assert.Contains("OperationDiagnosticProvider.WindowsDeployment", msixClient, StringComparison.Ordinal);
-        Assert.Contains("WinGetCOM-*.log", File.ReadAllText(Path.Combine(
-            servicesDirectory,
-            "OperationDiagnosticFiles.cs")), StringComparison.Ordinal);
+        Assert.Contains("WinGetCOM-*.log", diagnosticFiles, StringComparison.Ordinal);
+        Assert.DoesNotContain("File.WriteAllText", diagnosticFiles, StringComparison.Ordinal);
+        Assert.DoesNotContain("Directory.CreateDirectory", diagnosticFiles, StringComparison.Ordinal);
+        Assert.DoesNotContain("FileOptions.WriteThrough", diagnosticFiles, StringComparison.Ordinal);
         Assert.DoesNotContain("Process.Start", diagnostics, StringComparison.Ordinal);
         Assert.DoesNotContain("powershell", diagnostics, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("winget.exe", diagnostics, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void PackageElevationUsesAnIsolatedAuthenticatedOneShotBoundary()
+    {
+        string repositoryRoot = FindRepositoryRoot();
+        string coreDirectory = Path.Combine(repositoryRoot, "src", "PackagePilot.Core");
+        string windowsServices = Path.Combine(
+            repositoryRoot,
+            "src",
+            "PackagePilot.Windows",
+            "Services");
+        string requestModel = File.ReadAllText(Path.Combine(
+            coreDirectory,
+            "Models",
+            "PackageAdminModels.cs"));
+        string protocol = File.ReadAllText(Path.Combine(
+            coreDirectory,
+            "Services",
+            "PackageAdminPipeProtocol.cs"));
+        string sourceProtocol = File.ReadAllText(Path.Combine(
+            coreDirectory,
+            "Services",
+            "SourceAdminPipeProtocol.cs"));
+        string broker = File.ReadAllText(Path.Combine(
+            windowsServices,
+            "ElevatedPackageOperationBroker.cs"));
+        string sourceBroker = File.ReadAllText(Path.Combine(
+            windowsServices,
+            "ElevatedSourceManagementBroker.cs"));
+        string aclFactory = File.ReadAllText(Path.Combine(
+            windowsServices,
+            "ElevatedPipeAclFactory.cs"));
+        string serverVerifier = File.ReadAllText(Path.Combine(
+            windowsServices,
+            "ElevatedPipeServerVerifier.cs"));
+        string helper = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "PackagePilot.PackageAdmin",
+            "Program.cs"));
+        string sourceHelper = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "PackagePilot.SourceAdmin",
+            "Program.cs"));
+        string appProject = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "PackagePilot.App",
+            "PackagePilot.App.csproj"));
+        string solution = File.ReadAllText(Path.Combine(repositoryRoot, "PackagePilot.slnx"));
+        string wingetClient = File.ReadAllText(Path.Combine(windowsServices, "WingetClient.cs"));
+        string packageHelperManifest = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "PackagePilot.PackageAdmin",
+            "app.manifest"));
+
+        Assert.Contains("PackagePilot.PackageAdmin.", protocol, StringComparison.Ordinal);
+        Assert.Contains("PackagePilot.PackageAdmin.v1", protocol, StringComparison.Ordinal);
+        Assert.Contains("PackagePilot.SourceAdmin.v1", sourceProtocol, StringComparison.Ordinal);
+        Assert.DoesNotContain("PackagePilot.SourceAdmin.v1", protocol, StringComparison.Ordinal);
+        Assert.Contains("UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow", protocol, StringComparison.Ordinal);
+        Assert.DoesNotContain("public string Command", requestModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("public string Arguments", requestModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("public string Path", requestModel, StringComparison.Ordinal);
+        Assert.DoesNotContain("Header", requestModel, StringComparison.Ordinal);
+
+        Assert.Contains("Verb = \"runas\"", broker, StringComparison.Ordinal);
+        Assert.Contains("GetNamedPipeClientProcessId", broker, StringComparison.Ordinal);
+        Assert.Contains("AuthenticateServerAsync", broker, StringComparison.Ordinal);
+        Assert.Contains("requestSent = true", broker, StringComparison.Ordinal);
+        Assert.Contains("WingetErrorKind.OutcomeUnknown", broker, StringComparison.Ordinal);
+        Assert.Contains("Package state must be verified before retrying", broker, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("PrivilegedPackageRequestDispatcher.DispatchAsync", helper, StringComparison.Ordinal);
+        Assert.Contains("IsElevated()", helper, StringComparison.Ordinal);
+        Assert.Contains("RanAsAdministrator = ranAsAdministrator", helper, StringComparison.Ordinal);
+        Assert.Contains("level=\"asInvoker\"", packageHelperManifest, StringComparison.Ordinal);
+        Assert.DoesNotContain("requireAdministrator", packageHelperManifest, StringComparison.Ordinal);
+
+        int packageServerVerification = helper.IndexOf(
+            "ElevatedPipeServerVerifier.VerifyTrustedAppServer",
+            StringComparison.Ordinal);
+        int packageHmacAuthentication = helper.IndexOf(
+            "PackageAdminPipeProtocol.AuthenticateClientAsync",
+            StringComparison.Ordinal);
+        int sourceServerVerification = sourceHelper.IndexOf(
+            "ElevatedPipeServerVerifier.VerifyTrustedAppServer",
+            StringComparison.Ordinal);
+        int sourceHmacAuthentication = sourceHelper.IndexOf(
+            "SourceAdminPipeProtocol.AuthenticateClientAsync",
+            StringComparison.Ordinal);
+        Assert.True(packageServerVerification >= 0
+            && packageServerVerification < packageHmacAuthentication);
+        Assert.True(sourceServerVerification >= 0
+            && sourceServerVerification < sourceHmacAuthentication);
+        Assert.Contains("GetNamedPipeServerProcessId", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("GetPackageFamilyName", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("GetPackageFullName", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("GetPackagePathByFullName", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("GetCurrentPackageFamilyName", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("PackageFamilyNameFromId", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("ExpectedPackageName = \"PackagePilot.Desktop\"", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("ExpectedPackagePublisher = \"CN=PackagePilot.Dev\"", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("PackagePilot.App.exe", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("\"WindowsApps\"", serverVerifier, StringComparison.Ordinal);
+        Assert.Contains("string.IsNullOrWhiteSpace(serverPackageFamily)", serverVerifier, StringComparison.Ordinal);
+        Assert.DoesNotContain("--parent", helper, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("--parent", sourceHelper, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Contains("NamedPipeServerStreamAcl.Create", aclFactory, StringComparison.Ordinal);
+        Assert.Contains("WindowsIdentity.GetCurrent", aclFactory, StringComparison.Ordinal);
+        Assert.Contains("PipeAccessRights.ReadWrite | PipeAccessRights.Synchronize", aclFactory, StringComparison.Ordinal);
+        Assert.DoesNotContain("PipeAccessRights.FullControl", aclFactory, StringComparison.Ordinal);
+        Assert.DoesNotContain("BuiltinAdministratorsSid", aclFactory, StringComparison.Ordinal);
+        Assert.DoesNotContain("WorldSid", aclFactory, StringComparison.Ordinal);
+        Assert.DoesNotContain("AuthenticatedUserSid", aclFactory, StringComparison.Ordinal);
+        Assert.DoesNotContain("CurrentUserOnly", aclFactory, StringComparison.Ordinal);
+        Assert.DoesNotContain("CurrentUserOnly", broker, StringComparison.Ordinal);
+        Assert.DoesNotContain("CurrentUserOnly", helper, StringComparison.Ordinal);
+        Assert.DoesNotContain("CurrentUserOnly", sourceBroker, StringComparison.Ordinal);
+        Assert.DoesNotContain("CurrentUserOnly", sourceHelper, StringComparison.Ordinal);
+        Assert.Contains("ElevatedPipeAclFactory.CreateServerForCurrentUser", sourceBroker, StringComparison.Ordinal);
+        Assert.Contains("ElevatedPipeAclFactory.CreateClient", sourceHelper, StringComparison.Ordinal);
+
+        Assert.Contains("PackagePilot.PackageAdmin.csproj", solution, StringComparison.Ordinal);
+        Assert.Contains("PackagePilot.PackageAdmin.exe", appProject, StringComparison.Ordinal);
+        Assert.Contains("PackagePilot.PackageAdmin.dll", appProject, StringComparison.Ordinal);
+        Assert.Contains("PackagePilot.PackageAdmin.deps.json", appProject, StringComparison.Ordinal);
+        Assert.Contains("PackagePilot.PackageAdmin.runtimeconfig.json", appProject, StringComparison.Ordinal);
+        Assert.Contains("PackageAgreementSnapshot.Create", wingetClient, StringComparison.Ordinal);
+        Assert.Contains("AcceptedPackageAgreementFingerprint", wingetClient, StringComparison.Ordinal);
+        Assert.Contains("packageAgreementSnapshot.Matches", wingetClient, StringComparison.Ordinal);
     }
 
     private static IEnumerable<XElement> FindExeServers(XElement applicationExtensions) =>

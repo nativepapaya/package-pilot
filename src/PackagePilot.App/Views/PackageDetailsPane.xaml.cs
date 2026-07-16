@@ -17,6 +17,17 @@ public sealed partial class PackageDetailsPane : UserControl
     public static readonly DependencyProperty PackageIdProperty = DependencyProperty.Register(nameof(PackageId), typeof(string), typeof(PackageDetailsPane), EmptyText);
     public static readonly DependencyProperty SourceProperty = DependencyProperty.Register(nameof(Source), typeof(string), typeof(PackageDetailsPane), EmptyText);
     public static readonly DependencyProperty VersionProperty = DependencyProperty.Register(nameof(Version), typeof(string), typeof(PackageDetailsPane), EmptyText);
+    public static readonly DependencyProperty StatusProperty = DependencyProperty.Register(nameof(Status), typeof(string), typeof(PackageDetailsPane), EmptyText);
+    public static readonly DependencyProperty StateGlyphProperty = DependencyProperty.Register(
+        nameof(StateGlyph),
+        typeof(string),
+        typeof(PackageDetailsPane),
+        new PropertyMetadata(string.Empty, OnStateVisualPropertyChanged));
+    public static readonly DependencyProperty IsPositiveStateProperty = DependencyProperty.Register(
+        nameof(IsPositiveState),
+        typeof(bool),
+        typeof(PackageDetailsPane),
+        new PropertyMetadata(false, OnStateVisualPropertyChanged));
     public static readonly DependencyProperty DescriptionProperty = DependencyProperty.Register(nameof(Description), typeof(string), typeof(PackageDetailsPane), EmptyText);
     public static readonly DependencyProperty LicenseProperty = DependencyProperty.Register(nameof(License), typeof(string), typeof(PackageDetailsPane), EmptyText);
     public static readonly DependencyProperty ArchitectureProperty = DependencyProperty.Register(nameof(Architecture), typeof(string), typeof(PackageDetailsPane), EmptyText);
@@ -35,6 +46,7 @@ public sealed partial class PackageDetailsPane : UserControl
         InitializeComponent();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        UpdateStateVisual();
     }
 
     public string PackageName { get => (string)GetValue(PackageNameProperty); set => SetValue(PackageNameProperty, value); }
@@ -42,6 +54,9 @@ public sealed partial class PackageDetailsPane : UserControl
     public string PackageId { get => (string)GetValue(PackageIdProperty); set => SetValue(PackageIdProperty, value); }
     public string Source { get => (string)GetValue(SourceProperty); set => SetValue(SourceProperty, value); }
     public string Version { get => (string)GetValue(VersionProperty); set => SetValue(VersionProperty, value); }
+    public string Status { get => (string)GetValue(StatusProperty); set => SetValue(StatusProperty, value); }
+    public string StateGlyph { get => (string)GetValue(StateGlyphProperty); set => SetValue(StateGlyphProperty, value); }
+    public bool IsPositiveState { get => (bool)GetValue(IsPositiveStateProperty); set => SetValue(IsPositiveStateProperty, value); }
     public string Description { get => (string)GetValue(DescriptionProperty); set => SetValue(DescriptionProperty, value); }
     public string License { get => (string)GetValue(LicenseProperty); set => SetValue(LicenseProperty, value); }
     public string Architecture { get => (string)GetValue(ArchitectureProperty); set => SetValue(ArchitectureProperty, value); }
@@ -72,6 +87,9 @@ public sealed partial class PackageDetailsPane : UserControl
         PackageId = package.PackageId;
         Source = package.Source;
         Version = package.VersionLabel;
+        Status = package.Status;
+        StateGlyph = package.StateGlyph;
+        IsPositiveState = package.IsPositiveState;
         Description = package.Description;
         License = package.License;
         Architecture = package.Architecture;
@@ -118,6 +136,26 @@ public sealed partial class PackageDetailsPane : UserControl
         {
             PrimaryActionLabel = _package.ActionLabel;
         }
+        else if (e.PropertyName == nameof(PackageListItem.VersionLabel)
+            && _package is not null)
+        {
+            Version = _package.VersionLabel;
+        }
+        else if (e.PropertyName == nameof(PackageListItem.Status)
+            && _package is not null)
+        {
+            Status = _package.Status;
+        }
+        else if (e.PropertyName == nameof(PackageListItem.StateGlyph)
+            && _package is not null)
+        {
+            StateGlyph = _package.StateGlyph;
+        }
+        else if (e.PropertyName == nameof(PackageListItem.IsPositiveState)
+            && _package is not null)
+        {
+            IsPositiveState = _package.IsPositiveState;
+        }
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e) => AttachPackage();
@@ -155,6 +193,32 @@ public sealed partial class PackageDetailsPane : UserControl
             or InstalledAppActionKind.RemoveMsix;
         IsPrimaryActionEnabled = _package.IsActionEnabled
             && (_mutationActionsAvailable || !requiresMutationRecovery);
+    }
+
+    private static void OnStateVisualPropertyChanged(
+        DependencyObject sender,
+        DependencyPropertyChangedEventArgs args)
+    {
+        if (sender is PackageDetailsPane pane)
+        {
+            pane.UpdateStateVisual();
+        }
+    }
+
+    private void UpdateStateVisual()
+    {
+        if (DetailsStateBadge is null)
+        {
+            return;
+        }
+
+        DetailsStateBadge.Visibility = string.IsNullOrWhiteSpace(StateGlyph)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        _ = VisualStateManager.GoToState(
+            this,
+            IsPositiveState ? "PositiveState" : "NeutralState",
+            useTransitions: false);
     }
 
     private static void SetLink(HyperlinkButton button, Uri? uri)

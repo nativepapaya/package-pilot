@@ -43,12 +43,24 @@
                             x:Load="{x:Bind CanViewDiagnostic}"
                             AutomationProperties.Name="{x:Bind DiagnosticAutomationName}"
                             Click="OnViewDiagnosticClick"
-                            Style="{StaticResource PackagePilotIconButtonStyle}"
+                            MinWidth="40"
+                            Height="40"
+                            Padding="10,0"
+                            CornerRadius="8"
                             Tag="{x:Bind OperationId}"
                             ToolTipService.ToolTip="{x:Bind DiagnosticToolTip}">
-                            <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE8A5;" />
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE8A5;" />
+                                <TextBlock
+                                    x:Name="LiveDiagnosticLabel"
+                                    x:Load="{x:Bind IsLiveDiagnostic}"
+                                    Style="{StaticResource PackagePilotCaptionStyle}"
+                                    Text="Live log" />
+                            </StackPanel>
                         </Button>
                         <Button
+                            x:Name="CancelOperationButton"
+                            x:Load="{x:Bind ShowCancel}"
                             MinWidth="76"
                             AutomationProperties.Name="Cancel package operation"
                             Click="OnCancelOperationClick"
@@ -58,6 +70,8 @@
                     </StackPanel>
                     <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Spacing="5">
                         <ProgressBar
+                            x:Name="OperationProgressBar"
+                            x:Load="{x:Bind ShowProgress}"
                             AutomationProperties.Name="Operation progress"
                             IsIndeterminate="{x:Bind IsIndeterminate}"
                             Maximum="100"
