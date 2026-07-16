@@ -58,6 +58,7 @@ public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationCli
             var result = await _packageManager.RemovePackageAsync(
                 target.PackageFullName,
                 RemovalOptions.None);
+            var diagnostic = CreateDeploymentDiagnostic(result.ActivityId);
             var extended = result.ExtendedErrorCode;
             if (extended is not null && extended.HResult < 0)
             {
@@ -66,7 +67,8 @@ public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationCli
                     $"0x{extended.HResult:X8}",
                     string.IsNullOrWhiteSpace(result.ErrorText) ? extended.Message : result.ErrorText,
                     extended.HResult,
-                    startedAt);
+                    startedAt,
+                    diagnostic);
             }
 
             return new OperationResult
@@ -77,7 +79,8 @@ public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationCli
                 Kind = PackageOperationKind.Uninstall,
                 State = PackageOperationState.Completed,
                 StartedAt = startedAt,
-                CompletedAt = DateTimeOffset.UtcNow
+                CompletedAt = DateTimeOffset.UtcNow,
+                Diagnostic = diagnostic
             };
         }
         catch (Exception ex)
@@ -114,7 +117,8 @@ public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationCli
         string code,
         string message,
         int? hResult = null,
-        DateTimeOffset? startedAt = null) => new()
+        DateTimeOffset? startedAt = null,
+        OperationDiagnosticReference? diagnostic = null) => new()
         {
             OperationId = operation.Id,
             Package = operation.Package,
@@ -129,6 +133,16 @@ public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationCli
                 Code = code,
                 Message = string.IsNullOrWhiteSpace(message) ? "Windows could not remove this app." : message,
                 HResult = hResult
-            }
+            },
+            Diagnostic = diagnostic
         };
+
+    private static OperationDiagnosticReference? CreateDeploymentDiagnostic(Guid activityId) =>
+        activityId == Guid.Empty
+            ? null
+            : new OperationDiagnosticReference
+            {
+                Provider = OperationDiagnosticProvider.WindowsDeployment,
+                ReferenceId = activityId
+            };
 }

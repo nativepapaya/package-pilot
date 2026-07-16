@@ -1,8 +1,11 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Navigation;
 using PackagePilot.App.ViewModels;
@@ -31,17 +34,21 @@ public sealed partial class MainPage : Page
     private readonly IPrivilegedSourceManagementBroker? _sourceManagementBroker;
     private readonly IAppLifetimeController? _appLifetimeController;
     private readonly IAppLifetimeActivityGate _lifetimeActivityGate;
+    private readonly IOperationDiagnosticsService? _operationDiagnosticsService;
+    private bool _operationDiagnosticDialogOpen;
 
     public MainPage(
         ShellViewModel viewModel,
         IPrivilegedSourceManagementBroker? sourceManagementBroker = null,
         IAppLifetimeController? appLifetimeController = null,
-        IAppLifetimeActivityGate? lifetimeActivityGate = null)
+        IAppLifetimeActivityGate? lifetimeActivityGate = null,
+        IOperationDiagnosticsService? operationDiagnosticsService = null)
     {
         ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _sourceManagementBroker = sourceManagementBroker;
         _appLifetimeController = appLifetimeController;
         _lifetimeActivityGate = lifetimeActivityGate ?? new AppLifetimeActivityGate();
+        _operationDiagnosticsService = operationDiagnosticsService;
         InitializeComponent();
 
         ContentFrame.CacheSize = 8;
@@ -234,6 +241,7 @@ public sealed partial class MainPage : Page
                     page.CancelOperationRequested += OnCancelOperationRequested;
                     page.CancelQueuedRequested += OnCancelQueuedRequested;
                     page.ClearCompletedRequested += OnClearCompletedRequested;
+                    page.ViewDiagnosticRequested += OnViewDiagnosticRequested;
                 }
                 break;
             case SourcesPage page:
@@ -1026,7 +1034,170 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void OnClearCompletedRequested(object? sender, EventArgs e) => ViewModel.ClearHistory();
+    private async void OnClearCompletedRequested(object? sender, EventArgs e)
+    {
+        var diagnostics = ViewModel.OperationHistory
+            .Select(result => result.EffectiveDiagnostic)
+            .OfType<OperationDiagnosticReference>()
+            .ToArray();
+        if (!ViewModel.ClearHistory()
+            || diagnostics.Length == 0
+            || _operationDiagnosticsService is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _operationDiagnosticsService.DeleteOwnedLogsAsync(diagnostics);
+        }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            ViewModel.SetStatusMessage(
+                "Activity was cleared, but one or more app-owned installer logs could not be removed.");
+        }
+    }
+
+    private async void OnViewDiagnosticRequested(
+        object? sender,
+        OperationDiagnosticRequestedEventArgs e)
+    {
+        if (_operationDiagnosticDialogOpen || _operationDiagnosticsService is null)
+        {
+            return;
+        }
+
+        var operation = ViewModel.OperationHistory.FirstOrDefault(result =>
+            result.OperationId == e.OperationId && result.EffectiveDiagnostic is not null);
+        if (operation is null)
+        {
+            ShowPageStatus(
+                "Log unavailable",
+                "This activity is no longer retained.",
+                InfoBarSeverity.Warning);
+            return;
+        }
+
+        _operationDiagnosticDialogOpen = true;
+        using var cancellation = new CancellationTokenSource();
+        var progress = new ProgressRing
+        {
+            IsActive = true,
+            Width = 32,
+            Height = 32,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        var loadingText = new TextBlock
+        {
+            Text = "Loading operation diagnostics...",
+            TextAlignment = TextAlignment.Center
+        };
+        var loadingPanel = new StackPanel
+        {
+            Spacing = 12,
+            Padding = new Thickness(16)
+        };
+        loadingPanel.Children.Add(progress);
+        loadingPanel.Children.Add(loadingText);
+
+        var notice = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            Visibility = Visibility.Collapsed
+        };
+        AutomationProperties.SetLiveSetting(notice, AutomationLiveSetting.Polite);
+        var rootSize = XamlRoot?.Size;
+        var maximumLogWidth = rootSize is { } size && size.Width > 0
+            ? Math.Max(0, Math.Min(760, size.Width - 64))
+            : 760;
+        var maximumLogHeight = rootSize is { } heightSize && heightSize.Height > 0
+            ? Math.Max(0, Math.Min(480, heightSize.Height - 180))
+            : 480;
+        var logText = new TextBox
+        {
+            IsReadOnly = true,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.NoWrap,
+            FontFamily = new FontFamily("Consolas"),
+            MaxWidth = maximumLogWidth,
+            MaxHeight = maximumLogHeight,
+            Visibility = Visibility.Collapsed
+        };
+        AutomationProperties.SetName(logText, "Operation diagnostic details");
+        ScrollViewer.SetHorizontalScrollBarVisibility(logText, ScrollBarVisibility.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(logText, ScrollBarVisibility.Auto);
+
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(loadingPanel);
+        content.Children.Add(notice);
+        content.Children.Add(logText);
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "Operation diagnostics",
+            Content = content,
+            CloseButtonText = "Close",
+            DefaultButton = ContentDialogButton.Close
+        };
+
+        async void LoadDiagnostic(object? _, ContentDialogOpenedEventArgs __)
+        {
+            try
+            {
+                var document = await _operationDiagnosticsService.ReadAsync(
+                    operation,
+                    cancellation.Token);
+                if (cancellation.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                dialog.Title = document.Title;
+                notice.Text = document.IsTruncated
+                    ? $"{document.Notice} Earlier content was omitted to keep the viewer responsive."
+                    : document.Notice;
+                notice.Visibility = Visibility.Visible;
+                logText.Text = document.Text;
+                logText.Header = document.ProviderLabel;
+                logText.Visibility = Visibility.Visible;
+                loadingPanel.Visibility = Visibility.Collapsed;
+                _ = logText.Focus(FocusState.Programmatic);
+            }
+            catch (OperationCanceledException)
+            {
+                // Closing the dialog cancels the bounded read.
+            }
+            catch (Exception exception) when (IsRecoverable(exception))
+            {
+                loadingPanel.Visibility = Visibility.Collapsed;
+                notice.Text = $"The operation log could not be read (0x{exception.HResult:X8}).";
+                notice.Visibility = Visibility.Visible;
+            }
+        }
+
+        void CancelDiagnostic(object? _, ContentDialogClosedEventArgs __) => cancellation.Cancel();
+        dialog.Opened += LoadDiagnostic;
+        dialog.Closed += CancelDiagnostic;
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            ShowPageStatus(
+                "Log unavailable",
+                $"The operation log viewer could not be opened (0x{exception.HResult:X8}).",
+                InfoBarSeverity.Warning);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            dialog.Opened -= LoadDiagnostic;
+            dialog.Closed -= CancelDiagnostic;
+            _operationDiagnosticDialogOpen = false;
+        }
+    }
 
     private void OnSettingChanged(object? sender, SettingChangedEventArgs e)
     {
@@ -1321,7 +1492,7 @@ public sealed partial class MainPage : Page
                 operations.Add(ToViewItem(current));
             }
             operations.AddRange(ViewModel.PendingOperations.Select(ToViewItem));
-            operations.AddRange(ViewModel.OperationHistory.Select(ToViewItem));
+            operations.AddRange(ViewModel.OperationHistory.Select(OperationRowProjector.FromResult));
             _activityPage.SetOperations(operations);
         }
 
@@ -1489,21 +1660,6 @@ public sealed partial class MainPage : Page
             or PackageOperationState.Uninstalling,
         IsIndeterminate = entry.Progress.Percent is null && entry.Progress.State is not PackageOperationState.Queued,
         CanCancel = entry.Progress.CanCancel
-    };
-
-    private static OperationListItem ToViewItem(OperationResult result) => new()
-    {
-        OperationId = result.OperationId,
-        PackageName = result.EffectiveTarget?.Id ?? result.Package.Id,
-        PackageId = result.EffectiveTarget?.Id ?? result.Package.Id,
-        Action = result.Kind.ToString(),
-        Status = result.State.ToString(),
-        Detail = result.Error?.Message ?? (result.RebootRequired ? "Restart Windows to complete this operation." : "Completed"),
-        Timestamp = result.CompletedAt.LocalDateTime.ToString("g"),
-        Progress = result.IsSuccess ? 100 : 0,
-        IsActive = false,
-        IsIndeterminate = false,
-        CanCancel = false
     };
 
     private static void ReplaceAll<T>(ICollection<T> target, IEnumerable<T> values)
@@ -1713,6 +1869,11 @@ public sealed partial class MainPage : Page
         NavigateTo("discover");
         _discoverPage?.FocusSearch();
     }
+
+    private static bool IsRecoverable(Exception exception) =>
+        exception is not (OutOfMemoryException
+            or StackOverflowException
+            or AccessViolationException);
 
     private sealed record AgreementAcceptance(
         bool Accepted,

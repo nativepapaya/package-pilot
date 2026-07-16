@@ -52,7 +52,7 @@ public sealed class JsonOperationHistoryStore : IOperationHistoryStore
 
             return (results ?? [])
                 .Take(_historyLimit)
-                .Select(MigrateLegacyTarget)
+                .Select(MigrateLegacyResult)
                 .ToArray();
         }
         catch (JsonException exception)
@@ -86,7 +86,7 @@ public sealed class JsonOperationHistoryStore : IOperationHistoryStore
             {
                 await JsonSerializer.SerializeAsync(
                     stream,
-                    results.Take(_historyLimit).Select(MigrateLegacyTarget).ToArray(),
+                    results.Take(_historyLimit).Select(MigrateLegacyResult).ToArray(),
                     _options,
                     cancellationToken).ConfigureAwait(false);
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -103,8 +103,36 @@ public sealed class JsonOperationHistoryStore : IOperationHistoryStore
         }
     }
 
-    private static OperationResult MigrateLegacyTarget(OperationResult result) =>
-        result.Target is null && !result.Package.IsEmpty
+    private static OperationResult MigrateLegacyResult(OperationResult result)
+    {
+        var migrated = result.Target is null && !result.Package.IsEmpty
             ? result with { Target = new WingetTarget { Package = result.Package } }
             : result;
+
+        var diagnostic = migrated.Diagnostic;
+        if (diagnostic is not null
+            && (diagnostic.ReferenceId == Guid.Empty
+                || !Enum.IsDefined(diagnostic.Provider)
+                || (diagnostic.Provider == OperationDiagnosticProvider.Winget
+                    && (diagnostic.ReferenceId != migrated.OperationId
+                        || migrated.EffectiveTarget is not WingetTarget))
+                || (diagnostic.Provider == OperationDiagnosticProvider.WindowsDeployment
+                    && migrated.EffectiveTarget is not MsixTarget)))
+        {
+            diagnostic = null;
+        }
+
+        if (diagnostic is null
+            && migrated.EffectiveTarget is WingetTarget
+            && migrated.OperationId != Guid.Empty)
+        {
+            diagnostic = new OperationDiagnosticReference
+            {
+                Provider = OperationDiagnosticProvider.Winget,
+                ReferenceId = migrated.OperationId
+            };
+        }
+
+        return migrated with { Diagnostic = diagnostic };
+    }
 }

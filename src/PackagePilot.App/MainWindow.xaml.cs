@@ -21,7 +21,8 @@ public sealed partial class MainWindow : Window
         ShellViewModel viewModel,
         IPrivilegedSourceManagementBroker? sourceManagementBroker = null,
         IAppLifetimeController? appLifetimeController = null,
-        IAppLifetimeActivityGate? lifetimeActivityGate = null)
+        IAppLifetimeActivityGate? lifetimeActivityGate = null,
+        IOperationDiagnosticsService? operationDiagnosticsService = null)
     {
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         InitializeComponent();
@@ -35,7 +36,8 @@ public sealed partial class MainWindow : Window
             _viewModel,
             sourceManagementBroker,
             appLifetimeController,
-            lifetimeActivityGate);
+            lifetimeActivityGate,
+            operationDiagnosticsService);
         RootFrame.Content = MainPage;
 
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;

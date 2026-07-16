@@ -980,15 +980,16 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         return operationId;
     }
 
-    public void ClearHistory()
+    public bool ClearHistory()
     {
         if (!CanQueuePackageMutations)
         {
             StatusMessage = "Activity history was kept because package-operation recovery state is unavailable.";
-            return;
+            return false;
         }
 
         _operationQueue.ClearHistory();
+        return true;
     }
 
     public void SetStatusMessage(string message) => StatusMessage = message;

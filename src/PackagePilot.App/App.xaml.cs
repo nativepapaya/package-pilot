@@ -207,7 +207,12 @@ public partial class App : Application, IAppLifetimeController
             return _window;
         }
 
-        var wingetClient = new WingetClient();
+        var operationDiagnostics = new WindowsOperationDiagnosticsService(Path.Combine(
+            ApplicationData.Current.LocalFolder.Path,
+            "operation-diagnostics",
+            "installer-logs"),
+            ApplicationData.Current.LocalFolder.Path);
+        var wingetClient = new WingetClient(operationDiagnostics);
         var updateCoordinator = new UpdateCoordinator(
             wingetClient,
             new JsonUpdateSnapshotStore(Path.Combine(
@@ -259,7 +264,8 @@ public partial class App : Application, IAppLifetimeController
             _shellViewModel,
             new ElevatedSourceManagementBroker(),
             this,
-            _lifetimeActivityGate);
+            _lifetimeActivityGate,
+            operationDiagnostics);
         _window.ClosingRequested += OnWindowClosingRequested;
         _window.ActivityChanged += OnWindowActivityChanged;
         _window.Closed += OnWindowClosed;

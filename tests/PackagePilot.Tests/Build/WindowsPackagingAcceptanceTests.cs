@@ -270,7 +270,7 @@ public sealed class WindowsPackagingAcceptanceTests
             "private MainWindow EnsureWindow()",
             StringComparison.Ordinal);
         int wingetConstructionIndex = appText.IndexOf(
-            "new WingetClient()",
+            "new WingetClient(",
             StringComparison.Ordinal);
         Assert.True(startupActivationIndex >= 0, "OnLaunched must recognize startup-task activation.");
         Assert.True(
@@ -279,6 +279,13 @@ public sealed class WindowsPackagingAcceptanceTests
         Assert.True(
             wingetConstructionIndex > foregroundGraphIndex,
             "WinGet must only be constructed inside the lazy foreground graph.");
+
+        int diagnosticsConstructionIndex = appText.IndexOf(
+            "new WindowsOperationDiagnosticsService(",
+            StringComparison.Ordinal);
+        Assert.True(
+            diagnosticsConstructionIndex > foregroundGraphIndex,
+            "Operation diagnostics must only be constructed inside the lazy foreground graph.");
 
         int activationMethodIndex = appText.IndexOf(
             "private async Task ActivateRequestAsync",
@@ -298,6 +305,86 @@ public sealed class WindowsPackagingAcceptanceTests
 
         Assert.Contains("RedirectTimeoutMilliseconds = 5_000", programText, StringComparison.Ordinal);
         Assert.Contains("MaximumPendingActivations", programText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ActivityDiagnosticsAreExplicitLazyAndAccessible()
+    {
+        string repositoryRoot = FindRepositoryRoot();
+        string appDirectory = Path.Combine(repositoryRoot, "src", "PackagePilot.App");
+        string activityXaml = File.ReadAllText(Path.Combine(
+            appDirectory,
+            "Views",
+            "ActivityPage.xaml"));
+        string activityCode = File.ReadAllText(Path.Combine(
+            appDirectory,
+            "Views",
+            "ActivityPage.xaml.cs"));
+        string mainPage = File.ReadAllText(Path.Combine(appDirectory, "MainPage.xaml.cs"));
+
+        Assert.Contains(
+            "x:Load=\"{x:Bind CanViewDiagnostic}\"",
+            activityXaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "AutomationProperties.Name=\"{x:Bind DiagnosticAutomationName}\"",
+            activityXaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ToolTipService.ToolTip=\"{x:Bind DiagnosticToolTip}\"",
+            activityXaml,
+            StringComparison.Ordinal);
+        Assert.Contains("OnViewDiagnosticClick", activityCode, StringComparison.Ordinal);
+
+        int clickHandler = mainPage.IndexOf(
+            "private async void OnViewDiagnosticRequested",
+            StringComparison.Ordinal);
+        int diagnosticRead = mainPage.IndexOf(
+            "_operationDiagnosticsService.ReadAsync(",
+            clickHandler,
+            StringComparison.Ordinal);
+        Assert.True(clickHandler >= 0, "MainPage must handle an explicit Activity diagnostic request.");
+        Assert.True(
+            diagnosticRead > clickHandler,
+            "Provider diagnostics must only be read from the explicit Activity click handler.");
+        Assert.Contains(
+            "if (!ViewModel.ClearHistory()",
+            mainPage,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "DeleteOwnedLogsAsync(diagnostics)",
+            mainPage,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MutationDiagnosticsUseSupportedExactProviderReferences()
+    {
+        string repositoryRoot = FindRepositoryRoot();
+        string servicesDirectory = Path.Combine(
+            repositoryRoot,
+            "src",
+            "PackagePilot.Windows",
+            "Services");
+        string wingetClient = File.ReadAllText(Path.Combine(servicesDirectory, "WingetClient.cs"));
+        string msixClient = File.ReadAllText(Path.Combine(
+            servicesDirectory,
+            "WindowsMsixPackageOperationClient.cs"));
+        string diagnostics = File.ReadAllText(Path.Combine(
+            servicesDirectory,
+            "WindowsOperationDiagnosticsService.cs"));
+
+        Assert.Contains("CorrelationData = CreateCorrelationData(operation.Id)", wingetClient, StringComparison.Ordinal);
+        Assert.Contains("options.LogOutputPath = logPath", wingetClient, StringComparison.Ordinal);
+        Assert.Contains("IsMicrosoftStoreSource(sourceId)", wingetClient, StringComparison.Ordinal);
+        Assert.Contains("result.ActivityId", msixClient, StringComparison.Ordinal);
+        Assert.Contains("OperationDiagnosticProvider.WindowsDeployment", msixClient, StringComparison.Ordinal);
+        Assert.Contains("WinGetCOM-*.log", File.ReadAllText(Path.Combine(
+            servicesDirectory,
+            "OperationDiagnosticFiles.cs")), StringComparison.Ordinal);
+        Assert.DoesNotContain("Process.Start", diagnostics, StringComparison.Ordinal);
+        Assert.DoesNotContain("powershell", diagnostics, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("winget.exe", diagnostics, StringComparison.OrdinalIgnoreCase);
     }
 
     private static IEnumerable<XElement> FindExeServers(XElement applicationExtensions) =>

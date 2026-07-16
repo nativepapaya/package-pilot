@@ -16,6 +16,7 @@ public sealed partial class ActivityPage : Page
 
     public ObservableCollection<OperationListItem> Operations { get; } = [];
     public event EventHandler<OperationCancelRequestedEventArgs>? CancelOperationRequested;
+    public event EventHandler<OperationDiagnosticRequestedEventArgs>? ViewDiagnosticRequested;
     public event EventHandler? CancelQueuedRequested;
     public event EventHandler? ClearCompletedRequested;
 
@@ -63,6 +64,26 @@ public sealed partial class ActivityPage : Page
         }
     }
 
+    private void OnViewDiagnosticClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: Guid operationId })
+        {
+            var operation = Operations.FirstOrDefault(item =>
+                item.OperationId == operationId && item.CanViewDiagnostic);
+            if (operation is not null)
+            {
+                ViewDiagnosticRequested?.Invoke(
+                    this,
+                    new OperationDiagnosticRequestedEventArgs(operation.OperationId));
+            }
+        }
+    }
+
     private void OnCancelQueuedClick(object sender, RoutedEventArgs e) => CancelQueuedRequested?.Invoke(this, EventArgs.Empty);
     private void OnClearHistoryClick(object sender, RoutedEventArgs e) => ClearCompletedRequested?.Invoke(this, EventArgs.Empty);
+}
+
+public sealed class OperationDiagnosticRequestedEventArgs(Guid operationId) : EventArgs
+{
+    public Guid OperationId { get; } = operationId;
 }

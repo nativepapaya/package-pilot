@@ -91,12 +91,37 @@ public sealed record OperationResult
     public DateTimeOffset CompletedAt { get; init; }
     public WingetError? Error { get; init; }
     public bool RebootRequired { get; init; }
+    public OperationDiagnosticReference? Diagnostic { get; init; }
 
     public bool IsSuccess => State is PackageOperationState.Completed or PackageOperationState.RebootRequired;
 
     [JsonIgnore]
     public OperationTarget? EffectiveTarget => Target ??
         (Package.IsEmpty ? null : new WingetTarget { Package = Package });
+
+    [JsonIgnore]
+    public OperationDiagnosticReference? EffectiveDiagnostic =>
+        IsValidDiagnostic(Diagnostic)
+            ? Diagnostic
+            : EffectiveTarget is WingetTarget && OperationId != Guid.Empty
+                ? new OperationDiagnosticReference
+                {
+                    Provider = OperationDiagnosticProvider.Winget,
+                    ReferenceId = OperationId
+                }
+                : null;
+
+    private bool IsValidDiagnostic(OperationDiagnosticReference? diagnostic) =>
+        diagnostic is not null
+        && diagnostic.ReferenceId != Guid.Empty
+        && Enum.IsDefined(diagnostic.Provider)
+        && (diagnostic.Provider switch
+        {
+            OperationDiagnosticProvider.Winget =>
+                EffectiveTarget is WingetTarget && diagnostic.ReferenceId == OperationId,
+            OperationDiagnosticProvider.WindowsDeployment => EffectiveTarget is MsixTarget,
+            _ => false
+        });
 }
 
 public sealed record WingetError

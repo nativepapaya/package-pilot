@@ -24,8 +24,14 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
     private readonly object _capabilitiesLock = new();
     private readonly object _managerLock = new();
     private readonly WindowsUpdateDiscoveryClient _updateDiscoveryClient = new();
+    private readonly WindowsOperationDiagnosticsService? _operationDiagnostics;
     private WingetCapabilities? _supportedCapabilities;
     private PackageManager? _manager;
+
+    public WingetClient(WindowsOperationDiagnosticsService? operationDiagnostics = null)
+    {
+        _operationDiagnostics = operationDiagnostics;
+    }
 
     public Task<WingetCapabilities> GetCapabilitiesAsync(
         CancellationToken cancellationToken = default)
@@ -729,6 +735,7 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
     {
         ArgumentNullException.ThrowIfNull(operation);
         var startedAt = DateTimeOffset.UtcNow;
+        var diagnostic = CreateWingetDiagnostic(operation.Id);
         Report(progress, operation.Id, PackageOperationState.Resolving, null,
             "Finding the installed package…");
 
@@ -747,6 +754,7 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 PackageUninstallMode = PackageUninstallMode.Default,
                 PackageUninstallScope = ToUninstallScope(operation.Preferences.Scope)
             };
+            TryConfigureInstallerLog(options, operation.Id, operation.Package.SourceId);
 
             var asyncOperation = GetManager().UninstallPackageAsync(resolved.Package, options);
             var canCancel = 1;
@@ -768,19 +776,23 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 cancellationToken,
                 () => Volatile.Read(ref canCancel) == 1);
             var result = await asyncOperation;
-            return ToUninstallResult(operation, startedAt, result);
+            return ToUninstallResult(operation, startedAt, result, diagnostic);
         }
         catch (OperationCanceledException exception)
         {
-            return CancelledResult(operation, startedAt, exception);
+            return CancelledResult(operation, startedAt, exception, diagnostic);
         }
         catch (WingetClientException exception)
         {
-            return FailedResult(operation, startedAt, exception.Error);
+            return FailedResult(operation, startedAt, exception.Error, diagnostic);
         }
         catch (Exception exception) when (!IsFatal(exception))
         {
-            return FailedResult(operation, startedAt, FromException(exception));
+            return FailedResult(operation, startedAt, FromException(exception), diagnostic);
+        }
+        finally
+        {
+            await FinalizeInstallerLogAsync(operation.Id).ConfigureAwait(false);
         }
     }
 
@@ -792,6 +804,7 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
     {
         ArgumentNullException.ThrowIfNull(operation);
         var startedAt = DateTimeOffset.UtcNow;
+        var diagnostic = CreateWingetDiagnostic(operation.Id);
         Report(progress, operation.Id, PackageOperationState.Resolving, null,
             isUpgrade ? "Finding the update…" : "Finding the package…");
 
@@ -823,6 +836,10 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 });
             }
 
+            TryConfigureInstallerLog(
+                installOptions,
+                operation.Id,
+                operation.Package.SourceId);
             var manager = GetManager();
             var asyncOperation = isUpgrade
                 ? manager.UpgradePackageAsync(resolved.Package, installOptions)
@@ -855,19 +872,23 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 cancellationToken,
                 () => Volatile.Read(ref canCancel) == 1);
             var result = await asyncOperation;
-            return ToInstallResult(operation, startedAt, result);
+            return ToInstallResult(operation, startedAt, result, diagnostic);
         }
         catch (OperationCanceledException exception)
         {
-            return CancelledResult(operation, startedAt, exception);
+            return CancelledResult(operation, startedAt, exception, diagnostic);
         }
         catch (WingetClientException exception)
         {
-            return FailedResult(operation, startedAt, exception.Error);
+            return FailedResult(operation, startedAt, exception.Error, diagnostic);
         }
         catch (Exception exception) when (!IsFatal(exception))
         {
-            return FailedResult(operation, startedAt, FromException(exception));
+            return FailedResult(operation, startedAt, FromException(exception), diagnostic);
+        }
+        finally
+        {
+            await FinalizeInstallerLogAsync(operation.Id).ConfigureAwait(false);
         }
     }
 
@@ -1161,6 +1182,67 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         return options;
     }
 
+    private void TryConfigureInstallerLog(
+        InstallOptions options,
+        Guid operationId,
+        string sourceId)
+    {
+        if (IsMicrosoftStoreSource(sourceId)
+            || _operationDiagnostics?.TryPrepareWingetInstallerLog(operationId, out var logPath) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            options.LogOutputPath = logPath;
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            // Optional diagnostics must never prevent or alter a package operation.
+        }
+    }
+
+    private void TryConfigureInstallerLog(
+        UninstallOptions options,
+        Guid operationId,
+        string sourceId)
+    {
+        if (IsMicrosoftStoreSource(sourceId)
+            || _operationDiagnostics?.TryPrepareWingetInstallerLog(operationId, out var logPath) != true)
+        {
+            return;
+        }
+
+        try
+        {
+            options.LogOutputPath = logPath;
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            // Optional diagnostics must never prevent or alter a package operation.
+        }
+    }
+
+    private async Task FinalizeInstallerLogAsync(Guid operationId)
+    {
+        if (_operationDiagnostics is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _operationDiagnostics
+                .FinalizeWingetInstallerLogAsync(operationId)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (!IsFatal(exception))
+        {
+            // Optional diagnostic retention must never alter the package result.
+        }
+    }
+
     private static bool RequiresElevation(CatalogPackage package, InstallOptions options)
     {
         var installer = TryGetInstaller(package.DefaultInstallVersion, options);
@@ -1339,33 +1421,36 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
     private static OperationResult ToInstallResult(
         PackageOperation operation,
         DateTimeOffset startedAt,
-        InstallResult result)
+        InstallResult result,
+        OperationDiagnosticReference diagnostic)
     {
         if (result.Status == InstallResultStatus.Ok)
         {
-            return SuccessfulResult(operation, startedAt, result.RebootRequired);
+            return SuccessfulResult(operation, startedAt, result.RebootRequired, diagnostic);
         }
 
-        return FailedResult(operation, startedAt, MapInstallError(result));
+        return FailedResult(operation, startedAt, MapInstallError(result), diagnostic);
     }
 
     private static OperationResult ToUninstallResult(
         PackageOperation operation,
         DateTimeOffset startedAt,
-        UninstallResult result)
+        UninstallResult result,
+        OperationDiagnosticReference diagnostic)
     {
         if (result.Status == UninstallResultStatus.Ok)
         {
-            return SuccessfulResult(operation, startedAt, result.RebootRequired);
+            return SuccessfulResult(operation, startedAt, result.RebootRequired, diagnostic);
         }
 
-        return FailedResult(operation, startedAt, MapUninstallError(result));
+        return FailedResult(operation, startedAt, MapUninstallError(result), diagnostic);
     }
 
     private static OperationResult SuccessfulResult(
         PackageOperation operation,
         DateTimeOffset startedAt,
-        bool rebootRequired) => new()
+        bool rebootRequired,
+        OperationDiagnosticReference diagnostic) => new()
     {
         OperationId = operation.Id,
         Package = operation.Package,
@@ -1375,13 +1460,15 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
             : PackageOperationState.Completed,
         StartedAt = startedAt,
         CompletedAt = DateTimeOffset.UtcNow,
-        RebootRequired = rebootRequired
+        RebootRequired = rebootRequired,
+        Diagnostic = diagnostic
     };
 
     private static OperationResult FailedResult(
         PackageOperation operation,
         DateTimeOffset startedAt,
-        WingetError error) => new()
+        WingetError error,
+        OperationDiagnosticReference diagnostic) => new()
     {
         OperationId = operation.Id,
         Package = operation.Package,
@@ -1391,19 +1478,21 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
             : PackageOperationState.Failed,
         StartedAt = startedAt,
         CompletedAt = DateTimeOffset.UtcNow,
-        Error = error
+        Error = error,
+        Diagnostic = diagnostic
     };
 
     private static OperationResult CancelledResult(
         PackageOperation operation,
         DateTimeOffset startedAt,
-        Exception exception) => FailedResult(operation, startedAt, new WingetError
+        Exception exception,
+        OperationDiagnosticReference diagnostic) => FailedResult(operation, startedAt, new WingetError
     {
         Kind = WingetErrorKind.Cancelled,
         Code = "Cancelled",
         Message = "The operation was cancelled before the installer took control.",
         HResult = exception.HResult
-    });
+    }, diagnostic);
 
     private static WingetError MapInstallError(InstallResult result)
     {
@@ -2370,6 +2459,16 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
 
     private static string CreateCorrelationData(Guid operationId) =>
         $"{{\"operationId\":\"{operationId:D}\"}}";
+
+    private static OperationDiagnosticReference CreateWingetDiagnostic(Guid operationId) => new()
+    {
+        Provider = OperationDiagnosticProvider.Winget,
+        ReferenceId = operationId
+    };
+
+    private static bool IsMicrosoftStoreSource(string sourceId) =>
+        string.Equals(sourceId, "msstore", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(sourceId, "StoreEdgeFD", StringComparison.OrdinalIgnoreCase);
 
     private static string FirstNonEmpty(params string?[] values) =>
         values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim()

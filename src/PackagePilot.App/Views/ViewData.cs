@@ -176,6 +176,10 @@ public sealed class OperationListItem
     public bool IsActive { get; set; }
     public bool IsIndeterminate { get; set; }
     public bool CanCancel { get; set; }
+    public bool CanViewDiagnostic { get; set; }
+    public string DiagnosticProviderLabel { get; set; } = string.Empty;
+    public string DiagnosticAutomationName { get; set; } = string.Empty;
+    public string DiagnosticToolTip { get; set; } = string.Empty;
 }
 
 public sealed class SourceHealthItem
