@@ -228,6 +228,115 @@ public sealed class OperationQueue : IOperationQueue
         return true;
     }
 
+    public Task<bool> TryMarkUpgradeNoChangeDetectedAsync(Guid operationId, PackageKey package)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        if (operationId == Guid.Empty || package.IsEmpty)
+        {
+            return Task.FromResult(false);
+        }
+
+        // Keep the history rewrite and its persistence attempt in the same serialized tail.
+        // A later ClearHistory/save can run only after this transaction has committed or rolled
+        // back, so the caller never removes its recovery marker based on an in-memory-only row.
+        lock (_persistenceScheduleGate)
+        {
+            OperationResult replacement;
+            OperationResult[] originalHistory;
+            OperationResult[] mutatedHistory;
+            lock (_gate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (_historyStore is null)
+                {
+                    return Task.FromResult(false);
+                }
+
+                var index = _history.FindIndex(result =>
+                    result.OperationId == operationId
+                    && result.Kind == PackageOperationKind.Upgrade
+                    && result.State == PackageOperationState.Completed
+                    && result.EffectiveTarget is WingetTarget target
+                    && target.Package == package);
+                if (index < 0)
+                {
+                    // A durable recovery marker can outlive the bounded/cleared Activity list.
+                    // Refuse conflicting identities, but reconstruct the exact failed row when
+                    // no result for this operation survives so the marker can be released safely.
+                    if (_history.Any(result => result.OperationId == operationId))
+                    {
+                        return Task.FromResult(false);
+                    }
+                }
+
+                originalHistory = _history.ToArray();
+                var completedAt = _timeProvider.GetUtcNow();
+                replacement = index >= 0
+                    ? _history[index] with
+                    {
+                        State = PackageOperationState.Failed,
+                        RebootRequired = false,
+                        Error = CreateNoChangeDetectedError()
+                    }
+                    : new OperationResult
+                    {
+                        OperationId = operationId,
+                        Package = package,
+                        Target = new WingetTarget { Package = package },
+                        Kind = PackageOperationKind.Upgrade,
+                        State = PackageOperationState.Failed,
+                        StartedAt = completedAt,
+                        CompletedAt = completedAt,
+                        Error = CreateNoChangeDetectedError()
+                    };
+                if (index >= 0)
+                {
+                    _history[index] = replacement;
+                }
+                else
+                {
+                    AddHistoryLocked(replacement);
+                }
+                mutatedHistory = _history.ToArray();
+            }
+
+            var previous = _persistenceTail;
+            var transaction = Task.Run(async () =>
+            {
+                await previous.ConfigureAwait(false);
+                await Initialization.ConfigureAwait(false);
+                var persisted = await PersistHistorySafeAsync(publishFailure: false)
+                    .ConfigureAwait(false);
+
+                OperationQueueSnapshot snapshot;
+                var committed = false;
+                lock (_gate)
+                {
+                    var currentIndex = _history.FindIndex(result =>
+                        result.OperationId == operationId
+                        && result.EffectiveTarget is WingetTarget target
+                        && target.Package == package);
+                    var replacementStillCurrent = currentIndex >= 0
+                        && _history[currentIndex] == replacement;
+
+                    committed = persisted && replacementStillCurrent;
+                    if (!persisted && _history.SequenceEqual(mutatedHistory))
+                    {
+                        _history.Clear();
+                        _history.AddRange(originalHistory);
+                    }
+
+                    snapshot = CreateSnapshotLocked();
+                }
+
+                RaiseChanged(snapshot);
+                return committed;
+            });
+            _persistenceTail = transaction;
+            return transaction;
+        }
+    }
+
     public void ClearHistory()
     {
         OperationQueueSnapshot snapshot;
@@ -566,11 +675,19 @@ public sealed class OperationQueue : IOperationQueue
     private static int? ProgressPercentBucket(double? percent) =>
         percent is null ? null : (int)Math.Floor(percent.Value);
 
-    private async Task PersistHistorySafeAsync()
+    private static WingetError CreateNoChangeDetectedError() => new()
+    {
+        Kind = WingetErrorKind.NoChangeDetected,
+        Code = "InstalledVersionUnchanged",
+        Message =
+            "WinGet reported completion, but repeated checks still found the previous installed version. Close the app completely, then retry."
+    };
+
+    private async Task<bool> PersistHistorySafeAsync(bool publishFailure = true)
     {
         if (_historyStore is null)
         {
-            return;
+            return true;
         }
 
         OperationResult[] history;
@@ -586,6 +703,7 @@ public sealed class OperationQueue : IOperationQueue
             {
                 _lastPersistenceError = null;
             }
+            return true;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -596,7 +714,11 @@ public sealed class OperationQueue : IOperationQueue
                 snapshot = CreateSnapshotLocked();
             }
 
-            RaiseChanged(snapshot);
+            if (publishFailure)
+            {
+                RaiseChanged(snapshot);
+            }
+            return false;
         }
     }
 

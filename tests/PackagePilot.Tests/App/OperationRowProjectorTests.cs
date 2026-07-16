@@ -1,5 +1,6 @@
 using PackagePilot.App.Views;
 using PackagePilot.Core.Models;
+using PackagePilot.Core.Services;
 
 namespace PackagePilot.Tests.App;
 
@@ -19,6 +20,69 @@ public sealed class OperationRowProjectorTests
         Assert.False(row.ShowCancel);
         Assert.Equal("View WinGet diagnostics for Contoso.App", row.DiagnosticAutomationName);
         Assert.Equal("View WinGet diagnostics", row.DiagnosticToolTip);
+    }
+
+    [Fact]
+    public void SuccessfulWingetResult_RemainsVerifyingUntilPostStateIsConfirmed()
+    {
+        var row = OperationRowProjector.FromResult(
+            WingetResult("winget"),
+            MutationVerificationPhase.VerificationPending);
+
+        Assert.Equal("Verifying", row.Status);
+        Assert.Contains("checking the installed package state", row.Detail);
+        Assert.Equal(95, row.Progress);
+        Assert.True(row.IsVerificationPending);
+        Assert.Equal(MutationVerificationPhase.VerificationPending, row.VerificationPhase);
+        Assert.True(row.ShowProgress);
+        Assert.True(row.IsIndeterminate);
+    }
+
+    [Fact]
+    public void StagedInUseUpgrade_DoesNotClaimCompletedInActivity()
+    {
+        var row = OperationRowProjector.FromResult(
+            WingetResult("winget"),
+            MutationVerificationPhase.ApplicationRestartPending);
+
+        Assert.Equal("App restart needed", row.Status);
+        Assert.Contains("close and reopen", row.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Completed", row.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(95, row.Progress);
+        Assert.True(row.IsVerificationPending);
+        Assert.Equal(MutationVerificationPhase.ApplicationRestartPending, row.VerificationPhase);
+        Assert.False(row.ShowProgress);
+        Assert.False(row.IsIndeterminate);
+    }
+
+    [Fact]
+    public void MissingHistory_UsesDurableVerificationMarkerAsAnActivityRow()
+    {
+        var operationId = Guid.NewGuid();
+        var row = OperationRowProjector.FromVerificationMarker(
+            new MutationVerificationMarker
+            {
+                OperationId = operationId,
+                RevisionId = Guid.NewGuid(),
+                Kind = PackageOperationKind.Upgrade,
+                Package = new PackageSummary
+                {
+                    Key = new PackageKey("Contoso.App", "winget"),
+                    Name = "Contoso App",
+                    InstalledVersion = "1.0",
+                    AvailableVersion = "2.0"
+                },
+                RecordedAt = DateTimeOffset.UtcNow,
+                BootSessionId = "boot-a",
+                Phase = MutationVerificationPhase.ApplicationRestartPending
+            });
+
+        Assert.Equal(operationId, row.OperationId);
+        Assert.Equal("Contoso App", row.PackageName);
+        Assert.Equal("App restart needed", row.Status);
+        Assert.True(row.IsHistory);
+        Assert.True(row.IsVerificationPending);
+        Assert.False(row.CanViewDiagnostic);
     }
 
     [Theory]
@@ -169,6 +233,26 @@ public sealed class OperationRowProjectorTests
 
         Assert.True(OperationRowProjector.HaveSamePresentation(first, identical));
         Assert.False(OperationRowProjector.HaveSamePresentation(first, advanced));
+    }
+
+    [Fact]
+    public void PresentationComparison_DetectsMutationVerificationStateChanges()
+    {
+        var id = Guid.NewGuid();
+        var completed = new OperationListItem
+        {
+            OperationId = id,
+            IsHistory = true
+        };
+        var verifying = new OperationListItem
+        {
+            OperationId = id,
+            IsHistory = true,
+            IsVerificationPending = true,
+            VerificationPhase = MutationVerificationPhase.VerificationPending
+        };
+
+        Assert.False(OperationRowProjector.HaveSamePresentation(completed, verifying));
     }
 
     private static OperationResult WingetResult(string sourceId)

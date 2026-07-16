@@ -63,12 +63,16 @@ internal static class UpdateRowProjector
             (item.Status, item.ActionLabel, item.IsActionEnabled) =
                 (mutationVerificationPhase switch
                 {
+                    MutationVerificationPhase.ApplicationRestartPending =>
+                        "Completion unverified - close and reopen the app, then check again",
                     MutationVerificationPhase.VerificationPending =>
                         "Updated - verifying result...",
                     MutationVerificationPhase.RestartRequired =>
                         "Restart detected - verifying update result...",
                     _ => "Checking update result..."
-                }, "Verifying", false);
+                }, mutationVerificationPhase == MutationVerificationPhase.ApplicationRestartPending
+                    ? "App restart needed"
+                    : "Verifying", false);
             return item;
         }
 
@@ -182,6 +186,18 @@ internal static class UpdateRowProjector
                 ("Updated - verifying result...", "Verifying", false),
             PackageOperationState.RebootRequired =>
                 ("Updated - restart required", "Restart required", false),
+            PackageOperationState.Failed
+                when result.Error?.Kind == WingetErrorKind.ApplicationInUse =>
+                item.RequiresAdministratorRetry
+                    ? administratorRetryAvailable
+                        ? ("Close the app completely, then retry as administrator",
+                            "Retry as administrator", true)
+                        : ("Close the app completely - administrator retry unavailable",
+                            "Admin required", false)
+                    : ("Close the app completely, then retry the update", "Retry", true),
+            PackageOperationState.Failed
+                when result.Error?.Kind == WingetErrorKind.NoChangeDetected =>
+                ("Installed version unchanged - close the app, then retry", "Retry", true),
             PackageOperationState.Failed or PackageOperationState.Cancelled
                 when item.RequiresAdministratorRetry =>
                 administratorRetryAvailable

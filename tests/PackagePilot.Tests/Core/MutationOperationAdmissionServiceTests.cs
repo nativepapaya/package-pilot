@@ -194,6 +194,9 @@ public sealed class MutationOperationAdmissionServiceTests
 
         public bool TryCancel(Guid operationId) => false;
 
+        public Task<bool> TryMarkUpgradeNoChangeDetectedAsync(Guid operationId, PackageKey package) =>
+            Task.FromResult(false);
+
         public bool TryBeginShutdownIfIdle() => _enqueued.Count == 0;
 
         public void ClearHistory()

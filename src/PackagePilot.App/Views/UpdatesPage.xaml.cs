@@ -231,6 +231,16 @@ public sealed partial class UpdatesPage : Page
             return;
         }
 
+        if (AvailableUpdates.Any(item =>
+                item.OperationErrorKind == WingetErrorKind.ApplicationInUse))
+        {
+            SetOperationStatus(
+                "Close the app and retry",
+                "Windows could not finish one or more updates because an affected app was still running. Close it completely, then retry the row. Package Pilot will not force-close apps.",
+                InfoBarSeverity.Warning);
+            return;
+        }
+
         if (AvailableUpdates.Any(item => item.RequiresAdministratorRetry))
         {
             var retryAvailable = AvailableUpdates.Any(item =>
@@ -240,6 +250,16 @@ public sealed partial class UpdatesPage : Page
                 retryAvailable
                     ? "Package Pilot did not retry automatically. Use Retry as administrator on the affected row after reviewing the one-shot UAC request. Administrator retries are intentionally excluded from bulk updates."
                     : "The one-shot administrator helper is unavailable, so Package Pilot will not attempt an ineffective retry. Open Activity for the exact error and diagnostic log.",
+                InfoBarSeverity.Warning);
+            return;
+        }
+
+        if (AvailableUpdates.Any(item =>
+                item.OperationErrorKind == WingetErrorKind.NoChangeDetected))
+        {
+            SetOperationStatus(
+                "No installed-version change detected",
+                "WinGet reported completion, but repeated read-only checks still found the previous version. Close the affected app completely, then retry its update.",
                 InfoBarSeverity.Warning);
             return;
         }
@@ -285,6 +305,16 @@ public sealed partial class UpdatesPage : Page
                 outcomeUnknown
                     ? "Package Pilot could not confirm an update result. Restart Windows before checking it again."
                     : "Windows must restart to finish one or more updates.",
+                InfoBarSeverity.Warning);
+            return;
+        }
+
+        if (AvailableUpdates.Any(item =>
+                item.VerificationPhase == MutationVerificationPhase.ApplicationRestartPending))
+        {
+            SetOperationStatus(
+                "Close and reopen the app",
+                "WinGet reported completion for one or more updates, but Windows still reports the previous version. Close and reopen each affected app, then use Check for updates again.",
                 InfoBarSeverity.Warning);
             return;
         }
@@ -449,13 +479,18 @@ public sealed partial class UpdatesPage : Page
             or PackageOperationState.Downloading
             or PackageOperationState.Installing
             or PackageOperationState.Upgrading);
-        var verifying = AvailableUpdates.Count(item => item.OperationState == PackageOperationState.Completed);
+        var applicationRestartPending = AvailableUpdates.Count(item =>
+            item.VerificationPhase == MutationVerificationPhase.ApplicationRestartPending);
+        var verifying = AvailableUpdates.Count(item =>
+            item.OperationState == PackageOperationState.Completed
+            && item.VerificationPhase != MutationVerificationPhase.ApplicationRestartPending);
         var failed = AvailableUpdates.Count(item => item.OperationState == PackageOperationState.Failed);
         var restartRequired = AvailableUpdates.Count(item => item.OperationState == PackageOperationState.RebootRequired);
 
         var details = new List<string>();
         AddSummary(details, queued, "queued");
         AddSummary(details, running, "updating");
+        AddSummary(details, applicationRestartPending, "needs app restart", "need app restart");
         AddSummary(details, verifying, "verifying");
         AddSummary(details, failed, "failed");
         AddSummary(details, restartRequired, "requires restart", "require restart");

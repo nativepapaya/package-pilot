@@ -145,11 +145,16 @@ internal static class DiscoverRowProjector
             item.VerificationPhase = mutationVerificationPhase;
             item.Status = mutationVerificationPhase switch
             {
+                MutationVerificationPhase.ApplicationRestartPending =>
+                    "Completion unverified - close and reopen the app, then check again",
                 MutationVerificationPhase.VerificationPending => "Checking the installed package state...",
                 MutationVerificationPhase.RestartRequired => "Restart detected - checking package state...",
                 _ => "Confirming the package operation result..."
             };
-            item.ActionLabel = "Verifying";
+            item.ActionLabel = mutationVerificationPhase ==
+                MutationVerificationPhase.ApplicationRestartPending
+                    ? "App restart needed"
+                    : "Verifying";
             item.IsActionEnabled = false;
             item.StateGlyph = RunningGlyph;
             item.IsPositiveState = false;

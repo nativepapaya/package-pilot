@@ -244,6 +244,8 @@ public sealed class OperationListItem
     public bool ShowCancel { get; set; }
     public bool CanViewDiagnostic { get; set; }
     public bool IsLiveDiagnostic { get; set; }
+    public bool IsVerificationPending { get; set; }
+    public MutationVerificationPhase? VerificationPhase { get; set; }
     public string DiagnosticProviderLabel { get; set; } = string.Empty;
     public string DiagnosticAutomationName { get; set; } = string.Empty;
     public string DiagnosticToolTip { get; set; } = string.Empty;

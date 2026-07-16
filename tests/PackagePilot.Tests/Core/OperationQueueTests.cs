@@ -849,6 +849,143 @@ public sealed class OperationQueueTests
     }
 
     [Fact]
+    public async Task NoChangeReclassification_IsDurableAndPreservesDiagnostics()
+    {
+        var store = new InMemoryHistoryStore();
+        var operation = Operation("Package.NoChange", PackageOperationKind.Upgrade);
+        var diagnostic = new OperationDiagnosticReference
+        {
+            Provider = OperationDiagnosticProvider.Winget,
+            ReferenceId = operation.Id
+        };
+        var client = new FakeWingetClient
+        {
+            Execute = (candidate, _, _) => Task.FromResult(Success(candidate) with
+            {
+                Diagnostic = diagnostic
+            })
+        };
+
+        await using (var queue = new OperationQueue(client, store))
+        {
+            queue.Enqueue(operation);
+            await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.True(await queue.TryMarkUpgradeNoChangeDetectedAsync(
+                operation.Id,
+                operation.Package));
+            var result = Assert.Single(queue.Snapshot.History);
+            Assert.Equal(PackageOperationState.Failed, result.State);
+            Assert.Equal(WingetErrorKind.NoChangeDetected, result.Error?.Kind);
+            Assert.Equal("InstalledVersionUnchanged", result.Error?.Code);
+            Assert.Equal(diagnostic, result.Diagnostic);
+        }
+
+        await using var reloaded = new OperationQueue(new FakeWingetClient(), store);
+        await reloaded.Initialization;
+        var persisted = Assert.Single(reloaded.Snapshot.History);
+        Assert.Equal(PackageOperationState.Failed, persisted.State);
+        Assert.Equal(WingetErrorKind.NoChangeDetected, persisted.Error?.Kind);
+        Assert.Equal(diagnostic, persisted.Diagnostic);
+    }
+
+    [Fact]
+    public async Task NoChangeReclassification_ConflictingHistoryIdentityReturnsFalse()
+    {
+        var store = new InMemoryHistoryStore();
+        await using var queue = new OperationQueue(new FakeWingetClient(), store);
+        var operation = Operation("Package.Other", PackageOperationKind.Upgrade);
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.False(await queue.TryMarkUpgradeNoChangeDetectedAsync(
+            operation.Id,
+            new PackageKey("Package.Other", "private")));
+        Assert.True(Assert.Single(queue.Snapshot.History).IsSuccess);
+    }
+
+    [Fact]
+    public async Task NoChangeReclassification_ReconstructsMissingHistoryDurably()
+    {
+        var store = new InMemoryHistoryStore();
+        var operationId = Guid.NewGuid();
+        var package = new PackageKey("Package.Trimmed", "winget");
+
+        await using (var queue = new OperationQueue(new FakeWingetClient(), store))
+        {
+            await queue.Initialization;
+            Assert.True(await queue.TryMarkUpgradeNoChangeDetectedAsync(operationId, package));
+
+            var result = Assert.Single(queue.Snapshot.History);
+            Assert.Equal(operationId, result.OperationId);
+            Assert.Equal(package, result.Package);
+            Assert.Equal(PackageOperationKind.Upgrade, result.Kind);
+            Assert.Equal(PackageOperationState.Failed, result.State);
+            Assert.Equal(WingetErrorKind.NoChangeDetected, result.Error?.Kind);
+        }
+
+        await using var reloaded = new OperationQueue(new FakeWingetClient(), store);
+        await reloaded.Initialization;
+        Assert.Equal(
+            WingetErrorKind.NoChangeDetected,
+            Assert.Single(reloaded.Snapshot.History).Error?.Kind);
+    }
+
+    [Fact]
+    public async Task NoChangeReclassification_MissingHistoryPersistenceFailureRestoresEmptyHistory()
+    {
+        var store = new FailingHistoryStore(failSave: true);
+        await using var queue = new OperationQueue(new FakeWingetClient(), store);
+        await queue.Initialization;
+
+        Assert.False(await queue.TryMarkUpgradeNoChangeDetectedAsync(
+            Guid.NewGuid(),
+            new PackageKey("Package.Trimmed", "winget")));
+        Assert.Empty(queue.Snapshot.History);
+        Assert.IsType<IOException>(queue.Snapshot.LastPersistenceError);
+    }
+
+    [Fact]
+    public async Task NoChangeReclassification_PersistenceFailureRollsBackInMemory()
+    {
+        var store = new FailingHistoryStore(failSave: true);
+        await using var queue = new OperationQueue(new FakeWingetClient(), store);
+        var operation = Operation("Package.PersistenceFailure", PackageOperationKind.Upgrade);
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.False(await queue.TryMarkUpgradeNoChangeDetectedAsync(
+            operation.Id,
+            operation.Package));
+
+        var result = Assert.Single(queue.Snapshot.History);
+        Assert.Equal(PackageOperationState.Completed, result.State);
+        Assert.Null(result.Error);
+        Assert.IsType<IOException>(queue.Snapshot.LastPersistenceError);
+    }
+
+    [Fact]
+    public async Task NoChangeReclassification_ConcurrentClearDoesNotReportCommit()
+    {
+        var store = new BlockingHistoryStore();
+        await using var queue = new OperationQueue(new FakeWingetClient(), store);
+        var operation = Operation("Package.Cleared", PackageOperationKind.Upgrade);
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        store.BlockNextSave();
+
+        var reclassification = queue.TryMarkUpgradeNoChangeDetectedAsync(
+            operation.Id,
+            operation.Package);
+        await store.SaveStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        queue.ClearHistory();
+        store.ReleaseSave();
+
+        Assert.False(await reclassification.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Empty(queue.Snapshot.History);
+    }
+
+    [Fact]
     public async Task ClearHistory_RaisesChangedAndPersistsAnEmptyHistory()
     {
         var store = new InMemoryHistoryStore();
@@ -1027,6 +1164,64 @@ public sealed class OperationQueueTests
 
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class BlockingHistoryStore : IOperationHistoryStore
+    {
+        private readonly object _gate = new();
+        private OperationResult[] _results = [];
+        private TaskCompletionSource _saveStarted = NewSource();
+        private TaskCompletionSource _releaseSave = NewSource();
+        private bool _blockNextSave;
+
+        public Task SaveStarted => _saveStarted.Task;
+
+        public Task<IReadOnlyList<OperationResult>> LoadAsync(
+            CancellationToken cancellationToken = default)
+        {
+            lock (_gate)
+            {
+                return Task.FromResult<IReadOnlyList<OperationResult>>(_results.ToArray());
+            }
+        }
+
+        public async Task SaveAsync(
+            IReadOnlyList<OperationResult> results,
+            CancellationToken cancellationToken = default)
+        {
+            Task? wait = null;
+            lock (_gate)
+            {
+                if (_blockNextSave)
+                {
+                    _blockNextSave = false;
+                    _saveStarted.TrySetResult();
+                    wait = _releaseSave.Task;
+                }
+            }
+
+            if (wait is not null)
+            {
+                await wait.WaitAsync(cancellationToken);
+            }
+
+            lock (_gate)
+            {
+                _results = results.ToArray();
+            }
+        }
+
+        public void BlockNextSave()
+        {
+            lock (_gate)
+            {
+                _saveStarted = NewSource();
+                _releaseSave = NewSource();
+                _blockNextSave = true;
+            }
+        }
+
+        public void ReleaseSave() => _releaseSave.TrySetResult();
     }
 
     private sealed class ManualTimeProvider : TimeProvider

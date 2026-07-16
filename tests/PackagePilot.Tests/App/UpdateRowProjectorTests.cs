@@ -111,6 +111,125 @@ public sealed class UpdateRowProjectorTests
         Assert.False(staleConcurrentSnapshot.IsActionEnabled);
     }
 
+    [Fact]
+    public void StagedUpgrade_WithUnchangedInstalledVersion_RequiresAppRestartAndBlocksRetry()
+    {
+        var package = new PackageKey("Contoso.App", "winget");
+        var result = Result(package, PackageOperationState.Completed, LastSuccessfulCheck.AddMinutes(1));
+        var row = Row(package);
+
+        UpdateRowProjector.Apply(
+            row,
+            new OperationQueueSnapshot { History = [result] },
+            result.CompletedAt.AddMinutes(1),
+            mutationVerificationPending: true,
+            mutationVerificationPhase: MutationVerificationPhase.ApplicationRestartPending);
+
+        Assert.Equal(PackageOperationState.Completed, row.OperationState);
+        Assert.Equal(MutationVerificationPhase.ApplicationRestartPending, row.VerificationPhase);
+        Assert.Equal(
+            "Completion unverified - close and reopen the app, then check again",
+            row.Status);
+        Assert.Equal("App restart needed", row.ActionLabel);
+        Assert.False(row.IsActionEnabled);
+        Assert.False(row.RequiresAdministratorRetry);
+    }
+
+    [Fact]
+    public void PackageInUseFailure_ExplainsCloseAndRetry()
+    {
+        var package = new PackageKey("Contoso.App", "winget");
+        var failed = Result(
+            package,
+            PackageOperationState.Failed,
+            LastSuccessfulCheck.AddMinutes(1)) with
+        {
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.ApplicationInUse,
+                Code = "0x80073D02",
+                Message = "Close the app completely, then retry."
+            }
+        };
+        var row = Row(package);
+
+        UpdateRowProjector.Apply(
+            row,
+            new OperationQueueSnapshot { History = [failed] },
+            LastSuccessfulCheck,
+            administratorRetryAvailable: true);
+
+        Assert.Equal(WingetErrorKind.ApplicationInUse, row.OperationErrorKind);
+        Assert.Equal("Close the app completely, then retry the update", row.Status);
+        Assert.Equal("Retry", row.ActionLabel);
+        Assert.True(row.IsActionEnabled);
+    }
+
+    [Fact]
+    public void RepeatedVerificationWithoutVersionChange_ExplainsCloseAndRetry()
+    {
+        var package = new PackageKey("Contoso.App", "winget");
+        var failed = Result(
+            package,
+            PackageOperationState.Failed,
+            LastSuccessfulCheck.AddMinutes(1)) with
+        {
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.NoChangeDetected,
+                Code = "InstalledVersionUnchanged",
+                Message = "The installed version did not change."
+            }
+        };
+        var row = Row(package);
+
+        UpdateRowProjector.Apply(
+            row,
+            new OperationQueueSnapshot { History = [failed] },
+            LastSuccessfulCheck);
+
+        Assert.Equal(WingetErrorKind.NoChangeDetected, row.OperationErrorKind);
+        Assert.Equal(
+            "Installed version unchanged - close the app, then retry",
+            row.Status);
+        Assert.Equal("Retry", row.ActionLabel);
+        Assert.True(row.IsActionEnabled);
+    }
+
+    [Fact]
+    public void ElevatedPackageInUseFailure_PreservesExplicitAdministratorRetry()
+    {
+        var package = new PackageKey("Contoso.App", "winget");
+        var failed = Result(
+            package,
+            PackageOperationState.Failed,
+            LastSuccessfulCheck.AddMinutes(1)) with
+        {
+            AdministratorRetryRequested = true,
+            RanAsAdministrator = true,
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.ApplicationInUse,
+                Code = "0x80073D02",
+                Message = "Close the app completely, then retry."
+            }
+        };
+        var row = Row(package);
+
+        UpdateRowProjector.Apply(
+            row,
+            new OperationQueueSnapshot { History = [failed] },
+            LastSuccessfulCheck,
+            administratorRetryAvailable: true);
+
+        Assert.True(row.RequiresAdministratorRetry);
+        Assert.Equal(
+            "Close the app completely, then retry as administrator",
+            row.Status);
+        Assert.Equal("Retry as administrator", row.ActionLabel);
+        Assert.True(row.IsActionEnabled);
+    }
+
     [Theory]
     [InlineData(PackageOperationState.Failed, "Update failed - retry available")]
     [InlineData(PackageOperationState.Cancelled, "Update cancelled")]
