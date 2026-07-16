@@ -1092,6 +1092,13 @@ public sealed partial class MainPage : Page
 
     private async void OnClearCompletedRequested(object? sender, EventArgs e)
     {
+        if (ViewModel.PendingMutationVerificationCount > 0)
+        {
+            ViewModel.SetStatusMessage(
+                "Activity was kept because one or more package operations still need verification.");
+            return;
+        }
+
         var diagnostics = ViewModel.OperationHistory
             .Select(result => result.EffectiveDiagnostic)
             .OfType<OperationDiagnosticReference>()
@@ -1795,7 +1802,16 @@ public sealed partial class MainPage : Page
                 operations.Add(OperationRowProjector.FromEntry(current));
             }
             operations.AddRange(ViewModel.PendingOperations.Select(OperationRowProjector.FromEntry));
-            operations.AddRange(ViewModel.OperationHistory.Select(OperationRowProjector.FromResult));
+            operations.AddRange(ViewModel.OperationHistory.Select(result =>
+                OperationRowProjector.FromResult(
+                    result,
+                    ViewModel.GetMutationVerificationPhase(result))));
+            var retainedOperationIds = ViewModel.OperationHistory
+                .Select(result => result.OperationId)
+                .ToHashSet();
+            operations.AddRange(ViewModel.PendingMutationVerifications
+                .Where(marker => !retainedOperationIds.Contains(marker.OperationId))
+                .Select(OperationRowProjector.FromVerificationMarker));
             _activityPage.SetOperations(operations);
         }
 

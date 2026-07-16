@@ -441,7 +441,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                 ReplaceAll(SourceStatuses, sources);
             }
             scheduleMutationVerification =
-                _mutationVerificationTracker.HasUpgradeTargetsEligibleForVerification;
+                _mutationVerificationTracker.HasUpgradeTargetsEligibleForStartupVerification;
             var cadence = _getUpdateMonitoringCadence();
             scheduleAutomaticUpdateCheck = cadence != UpdateMonitoringCadence.Manual
                 && _updateCoordinator.ShouldAutomaticallyCheck(_updateSnapshot, cadence);
@@ -955,6 +955,9 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
 
     public int PendingMutationVerificationCount => _mutationVerificationTracker.Count;
 
+    public IReadOnlyList<MutationVerificationMarker> PendingMutationVerifications =>
+        _mutationVerificationTracker.Export();
+
     public IReadOnlyList<PackageSummary> PendingUpgradeVerifications =>
         _mutationVerificationTracker.GetPendingUpgradeVerifications();
 
@@ -984,6 +987,14 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
 
     public MutationVerificationPhase? GetMutationVerificationPhase(PackageKey package) =>
         _mutationVerificationTracker.GetPhase(package);
+
+    public MutationVerificationPhase? GetMutationVerificationPhase(OperationResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        return result.EffectiveTarget is WingetTarget target
+            ? _mutationVerificationTracker.GetPhase(target.Package, result.OperationId)
+            : null;
+    }
 
     public void BeginOperationBatch() => _operationBatchDepth++;
 
@@ -1064,7 +1075,9 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         };
     }
 
-    private async Task<UpdateCheckResult?> RefreshUpdatesCoreAsync(UpdateCheckReason reason)
+    private async Task<UpdateCheckResult?> RefreshUpdatesCoreAsync(
+        UpdateCheckReason reason,
+        Task<InstalledLoadResult>? installedVerificationTask = null)
     {
         if (!IsReady || _disposed)
         {
@@ -1124,7 +1137,49 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             if (effectiveReason == UpdateCheckReason.PackageMutation
                 && result.State == UpdateCheckState.Current)
             {
-                CompleteMutationVerification(verificationTargets);
+                InstalledLoadResult installedVerification;
+                try
+                {
+                    installedVerification = installedVerificationTask is null
+                        ? await LoadInstalledAppsAsync(_lifetimeCancellation.Token).ConfigureAwait(true)
+                        : await installedVerificationTask.ConfigureAwait(true);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    installedVerification = new InstalledLoadResult(
+                        [],
+                        [],
+                        [],
+                        IsWingetInventoryHealthy: false);
+                    UpdateCheckError =
+                        $"Installed-version verification was unavailable: {exception.Message}";
+                }
+
+                var reconciliation = await ReconcileUpgradeMutationVerificationAsync(
+                    verificationTargets,
+                    result.Snapshot.Updates,
+                    installedVerification.WingetPackages,
+                    installedVerification.IsWingetInventoryHealthy).ConfigureAwait(true);
+                if (reconciliation.NoChangeDetected.Count > 0)
+                {
+                    StatusMessage =
+                        "WinGet reported completion, but repeated checks found no installed-version change. Close the app completely, then retry.";
+                }
+                else if (reconciliation.NoChangeFinalizationFailed.Count > 0)
+                {
+                    StatusMessage =
+                        "The installed version did not change, but Package Pilot could not safely update Activity. The verification lock was kept; resolve the Activity storage error, then check again.";
+                }
+                else if (reconciliation.ApplicationRestartPending.Count > 0)
+                {
+                    StatusMessage =
+                        "WinGet reported completion, but Windows still reports the previous version. If the app was open, close and reopen it, then check again.";
+                }
+                else if (reconciliation.Inconclusive.Count > 0)
+                {
+                    StatusMessage =
+                        "WinGet finished, but Package Pilot still cannot verify the installed version. Check again later.";
+                }
             }
             return result;
         }
@@ -1209,7 +1264,9 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             var installedVerificationTargets = GetInstalledVerificationTargetsForCurrentBoot();
             var installedVerificationGeneration = _mutationGeneration;
             var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
-            var updatesTask = RefreshUpdatesCoreAsync(UpdateCheckReason.PackageMutation);
+            var updatesTask = RefreshUpdatesCoreAsync(
+                UpdateCheckReason.PackageMutation,
+                installedTask);
 
             try
             {
@@ -1228,6 +1285,10 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             var updateCheck = await updatesTask.ConfigureAwait(true);
             StatusMessage = installedRefreshError is not null
                 ? $"The operation finished, but installed package refresh failed: {installedRefreshError.Message}"
+                : _mutationVerificationTracker.HasApplicationRestartPending
+                    ? "WinGet reported completion, but Windows still reports the previous version. If the app was open, close and reopen it, then check again."
+                : _mutationVerificationTracker.HasUpgradeTargetsEligibleForVerification
+                    ? "The operation finished, but installed-version verification is still pending."
                 : updateCheck?.State == UpdateCheckState.Current
                     ? "Installed packages and updates were refreshed."
                     : "The operation finished, but update verification is still pending.";
@@ -1307,6 +1368,48 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         }
     }
 
+    private async Task<UpgradeVerificationReconciliation> ReconcileUpgradeMutationVerificationAsync(
+        IEnumerable<MutationVerificationTarget> targets,
+        IEnumerable<PackageSummary> currentUpdates,
+        IEnumerable<PackageSummary> currentInstalled,
+        bool isInstalledInventoryHealthy)
+    {
+        var reconciliation = _mutationVerificationTracker.ReconcileUpgradeVerification(
+            targets,
+            currentUpdates,
+            currentInstalled,
+            isInstalledInventoryHealthy);
+        var finalized = new List<MutationVerificationTarget>();
+        var finalizationFailed = new List<MutationVerificationTarget>();
+        var stateChanged = reconciliation.StateChanged;
+        foreach (var target in reconciliation.NoChangeDetected)
+        {
+            if (await _operationQueue.TryMarkUpgradeNoChangeDetectedAsync(
+                    target.OperationId,
+                    target.Package).ConfigureAwait(true))
+            {
+                finalized.Add(target);
+                stateChanged |= _mutationVerificationTracker.CompleteVerification([target]);
+            }
+            else
+            {
+                finalizationFailed.Add(target);
+            }
+        }
+
+        if (stateChanged)
+        {
+            OnMutationVerificationStateChanged();
+        }
+
+        return reconciliation with
+        {
+            NoChangeDetected = finalized,
+            NoChangeFinalizationFailed = finalizationFailed,
+            StateChanged = stateChanged
+        };
+    }
+
     private void CompleteInstalledMutationVerification(
         InstalledLoadResult installed,
         IReadOnlyCollection<MutationVerificationTarget> targets,
@@ -1355,6 +1458,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     private void NotifyMutationVerificationStateChanged()
     {
         OnPropertyChanged(nameof(PendingMutationVerificationCount));
+        OnPropertyChanged(nameof(PendingMutationVerifications));
         OnPropertyChanged(nameof(PendingUpgradeVerifications));
         OnPropertyChanged(nameof(RestartRequiredUpdates));
     }

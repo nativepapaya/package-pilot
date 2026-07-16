@@ -54,29 +54,17 @@ public sealed partial class ActivityPage : Page
 
     private void UpdateState()
     {
-        var hasOperations = Operations.Count > 0;
-        var activeCount = Operations.Count(operation => operation.IsActive);
-        var queuedCount = Operations.Count(operation =>
-            !operation.IsHistory && !operation.IsActive);
-        var cancellableQueuedCount = Operations.Count(operation =>
-            !operation.IsHistory && !operation.IsActive && operation.CanCancel);
-        var completedCount = Operations.Count(operation => operation.IsHistory);
-        ActivityList.Visibility = hasOperations ? Visibility.Visible : Visibility.Collapsed;
-        EmptyState.Visibility = hasOperations ? Visibility.Collapsed : Visibility.Visible;
-        ClearHistoryButton.IsEnabled = completedCount > 0;
-        CancelQueuedButton.IsEnabled = cancellableQueuedCount > 0;
-        QueueSummaryText.Text = (activeCount, queuedCount) switch
-        {
-            (0, 0) => "Queue is idle",
-            (0, 1) => "1 operation queued",
-            (0, _) => $"{queuedCount} operations queued",
-            (1, 0) => "1 operation in progress",
-            (_, 0) => $"{activeCount} operations active",
-            (1, 1) => "1 operation in progress, 1 queued",
-            (1, _) => $"1 operation in progress, {queuedCount} queued",
-            (_, 1) => $"{activeCount} operations active, 1 queued",
-            _ => $"{activeCount} operations active, {queuedCount} queued"
-        };
+        var state = ActivityStateProjector.Project(Operations);
+        ActivityList.Visibility = state.HasOperations ? Visibility.Visible : Visibility.Collapsed;
+        EmptyState.Visibility = state.HasOperations ? Visibility.Collapsed : Visibility.Visible;
+        ClearHistoryButton.IsEnabled = state.CanClearCompleted;
+        ToolTipService.SetToolTip(
+            ClearHistoryButton,
+            state.HasUnresolvedVerification
+                ? "Complete pending verification before clearing activity and diagnostics."
+                : "Remove completed activity and app-owned diagnostic logs.");
+        CancelQueuedButton.IsEnabled = state.CanCancelQueued;
+        QueueSummaryText.Text = state.Summary;
     }
 
     private void OnCancelOperationClick(object sender, RoutedEventArgs e)
@@ -107,7 +95,13 @@ public sealed partial class ActivityPage : Page
     }
 
     private void OnCancelQueuedClick(object sender, RoutedEventArgs e) => CancelQueuedRequested?.Invoke(this, EventArgs.Empty);
-    private void OnClearHistoryClick(object sender, RoutedEventArgs e) => ClearCompletedRequested?.Invoke(this, EventArgs.Empty);
+    private void OnClearHistoryClick(object sender, RoutedEventArgs e)
+    {
+        if (ActivityStateProjector.Project(Operations).CanClearCompleted)
+        {
+            ClearCompletedRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
 }
 
 public sealed class OperationDiagnosticRequestedEventArgs(Guid operationId) : EventArgs

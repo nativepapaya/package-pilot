@@ -309,6 +309,35 @@ public sealed class DiscoverRowProjectorTests
         Assert.Equal(PackageOperationState.Completed, row.OperationState);
     }
 
+    [Fact]
+    public void ApplicationRestartPending_ShowsHonestStagedUpdateState()
+    {
+        var search = Package(
+            "Contoso.App",
+            "source-a",
+            status: PackageStatus.UpdateAvailable,
+            installed: "1.0",
+            available: "2.0");
+        var index = DiscoverRowProjector.CreateIndex(
+            [search],
+            [search],
+            [search],
+            new OperationQueueSnapshot());
+
+        var row = DiscoverRowProjector.Apply(
+            Row(search),
+            search,
+            index,
+            mutationVerificationPending: true,
+            mutationVerificationPhase:
+                PackagePilot.Core.Services.MutationVerificationPhase.ApplicationRestartPending);
+
+        Assert.Equal("App restart needed", row.ActionLabel);
+        Assert.Contains("close and reopen", row.Status, StringComparison.OrdinalIgnoreCase);
+        Assert.False(row.IsActionEnabled);
+        Assert.Equal(PackageOperationState.Completed, row.OperationState);
+    }
+
     private static PackageListItem Apply(
         PackageSummary search,
         IReadOnlyList<PackageSummary> searchResults,

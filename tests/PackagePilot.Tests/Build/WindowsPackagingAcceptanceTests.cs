@@ -354,6 +354,22 @@ public sealed class WindowsPackagingAcceptanceTests
             "if (!ViewModel.ClearHistory()",
             mainPage,
             StringComparison.Ordinal);
+        int clearCompletedHandler = mainPage.IndexOf(
+            "private async void OnClearCompletedRequested",
+            StringComparison.Ordinal);
+        int verificationGuard = mainPage.IndexOf(
+            "ViewModel.PendingMutationVerificationCount > 0",
+            clearCompletedHandler,
+            StringComparison.Ordinal);
+        int clearHistory = mainPage.IndexOf(
+            "if (!ViewModel.ClearHistory()",
+            clearCompletedHandler,
+            StringComparison.Ordinal);
+        Assert.True(
+            clearCompletedHandler >= 0
+            && verificationGuard > clearCompletedHandler
+            && verificationGuard < clearHistory,
+            "Unresolved mutation verification must block history and diagnostic deletion.");
         Assert.Contains(
             "DeleteOwnedLogsAsync(diagnostics)",
             mainPage,

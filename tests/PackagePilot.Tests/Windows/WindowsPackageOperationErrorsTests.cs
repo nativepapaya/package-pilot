@@ -1,3 +1,4 @@
+using Microsoft.Management.Deployment;
 using PackagePilot.Core.Models;
 using PackagePilot.Windows.Services;
 
@@ -28,6 +29,31 @@ public sealed class WindowsPackageOperationErrorsTests
             WingetErrorKind.ElevationDenied);
 
         Assert.Equal(WingetErrorKind.ElevationDenied, kind);
+    }
+
+    [Fact]
+    public void PackageInUseHResult_IsClassifiedAndExplainsTheSafeRetry()
+    {
+        var hresult = unchecked((int)0x80073D02);
+
+        Assert.True(WindowsPackageOperationErrors.IsApplicationInUse(hresult));
+        Assert.Equal(WingetErrorKind.ApplicationInUse, WingetClient.ClassifyHResult(hresult));
+        var message = WindowsPackageOperationErrors.GetApplicationInUseMessage(
+            PackageOperationKind.Upgrade);
+        Assert.Contains("still running", message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Close", message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("retry", message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void OkStatus_WithNegativePackageInUseExtendedError_IsNotSuccess()
+    {
+        Assert.True(WingetClient.IsSuccessfulInstallResult(
+            InstallResultStatus.Ok,
+            extendedError: null));
+        Assert.False(WingetClient.IsSuccessfulInstallResult(
+            InstallResultStatus.Ok,
+            unchecked((int)0x80073D02)));
     }
 
     [Theory]

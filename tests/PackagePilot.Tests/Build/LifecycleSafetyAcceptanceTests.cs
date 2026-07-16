@@ -413,7 +413,12 @@ public sealed class LifecycleSafetyAcceptanceTests
         Assert.Contains("TryStartMutationRefresh()", shell, StringComparison.Ordinal);
         Assert.Contains("|| _operationBatchDepth > 0", shell, StringComparison.Ordinal);
         Assert.Contains("ShouldSuppressNonMutationSnapshot()", shell, StringComparison.Ordinal);
-        Assert.Contains("CompleteMutationVerification(verificationTargets)", shell, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "CompleteMutationVerification(verificationTargets)",
+            shell,
+            StringComparison.Ordinal);
+        Assert.Contains("ReconcileUpgradeMutationVerificationAsync(", shell, StringComparison.Ordinal);
+        Assert.Contains("result.Snapshot.Updates", shell, StringComparison.Ordinal);
         Assert.Contains("if (scheduleMutationVerification && !_disposed)", shell, StringComparison.Ordinal);
         Assert.Contains("if (!_operationHistoryInitialized)", shell, StringComparison.Ordinal);
         Assert.Contains(
@@ -467,6 +472,32 @@ public sealed class LifecycleSafetyAcceptanceTests
             "Guid RevisionId,\n    PackageOperationKind Kind",
             normalizedVerificationTracker,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "MutationVerificationPhase.ApplicationRestartPending",
+            verificationTracker,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "previousVersion!.Trim()",
+            verificationTracker,
+            StringComparison.Ordinal);
+        string verificationReconciliation = ExtractBlock(
+            shell,
+            "private async Task<UpgradeVerificationReconciliation> ReconcileUpgradeMutationVerificationAsync(");
+        AssertOccursBefore(
+            verificationReconciliation,
+            "await _operationQueue.TryMarkUpgradeNoChangeDetectedAsync(",
+            "_mutationVerificationTracker.CompleteVerification([target])");
+        string operationQueue = ReadSource(
+            "PackagePilot.Core",
+            "Services",
+            "OperationQueue.cs");
+        string noChangeTransaction = ExtractBlock(
+            operationQueue,
+            "public Task<bool> TryMarkUpgradeNoChangeDetectedAsync(");
+        AssertOccursBefore(
+            noChangeTransaction,
+            "PersistHistorySafeAsync(publishFailure: false)",
+            "return committed");
         Assert.Contains("PendingUpgradeVerifications", shell, StringComparison.Ordinal);
 
         string bootSession = ReadSource(

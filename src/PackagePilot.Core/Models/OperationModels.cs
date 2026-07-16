@@ -212,5 +212,7 @@ public enum WingetErrorKind
     Cancelled,
     ComFailure,
     AdministratorRequired,
-    OutcomeUnknown
+    OutcomeUnknown,
+    ApplicationInUse,
+    NoChangeDetected
 }

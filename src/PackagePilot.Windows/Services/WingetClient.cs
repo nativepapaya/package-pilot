@@ -1349,13 +1349,19 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         InstallResult result,
         OperationDiagnosticReference diagnostic)
     {
-        if (result.Status == InstallResultStatus.Ok)
+        var extendedError = TryGetInstallHResult(result);
+        if (IsSuccessfulInstallResult(result.Status, extendedError))
         {
             return SuccessfulResult(operation, startedAt, result.RebootRequired, diagnostic);
         }
 
         return FailedResult(operation, startedAt, MapInstallError(result, operation.Kind), diagnostic);
     }
+
+    internal static bool IsSuccessfulInstallResult(
+        InstallResultStatus status,
+        int? extendedError) =>
+        status == InstallResultStatus.Ok && extendedError is not < 0;
 
     private static OperationResult ToUninstallResult(
         PackageOperation operation,
@@ -1450,13 +1456,19 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         {
             message = WindowsPackageOperationErrors.GetAdministratorRequiredMessage(operationKind);
         }
+        else if (kind == WingetErrorKind.ApplicationInUse)
+        {
+            message = WindowsPackageOperationErrors.GetApplicationInUseMessage(operationKind);
+        }
 
         return new WingetError
         {
             Kind = kind,
             Code = result.Status == InstallResultStatus.InstallError
                 ? $"{result.Status}:{result.InstallerErrorCode}"
-                : result.Status.ToString(),
+                : result.Status == InstallResultStatus.Ok && hresult is not null
+                    ? $"0x{unchecked((uint)hresult.Value):X8}"
+                    : result.Status.ToString(),
             Message = message,
             HResult = hresult
         };
@@ -1484,6 +1496,10 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         if (kind == WingetErrorKind.AdministratorRequired)
         {
             message = WindowsPackageOperationErrors.GetAdministratorRequiredMessage(operationKind);
+        }
+        else if (kind == WingetErrorKind.ApplicationInUse)
+        {
+            message = WindowsPackageOperationErrors.GetApplicationInUseMessage(operationKind);
         }
 
         return new WingetError
@@ -1987,6 +2003,8 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
                 "The Windows elevation prompt was cancelled or denied.",
             WingetErrorKind.AdministratorRequired =>
                 WindowsPackageOperationErrors.GetAdministratorRequiredMessage(operationKind),
+            WingetErrorKind.ApplicationInUse =>
+                WindowsPackageOperationErrors.GetApplicationInUseMessage(operationKind),
             WingetErrorKind.Cancelled =>
                 "The operation was cancelled.",
             _ => "Windows Package Manager encountered an unexpected error."
@@ -2015,6 +2033,8 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
             0x800704C7 => WingetErrorKind.ElevationDenied,
             WindowsPackageOperationErrors.PackagedServiceRequiresAdministratorHResult =>
                 WingetErrorKind.AdministratorRequired,
+            WindowsPackageOperationErrors.PackageInUseHResult =>
+                WingetErrorKind.ApplicationInUse,
             0x80072EE2 or 0x80072EE7 or 0x80072EFD or 0x80072EFE => WingetErrorKind.Network,
             0x800704C6 => WingetErrorKind.Authentication,
             0x800704C8 => WingetErrorKind.Cancelled,
@@ -2339,11 +2359,33 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
     private static int? TryGetFindHResult(FindPackagesResult result) =>
         TryGetHResult(() => result.ExtendedErrorCode);
 
-    private static int? TryGetInstallHResult(InstallResult result) =>
-        TryGetHResult(() => result.ExtendedErrorCode);
+    private static int? TryGetInstallHResult(InstallResult result)
+    {
+        var extendedError = TryGetHResult(() => result.ExtendedErrorCode);
+        if (extendedError is not null)
+        {
+            return extendedError;
+        }
 
-    private static int? TryGetUninstallHResult(UninstallResult result) =>
-        TryGetHResult(() => result.ExtendedErrorCode);
+        return result.Status == InstallResultStatus.InstallError
+            && result.InstallerErrorCode != 0
+                ? unchecked((int)result.InstallerErrorCode)
+                : null;
+    }
+
+    private static int? TryGetUninstallHResult(UninstallResult result)
+    {
+        var extendedError = TryGetHResult(() => result.ExtendedErrorCode);
+        if (extendedError is not null)
+        {
+            return extendedError;
+        }
+
+        return result.Status == UninstallResultStatus.UninstallError
+            && result.UninstallerErrorCode != 0
+                ? unchecked((int)result.UninstallerErrorCode)
+                : null;
+    }
 
     private static int? TryGetSourceHResult(RefreshPackageCatalogResult result) =>
         TryGetHResult(() => result.ExtendedErrorCode);

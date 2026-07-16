@@ -39,6 +39,344 @@ public sealed class MutationVerificationTrackerTests
     }
 
     [Fact]
+    public void SuccessfulUpgrade_WithSameInstalledVersion_RequiresApplicationRestartAndAnotherCheck()
+    {
+        var tracker = new MutationVerificationTracker(BootA);
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+        var reconciliation = tracker.ReconcileUpgradeVerification(
+            [target],
+            [package],
+            [package],
+            isInstalledInventoryHealthy: true);
+
+        Assert.True(reconciliation.StateChanged);
+        Assert.Empty(reconciliation.Verified);
+        Assert.Equal(target, Assert.Single(reconciliation.ApplicationRestartPending));
+        Assert.Empty(reconciliation.Inconclusive);
+        Assert.True(tracker.Contains(package.Key));
+        Assert.True(tracker.HasApplicationRestartPending);
+        Assert.False(tracker.IsRestartRequiredThisBoot(package.Key));
+        Assert.Equal(
+            MutationVerificationPhase.ApplicationRestartPending,
+            tracker.GetPhase(package.Key, operation.Id));
+        Assert.Equal(
+            UpdateCheckReason.PackageMutation,
+            tracker.GetEffectiveCheckReason(UpdateCheckReason.Manual));
+
+        var nextTarget = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+        var repeated = tracker.ReconcileUpgradeVerification(
+            [nextTarget],
+            [package],
+            [package],
+            isInstalledInventoryHealthy: true);
+        Assert.False(repeated.StateChanged);
+        Assert.Empty(repeated.ApplicationRestartPending);
+        Assert.Equal(nextTarget, Assert.Single(repeated.NoChangeDetected));
+        Assert.True(tracker.Contains(package.Key));
+
+        var durableNoChange = Result(
+            operation,
+            PackageOperationState.Failed,
+            RecordedAt.AddMinutes(3)) with
+        {
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.NoChangeDetected,
+                Code = "InstalledVersionUnchanged",
+                Message = "The installed version did not change."
+            }
+        };
+        Assert.True(tracker.RecordResult(durableNoChange));
+        Assert.False(tracker.Contains(package.Key));
+    }
+
+    [Fact]
+    public void SuccessfulUpgrade_WhenExactUpdateDisappearsAndInstalledVersionAdvances_IsVerified()
+    {
+        var tracker = new MutationVerificationTracker(BootA);
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+        var installed = package with
+        {
+            InstalledVersion = "2.0",
+            Status = PackageStatus.Installed
+        };
+        var reconciliation = tracker.ReconcileUpgradeVerification(
+            targets: [target],
+            currentUpdates: [],
+            currentInstalled: [installed],
+            isInstalledInventoryHealthy: true);
+
+        Assert.True(reconciliation.StateChanged);
+        Assert.Equal(target, Assert.Single(reconciliation.Verified));
+        Assert.Empty(reconciliation.ApplicationRestartPending);
+        Assert.False(tracker.Contains(package.Key));
+    }
+
+    [Fact]
+    public void SuccessfulUpgrade_WhenInstalledInventoryIsUnhealthy_RemainsInconclusiveIfUpdateDisappears()
+    {
+        var tracker = new MutationVerificationTracker(BootA);
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+
+        var reconciliation = tracker.ReconcileUpgradeVerification(
+            [target],
+            currentUpdates: [],
+            currentInstalled: [],
+            isInstalledInventoryHealthy: false);
+
+        Assert.False(reconciliation.StateChanged);
+        Assert.Equal(target, Assert.Single(reconciliation.Inconclusive));
+        Assert.True(tracker.Contains(package.Key));
+    }
+
+    [Fact]
+    public void SuccessfulUpgrade_UpdateAbsenceAloneNeverProvesSuccess()
+    {
+        var tracker = new MutationVerificationTracker(BootA);
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+
+        var reconciliation = tracker.ReconcileUpgradeVerification(
+            [target],
+            currentUpdates: [],
+            currentInstalled: [],
+            isInstalledInventoryHealthy: true);
+
+        Assert.False(reconciliation.StateChanged);
+        Assert.Equal(target, Assert.Single(reconciliation.Inconclusive));
+        Assert.True(tracker.Contains(package.Key));
+    }
+
+    [Fact]
+    public void SuccessfulUpgrade_WhenInstalledVersionAdvances_IsVerifiedEvenWithNewerUpdate()
+    {
+        var tracker = new MutationVerificationTracker(BootA);
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var newerUpdate = package with
+        {
+            InstalledVersion = "2.0",
+            AvailableVersion = "3.0"
+        };
+
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+        var reconciliation = tracker.ReconcileUpgradeVerification(
+            [target],
+            [newerUpdate],
+            [newerUpdate],
+            isInstalledInventoryHealthy: true);
+
+        Assert.True(reconciliation.StateChanged);
+        Assert.Equal(target, Assert.Single(reconciliation.Verified));
+        Assert.False(tracker.Contains(package.Key));
+    }
+
+    [Fact]
+    public void SuccessfulUpgrade_WithUnknownFreshVersion_RemainsInconclusive()
+    {
+        var tracker = new MutationVerificationTracker(BootA);
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var unknownVersion = package with { InstalledVersion = null };
+
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+        var reconciliation = tracker.ReconcileUpgradeVerification(
+            [target],
+            [unknownVersion],
+            currentInstalled: [],
+            isInstalledInventoryHealthy: false);
+
+        Assert.False(reconciliation.StateChanged);
+        Assert.Equal(target, Assert.Single(reconciliation.Inconclusive));
+        Assert.True(tracker.Contains(package.Key));
+        Assert.Equal(
+            MutationVerificationPhase.VerificationPending,
+            tracker.GetPhase(package.Key, operation.Id));
+    }
+
+    [Fact]
+    public void ApplicationRestartPending_RoundTripsAndStaysVerifiableInTheSameBoot()
+    {
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        var tracker = new MutationVerificationTracker(BootA);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+        tracker.ReconcileUpgradeVerification(
+            [target],
+            [package],
+            [package],
+            isInstalledInventoryHealthy: true);
+
+        var restored = new MutationVerificationTracker(BootA);
+        restored.Import(tracker.CreateSnapshot());
+        var restoredMarker = Assert.Single(restored.Export());
+
+        Assert.False(restored.ReconcileHistory(
+            [Result(operation, PackageOperationState.Completed, RecordedAt.AddMinutes(1))],
+            [package]));
+
+        Assert.True(restored.HasApplicationRestartPending);
+        Assert.False(restored.IsRestartRequiredThisBoot(package.Key));
+        Assert.Single(restored.CaptureVerificationTargetsForCurrentBoot());
+        Assert.Equal(restoredMarker, Assert.Single(restored.Export()));
+        Assert.Equal(
+            MutationVerificationPhase.ApplicationRestartPending,
+            restored.GetPhase(package.Key, operation.Id));
+    }
+
+    [Fact]
+    public void ApplicationRestartPending_WithDurableNoChangeHistory_IsRepairedOnStartup()
+    {
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        var source = new MutationVerificationTracker(BootA);
+        source.MarkEnqueued(operation, package);
+        source.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var target = Assert.Single(source.CaptureVerificationTargetsForCurrentBoot());
+        source.ReconcileUpgradeVerification(
+            [target],
+            [package],
+            [package],
+            isInstalledInventoryHealthy: true);
+
+        var durableNoChange = Result(
+            operation,
+            PackageOperationState.Failed,
+            RecordedAt.AddMinutes(2)) with
+        {
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.NoChangeDetected,
+                Code = "InstalledVersionUnchanged",
+                Message = "The installed version did not change."
+            }
+        };
+        var restored = new MutationVerificationTracker(BootA);
+        restored.Import(source.CreateSnapshot());
+
+        Assert.True(restored.ReconcileHistory([durableNoChange], [package]));
+        Assert.False(restored.Contains(package.Key));
+        Assert.Empty(restored.CaptureVerificationTargetsForCurrentBoot());
+    }
+
+    [Theory]
+    [InlineData(MutationVerificationPhase.OutcomeUnknown)]
+    [InlineData(MutationVerificationPhase.VerificationPending)]
+    public void DurableNoChangeHistory_RepairsAnOlderPersistedMarkerPhase(
+        MutationVerificationPhase persistedPhase)
+    {
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        var source = new MutationVerificationTracker(BootA);
+        source.MarkEnqueued(operation, package);
+        if (persistedPhase == MutationVerificationPhase.VerificationPending)
+        {
+            source.RecordResult(Result(
+                operation,
+                PackageOperationState.Completed,
+                RecordedAt.AddMinutes(1)));
+        }
+
+        var noChange = Result(
+            operation,
+            PackageOperationState.Failed,
+            RecordedAt.AddMinutes(3)) with
+        {
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.NoChangeDetected,
+                Code = "InstalledVersionUnchanged",
+                Message = "The installed version did not change."
+            }
+        };
+        var restored = new MutationVerificationTracker(BootA);
+        restored.Import(source.CreateSnapshot());
+
+        Assert.Equal(persistedPhase, Assert.Single(restored.Export()).Phase);
+        Assert.True(restored.ReconcileHistory([noChange], [package]));
+        Assert.False(restored.Contains(package.Key));
+    }
+
+    [Fact]
+    public void DurableNoChangeHistory_DoesNotOverrideASaferRestartRequiredMarker()
+    {
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        var source = new MutationVerificationTracker(BootA);
+        source.MarkEnqueued(operation, package);
+        source.RecordResult(Result(
+            operation,
+            PackageOperationState.RebootRequired,
+            RecordedAt.AddMinutes(1)));
+        var noChange = Result(
+            operation,
+            PackageOperationState.Failed,
+            RecordedAt.AddMinutes(2)) with
+        {
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.NoChangeDetected,
+                Code = "InstalledVersionUnchanged",
+                Message = "The installed version did not change."
+            }
+        };
+        var restored = new MutationVerificationTracker(BootA);
+        restored.Import(source.CreateSnapshot());
+
+        Assert.False(restored.ReconcileHistory([noChange], [package]));
+        Assert.Equal(
+            MutationVerificationPhase.RestartRequired,
+            restored.GetPhase(package.Key, operation.Id));
+    }
+
+    [Fact]
     public void UpdateVerificationTargets_ExcludeInstallAndUninstallMutations()
     {
         var upgrade = Update("Contoso.Upgrade", "winget");
@@ -244,6 +582,37 @@ public sealed class MutationVerificationTrackerTests
         Assert.Equal(
             MutationVerificationPhase.RestartRequired,
             Assert.Single(tracker.Export()).Phase);
+    }
+
+    [Fact]
+    public void StaleTarget_CannotTriggerNoChangeReclassificationAfterRevisionChanges()
+    {
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt);
+        var tracker = new MutationVerificationTracker(BootA);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var staleTarget = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+
+        var first = tracker.ReconcileUpgradeVerification(
+            [staleTarget],
+            [package],
+            [package],
+            isInstalledInventoryHealthy: true);
+        Assert.True(first.StateChanged);
+
+        var staleResult = tracker.ReconcileUpgradeVerification(
+            [staleTarget],
+            [package],
+            [package],
+            isInstalledInventoryHealthy: true);
+
+        Assert.Empty(staleResult.NoChangeDetected);
+        Assert.False(staleResult.StateChanged);
+        Assert.True(tracker.HasApplicationRestartPending);
     }
 
     [Fact]
