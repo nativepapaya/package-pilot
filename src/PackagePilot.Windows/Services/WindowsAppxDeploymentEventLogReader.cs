@@ -1,6 +1,8 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Xml.Linq;
 using Microsoft.Win32.SafeHandles;
 
 namespace PackagePilot.Windows.Services;
@@ -41,6 +43,34 @@ internal static class AppxDeploymentEventLogQuery
     }
 }
 
+internal static class AppxDeploymentRemovalCompletionQuery
+{
+    internal const int SuccessfulDeploymentEventId = 400;
+    internal const string RemoveOperationValue = "2";
+    internal const string CallingProcess = "PackagePilot.App.exe";
+
+    public static string Create(string packageFullName, DateTimeOffset startedAt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageFullName);
+        if (packageFullName.Length > 255
+            || packageFullName.Any(character =>
+                !char.IsAsciiLetterOrDigit(character)
+                && character is not ('.' or '_' or '-')))
+        {
+            throw new ArgumentException(
+                "The package full name contains unsupported characters.",
+                nameof(packageFullName));
+        }
+
+        var systemTime = startedAt.UtcDateTime.ToString("O", CultureInfo.InvariantCulture);
+        return $"*[System[(EventID={SuccessfulDeploymentEventId}) and " +
+            $"TimeCreated[@SystemTime >= '{systemTime}']] and " +
+            "EventData[Data[@Name='DeploymentOperation']='" + RemoveOperationValue + "' and " +
+            $"Data[@Name='PackageFullName']='{packageFullName}' and " +
+            $"Data[@Name='CallingProcess']='{CallingProcess}']]";
+    }
+}
+
 /// <summary>
 /// Reads the AppX deployment events for one DeploymentResult.ActivityId. The query is fixed to
 /// the AppX deployment operational channel and bounded so opening diagnostics cannot enumerate
@@ -55,6 +85,7 @@ internal sealed class WindowsDeploymentEventLogReader : IWindowsDeploymentEventL
     private const int EventBatchSize = 16;
     private const int EvtQueryChannelPath = 0x1;
     private const int EvtQueryForwardDirection = 0x100;
+    private const int EvtQueryReverseDirection = 0x200;
     private const int EvtRenderEventXml = 0x1;
     private const int ErrorInsufficientBuffer = 122;
     private const int ErrorNoMoreItems = 259;
@@ -70,6 +101,121 @@ internal sealed class WindowsDeploymentEventLogReader : IWindowsDeploymentEventL
         return Task.Run(
             () => ReadCore(activityId, cancellationToken),
             cancellationToken);
+    }
+
+    internal static Task<Guid?> FindSuccessfulRemovalAsync(
+        string packageFullName,
+        DateTimeOffset startedAt,
+        CancellationToken cancellationToken)
+    {
+        _ = AppxDeploymentRemovalCompletionQuery.Create(packageFullName, startedAt);
+        return Task.Run(
+            () => FindSuccessfulRemovalCore(packageFullName, startedAt, cancellationToken),
+            cancellationToken);
+    }
+
+    private static Guid? FindSuccessfulRemovalCore(
+        string packageFullName,
+        DateTimeOffset startedAt,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var queryHandle = EvtQuery(
+            nint.Zero,
+            ChannelName,
+            AppxDeploymentRemovalCompletionQuery.Create(packageFullName, startedAt),
+            EvtQueryChannelPath | EvtQueryReverseDirection);
+        if (queryHandle.IsInvalid)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        var handles = new nint[1];
+        if (!EvtNext(queryHandle, handles.Length, handles, 0, 0, out var returned))
+        {
+            var error = Marshal.GetLastWin32Error();
+            if (error == ErrorNoMoreItems)
+            {
+                return null;
+            }
+
+            throw new Win32Exception(error);
+        }
+
+        try
+        {
+            if (returned <= 0)
+            {
+                return null;
+            }
+
+            var rendered = RenderEvent(handles[0]);
+            if (rendered.ErrorCode is int renderError)
+            {
+                throw new Win32Exception(renderError);
+            }
+
+            return TryGetSuccessfulRemovalActivityId(rendered.Xml, packageFullName);
+        }
+        finally
+        {
+            CloseEventHandles(handles, returned);
+        }
+    }
+
+    internal static Guid? TryGetSuccessfulRemovalActivityId(
+        string eventXml,
+        string packageFullName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageFullName);
+        if (string.IsNullOrWhiteSpace(eventXml))
+        {
+            return null;
+        }
+
+        var document = XDocument.Parse(eventXml, LoadOptions.None);
+        var root = document.Root;
+        if (root is null)
+        {
+            return null;
+        }
+
+        var ns = root.Name.Namespace;
+        var system = root.Element(ns + "System");
+        var eventData = root.Element(ns + "EventData");
+        if (system is null || eventData is null
+            || !string.Equals(
+                system.Element(ns + "EventID")?.Value,
+                AppxDeploymentRemovalCompletionQuery.SuccessfulDeploymentEventId.ToString(
+                    CultureInfo.InvariantCulture),
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var values = eventData.Elements(ns + "Data")
+            .Where(element => element.Attribute("Name") is not null)
+            .ToDictionary(
+                element => element.Attribute("Name")!.Value,
+                element => element.Value,
+                StringComparer.Ordinal);
+        if (!values.TryGetValue("DeploymentOperation", out var operation)
+            || operation != AppxDeploymentRemovalCompletionQuery.RemoveOperationValue
+            || !values.TryGetValue("PackageFullName", out var recordedPackage)
+            || !string.Equals(recordedPackage, packageFullName, StringComparison.OrdinalIgnoreCase)
+            || !values.TryGetValue("CallingProcess", out var caller)
+            || !string.Equals(
+                caller,
+                AppxDeploymentRemovalCompletionQuery.CallingProcess,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var activity = system.Element(ns + "Correlation")?.Attribute("ActivityID")?.Value;
+        return Guid.TryParse(activity, out var activityId) && activityId != Guid.Empty
+            ? activityId
+            : null;
     }
 
     private static WindowsDeploymentEventLogResult ReadCore(
