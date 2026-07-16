@@ -11,17 +11,23 @@ namespace PackagePilot.App.ViewModels;
 
 public sealed class ShellViewModel : ObservableObject, IDisposable
 {
+    private const string PendingMutationVerificationsFileName =
+        "pending-mutation-verifications.json";
     private readonly IWingetClient _wingetClient;
     private readonly IOperationQueue _operationQueue;
     private readonly IUpdateCoordinator _updateCoordinator;
     private readonly UpdateScanWorker _updateScanWorker;
+    private readonly IMutationVerificationStore _mutationVerificationStore;
+    private readonly MutationOperationAdmissionService _mutationAdmissionService;
     private readonly IInstalledAppInventory? _installedAppInventory;
     private readonly ISourceManagementService? _sourceManagementService;
     private readonly IAppLifetimeActivityGate _lifetimeActivityGate;
     private readonly DispatcherQueue _dispatcher;
     private readonly Func<UpdateMonitoringCadence> _getUpdateMonitoringCadence;
     private readonly IWindowActivityService? _windowActivityService;
+    private readonly string? _bootSessionIdentityError;
     private readonly HashSet<Guid> _observedCompletions = [];
+    private readonly MutationVerificationTracker _mutationVerificationTracker;
     private readonly Dictionary<string, string> _acceptedSourceAgreementFingerprints =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
@@ -39,10 +45,19 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     private bool _hasAcceptedSourceAgreements;
     private UpdateCheckState _updatesCheckState = UpdateCheckState.NotChecked;
     private DateTimeOffset? _lastUpdateCheckAt;
+    private DateTimeOffset? _lastSuccessfulUpdateCheckAt;
     private string? _updateCheckError;
     private SourceManagementCapabilities _sourceManagementCapabilities = new();
     private WindowsIntegrationCapabilities _windowsIntegrationCapabilities = new();
     private bool _isManagingSources;
+    private int _operationBatchDepth;
+    private long _mutationGeneration;
+    private bool _mutationRefreshPending;
+    private bool _mutationRefreshRunning;
+    private bool _operationHistoryInitialized;
+    private bool _mutationVerificationLoadFailed;
+    private bool _mutationVerificationStoreInitialized;
+    private string? _mutationVerificationPersistenceError;
     private bool _disposed;
 
     public ShellViewModel(
@@ -58,7 +73,10 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         BackgroundMonitoringState backgroundMonitoringState = BackgroundMonitoringState.Disabled,
         Func<UpdateMonitoringCadence>? getUpdateMonitoringCadence = null,
         IWindowActivityService? windowActivityService = null,
-        IAppLifetimeActivityGate? lifetimeActivityGate = null)
+        IAppLifetimeActivityGate? lifetimeActivityGate = null,
+        IMutationVerificationStore? mutationVerificationStore = null,
+        string? currentBootSessionId = null,
+        string? bootSessionIdentityError = null)
     {
         _wingetClient = wingetClient;
         _operationQueue = operationQueue;
@@ -69,6 +87,20 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         _getUpdateMonitoringCadence = getUpdateMonitoringCadence
             ?? (() => UpdateMonitoringCadence.Daily);
         _windowActivityService = windowActivityService;
+        _bootSessionIdentityError = string.IsNullOrWhiteSpace(currentBootSessionId)
+            ? bootSessionIdentityError
+                ?? "Package Pilot could not identify the current Windows boot session."
+            : null;
+        _mutationVerificationTracker = new MutationVerificationTracker(
+            currentBootSessionId);
+        _mutationVerificationStore = mutationVerificationStore
+            ?? new JsonMutationVerificationStore(Path.Combine(
+                ApplicationData.Current.LocalFolder.Path,
+                PendingMutationVerificationsFileName));
+        _mutationAdmissionService = new MutationOperationAdmissionService(
+            _operationQueue,
+            _mutationVerificationTracker,
+            _mutationVerificationStore);
         _windowsIntegrationCapabilities = new WindowsIntegrationCapabilities
         {
             NotificationRegistrationSupported = notificationRegistrationSupported,
@@ -76,6 +108,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             BackgroundMonitoringState = backgroundMonitoringState
         };
         LoadSourceAgreementConsents();
+        LoadPendingMutationVerifications();
         _updateCoordinator = updateCoordinator ?? new UpdateCoordinator(
             wingetClient,
             new JsonUpdateSnapshotStore(Path.Combine(
@@ -116,6 +149,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _capabilities, value))
             {
                 OnPropertyChanged(nameof(IsReady));
+                OnPropertyChanged(nameof(CanQueuePackageMutations));
                 OnPropertyChanged(nameof(HealthTitle));
                 OnPropertyChanged(nameof(HealthMessage));
                 UpdateWindowsIntegrationCapabilities();
@@ -188,11 +222,36 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _lastUpdateCheckAt, value);
     }
 
+    public DateTimeOffset? LastSuccessfulUpdateCheckAt
+    {
+        get => _lastSuccessfulUpdateCheckAt;
+        private set => SetProperty(ref _lastSuccessfulUpdateCheckAt, value);
+    }
+
     public string? UpdateCheckError
     {
         get => _updateCheckError;
         private set => SetProperty(ref _updateCheckError, value);
     }
+
+    public string? MutationVerificationPersistenceError
+    {
+        get => _mutationVerificationPersistenceError;
+        private set
+        {
+            if (SetProperty(ref _mutationVerificationPersistenceError, value))
+            {
+                OnPropertyChanged(nameof(CanQueuePackageMutations));
+            }
+        }
+    }
+
+    public bool CanQueuePackageMutations =>
+        _operationHistoryInitialized
+        && IsReady
+        && !_mutationVerificationLoadFailed
+        && _mutationVerificationTracker.CanAdmitMutations
+        && string.IsNullOrWhiteSpace(MutationVerificationPersistenceError);
 
     public SourceManagementCapabilities SourceManagementCapabilities
     {
@@ -305,6 +364,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         StatusMessage = "Checking App Installer and WinGet…";
 
         var scheduleAutomaticUpdateCheck = false;
+        var scheduleMutationVerification = false;
         try
         {
             _updateSnapshot = await _updateCoordinator.LoadAsync(_lifetimeCancellation.Token).ConfigureAwait(true);
@@ -315,7 +375,15 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                     _getUpdateMonitoringCadence()));
 
             await _operationQueue.Initialization.ConfigureAwait(true);
-            ApplyQueueSnapshot(_operationQueue.Snapshot);
+            var initialQueueSnapshot = _operationQueue.Snapshot;
+            foreach (var result in initialQueueSnapshot.History)
+            {
+                _observedCompletions.Add(result.OperationId);
+            }
+            ApplyQueueSnapshot(initialQueueSnapshot);
+            scheduleMutationVerification = SeedPendingMutationVerifications(initialQueueSnapshot);
+            _operationHistoryInitialized = true;
+            OnPropertyChanged(nameof(CanQueuePackageMutations));
 
             Capabilities = await _wingetClient.GetCapabilitiesAsync(_lifetimeCancellation.Token).ConfigureAwait(true);
             if (!IsReady)
@@ -324,15 +392,24 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                 return;
             }
 
+            var installedVerificationTargets = GetInstalledVerificationTargetsForCurrentBoot();
+            var installedVerificationGeneration = _mutationGeneration;
             var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
             var sourcesTask = LoadSourceStatusesAsync();
             await Task.WhenAll(installedTask, sourcesTask).ConfigureAwait(true);
 
-            ApplyInstalledApps(await installedTask.ConfigureAwait(true));
+            var installed = await installedTask.ConfigureAwait(true);
+            ApplyInstalledApps(installed);
+            CompleteInstalledMutationVerification(
+                installed,
+                installedVerificationTargets,
+                installedVerificationGeneration);
             if (await sourcesTask.ConfigureAwait(true) is { } sources)
             {
                 ReplaceAll(SourceStatuses, sources);
             }
+            scheduleMutationVerification =
+                _mutationVerificationTracker.HasUpgradeTargetsEligibleForVerification;
             var cadence = _getUpdateMonitoringCadence();
             scheduleAutomaticUpdateCheck = cadence != UpdateMonitoringCadence.Manual
                 && _updateCoordinator.ShouldAutomaticallyCheck(_updateSnapshot, cadence);
@@ -351,7 +428,11 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             IsBusy = false;
         }
 
-        if (scheduleAutomaticUpdateCheck && !_disposed)
+        if (scheduleMutationVerification && !_disposed)
+        {
+            _ = RefreshUpdatesCoreAsync(UpdateCheckReason.PackageMutation);
+        }
+        else if (scheduleAutomaticUpdateCheck && !_disposed)
         {
             _ = RefreshUpdatesCoreAsync(UpdateCheckReason.Automatic);
         }
@@ -460,11 +541,18 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         StatusMessage = "Refreshing installed packages and updates…";
         try
         {
+            var installedVerificationTargets = GetInstalledVerificationTargetsForCurrentBoot();
+            var installedVerificationGeneration = _mutationGeneration;
             var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
             var sourcesTask = LoadSourceStatusesAsync();
             var updatesTask = RefreshUpdatesCoreAsync(UpdateCheckReason.Manual);
             await Task.WhenAll(installedTask, sourcesTask).ConfigureAwait(true);
-            ApplyInstalledApps(await installedTask.ConfigureAwait(true));
+            var installed = await installedTask.ConfigureAwait(true);
+            ApplyInstalledApps(installed);
+            CompleteInstalledMutationVerification(
+                installed,
+                installedVerificationTargets,
+                installedVerificationGeneration);
             if (await sourcesTask.ConfigureAwait(true) is { } sources)
             {
                 ReplaceAll(SourceStatuses, sources);
@@ -495,7 +583,15 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         StatusMessage = "Refreshing installed packages…";
         try
         {
-            ApplyInstalledApps(await LoadInstalledAppsAsync(_lifetimeCancellation.Token).ConfigureAwait(true));
+            var verificationTargets = GetInstalledVerificationTargetsForCurrentBoot();
+            var mutationGeneration = _mutationGeneration;
+            var installed = await LoadInstalledAppsAsync(
+                _lifetimeCancellation.Token).ConfigureAwait(true);
+            ApplyInstalledApps(installed);
+            CompleteInstalledMutationVerification(
+                installed,
+                verificationTargets,
+                mutationGeneration);
             StatusMessage = "Installed packages are up to date.";
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
@@ -511,7 +607,8 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         }
     }
 
-    public Task RefreshUpdatesAsync() => RefreshUpdatesCoreAsync(UpdateCheckReason.Manual);
+    public async Task RefreshUpdatesAsync() =>
+        await RefreshUpdatesCoreAsync(UpdateCheckReason.Manual).ConfigureAwait(true);
 
     public async Task RefreshSourcesAsync()
     {
@@ -725,38 +822,151 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         InstallerScope scope = InstallerScope.Unknown,
         PackageArchitecture architecture = PackageArchitecture.Unknown)
     {
-        var preferences = new InstallPreferences
-        {
-            AcceptSourceAgreements = acceptedSourceAgreements,
-            AcceptedSourceAgreementFingerprint =
-                _acceptedSourceAgreementFingerprints.GetValueOrDefault(package.Key.SourceId),
-            AcceptPackageAgreements = acceptedPackageAgreements,
-            Scope = scope,
-            Architecture = architecture
-        };
-
-        return _operationQueue.Enqueue(PackageOperation.Create(kind, package.Key, package.Name, preferences));
+        var result = EnqueueOperations([
+            new PackageMutationRequest(
+                package,
+                kind,
+                acceptedSourceAgreements,
+                acceptedPackageAgreements,
+                scope,
+                architecture)
+        ]);
+        return result.OperationIds.Single();
     }
 
     public IReadOnlyList<Guid> EnqueueUpdates(IEnumerable<PackageSummary> packages)
     {
-        return packages
-            .Select(package => EnqueueOperation(package, PackageOperationKind.Upgrade))
-            .ToArray();
+        ArgumentNullException.ThrowIfNull(packages);
+        return EnqueueOperations(packages.Select(package =>
+            new PackageMutationRequest(package, PackageOperationKind.Upgrade))).OperationIds;
+    }
+
+    public MutationAdmissionBatchResult EnqueueOperations(
+        IEnumerable<PackageMutationRequest> requests,
+        bool skipDuplicates = false)
+    {
+        ArgumentNullException.ThrowIfNull(requests);
+        if (!CanQueuePackageMutations)
+        {
+            throw CreateMutationRecoveryUnavailableException();
+        }
+
+        var admissions = requests.Select(request =>
+        {
+            ArgumentNullException.ThrowIfNull(request);
+            ArgumentNullException.ThrowIfNull(request.Package);
+            var preferences = new InstallPreferences
+            {
+                AcceptSourceAgreements = request.AcceptedSourceAgreements,
+                AcceptedSourceAgreementFingerprint =
+                    _acceptedSourceAgreementFingerprints.GetValueOrDefault(
+                        request.Package.Key.SourceId),
+                AcceptPackageAgreements = request.AcceptedPackageAgreements,
+                Scope = request.Scope,
+                Architecture = request.Architecture
+            };
+            return new MutationAdmission(
+                PackageOperation.Create(
+                    request.Kind,
+                    request.Package.Key,
+                    request.Package.Name,
+                    preferences),
+                request.Package);
+        }).ToArray();
+
+        BeginOperationBatch();
+        try
+        {
+            var result = _mutationAdmissionService.Enqueue(admissions, skipDuplicates);
+            _mutationGeneration += result.OperationIds.Count;
+            NotifyMutationVerificationStateChanged();
+            return result;
+        }
+        catch (MutationRecoveryUnavailableException exception)
+        {
+            MutationVerificationPersistenceError =
+                FormatRecoveryError(exception.InnerException ?? exception);
+            NotifyMutationVerificationStateChanged();
+            throw;
+        }
+        catch
+        {
+            NotifyMutationVerificationStateChanged();
+            throw;
+        }
+        finally
+        {
+            EndOperationBatch();
+        }
     }
 
     public bool TryCancelOperation(Guid operationId) => _operationQueue.TryCancel(operationId);
+
+    public OperationQueueSnapshot OperationQueueSnapshot => _operationQueue.Snapshot;
+
+    public int PendingMutationVerificationCount => _mutationVerificationTracker.Count;
+
+    public IReadOnlyList<PackageSummary> PendingUpgradeVerifications =>
+        _mutationVerificationTracker.GetPendingUpgradeVerifications();
+
+    public IReadOnlyList<PackageSummary> RestartRequiredUpdates =>
+        _mutationVerificationTracker.GetRestartRequiredUpdatesForCurrentBoot();
+
+    public bool IsPackageMutationBlocked(PackageKey package)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        if (_mutationVerificationTracker.Contains(package))
+        {
+            return true;
+        }
+
+        var snapshot = _operationQueue.Snapshot;
+        return (snapshot.Current is { } current
+                && IsMatchingWingetOperation(current.Operation, package))
+            || snapshot.Pending.Any(entry =>
+                IsMatchingWingetOperation(entry.Operation, package));
+    }
+
+    public bool IsMutationVerificationPending(PackageKey package) =>
+        _mutationVerificationTracker.Contains(package);
+
+    public bool IsRestartRequiredThisBoot(PackageKey package) =>
+        _mutationVerificationTracker.IsRestartRequiredThisBoot(package);
+
+    public MutationVerificationPhase? GetMutationVerificationPhase(PackageKey package) =>
+        _mutationVerificationTracker.GetPhase(package);
+
+    public void BeginOperationBatch() => _operationBatchDepth++;
+
+    public void EndOperationBatch()
+    {
+        if (_operationBatchDepth <= 0)
+        {
+            throw new InvalidOperationException("No operation batch is active.");
+        }
+
+        _operationBatchDepth--;
+        if (_operationBatchDepth == 0)
+        {
+            TryStartMutationRefresh();
+        }
+    }
 
     public Guid EnqueueMsixRemoval(InstalledApp app, string packageFullName)
     {
         ArgumentNullException.ThrowIfNull(app);
         ArgumentException.ThrowIfNullOrWhiteSpace(packageFullName);
+        if (!CanQueuePackageMutations)
+        {
+            throw CreateMutationRecoveryUnavailableException();
+        }
+
         var installation = app.Installations.FirstOrDefault(item =>
             string.Equals(item.PackageFullName, packageFullName, StringComparison.OrdinalIgnoreCase));
         var familyName = installation?.Aliases
             .FirstOrDefault(alias => alias.Kind == InstalledAppAliasKind.PackageFamilyName)?.Value
             ?? string.Empty;
-        return _operationQueue.Enqueue(new PackageOperation
+        var operationId = _operationQueue.Enqueue(new PackageOperation
         {
             Kind = PackageOperationKind.Uninstall,
             DisplayName = app.Name,
@@ -766,9 +976,20 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                 PackageFamilyName = familyName
             }
         });
+        _mutationGeneration++;
+        return operationId;
     }
 
-    public void ClearHistory() => _operationQueue.ClearHistory();
+    public void ClearHistory()
+    {
+        if (!CanQueuePackageMutations)
+        {
+            StatusMessage = "Activity history was kept because package-operation recovery state is unavailable.";
+            return;
+        }
+
+        _operationQueue.ClearHistory();
+    }
 
     public void SetStatusMessage(string message) => StatusMessage = message;
 
@@ -793,41 +1014,79 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         };
     }
 
-    private async Task RefreshUpdatesCoreAsync(UpdateCheckReason reason)
+    private async Task<UpdateCheckResult?> RefreshUpdatesCoreAsync(UpdateCheckReason reason)
     {
         if (!IsReady || _disposed)
         {
-            return;
+            return null;
         }
 
+        var effectiveReason = _mutationVerificationTracker.GetEffectiveCheckReason(reason);
+        var verificationTargets = effectiveReason == UpdateCheckReason.PackageMutation
+            ? GetVerificationTargetsForCurrentBoot(PackageOperationKind.Upgrade)
+            : Array.Empty<MutationVerificationTarget>();
+        var mutationGeneration = _mutationGeneration;
         UpdatesCheckState = UpdateCheckState.Checking;
         UpdateCheckError = null;
         try
         {
             var execution = _windowActivityService is null
                 ? await _updateScanWorker.RunAsync(
-                    reason,
+                    effectiveReason,
                     isForegroundWindowActive: true,
                     SourceStatuses.ToArray(),
                     _lifetimeCancellation.Token,
                     _getUpdateMonitoringCadence()).ConfigureAwait(true)
                 : await _updateScanWorker.RunAsync(
-                    reason,
+                    effectiveReason,
                     _windowActivityService,
                     SourceStatuses.ToArray(),
                     _lifetimeCancellation.Token,
                     _getUpdateMonitoringCadence()).ConfigureAwait(true);
             var result = execution.Check;
+
+            if (effectiveReason == UpdateCheckReason.PackageMutation
+                && (mutationGeneration != _mutationGeneration
+                    || !_operationQueue.Snapshot.IsIdle))
+            {
+                _mutationRefreshPending = true;
+                ApplyUpdateSnapshot(
+                    _updateSnapshot,
+                    _updateCoordinator.GetState(
+                        _updateSnapshot,
+                        _getUpdateMonitoringCadence()));
+                return result;
+            }
+
+            if (effectiveReason != UpdateCheckReason.PackageMutation
+                && ShouldSuppressNonMutationSnapshot())
+            {
+                ApplyUpdateSnapshot(
+                    _updateSnapshot,
+                    _updateCoordinator.GetState(
+                        _updateSnapshot,
+                        _getUpdateMonitoringCadence()));
+                return result;
+            }
+
             _updateSnapshot = result.Snapshot;
             ApplyUpdateSnapshot(result.Snapshot, result.State);
+            if (effectiveReason == UpdateCheckReason.PackageMutation
+                && result.State == UpdateCheckState.Current)
+            {
+                CompleteMutationVerification(verificationTargets);
+            }
+            return result;
         }
         catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
         {
+            return null;
         }
         catch (Exception ex)
         {
             UpdatesCheckState = UpdateCheckState.Failed;
             UpdateCheckError = ex.Message;
+            return null;
         }
     }
 
@@ -847,36 +1106,87 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         _dispatcher.TryEnqueue(() =>
         {
             ApplyQueueSnapshot(e.Snapshot);
-
-            var newSuccess = e.Snapshot.History.FirstOrDefault(result =>
-                result.IsSuccess && _observedCompletions.Add(result.OperationId));
-
-            if (newSuccess is not null && IsReady)
+            if (!_operationHistoryInitialized)
             {
-                _ = RefreshAfterMutationAsync();
+                return;
             }
+
+            var verificationStateChanged = false;
+            foreach (var result in e.Snapshot.History.Where(result =>
+                         _observedCompletions.Add(result.OperationId)))
+            {
+                verificationStateChanged |=
+                    _mutationVerificationTracker.RecordResult(result);
+
+                if (result.IsSuccess)
+                {
+                    _mutationRefreshPending = true;
+                }
+            }
+
+            if (verificationStateChanged)
+            {
+                OnMutationVerificationStateChanged();
+            }
+
+            TryStartMutationRefresh();
         });
+    }
+
+    private void TryStartMutationRefresh()
+    {
+        var snapshot = _operationQueue.Snapshot;
+        if (_disposed
+            || !IsReady
+            || !snapshot.IsIdle
+            || _operationBatchDepth > 0
+            || !_mutationRefreshPending
+            || _mutationRefreshRunning)
+        {
+            return;
+        }
+
+        _mutationRefreshPending = false;
+        _mutationRefreshRunning = true;
+        _ = RefreshAfterMutationAsync();
     }
 
     private async Task RefreshAfterMutationAsync()
     {
-        Exception? installedRefreshError = null;
-        var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
-        var updatesTask = RefreshUpdatesCoreAsync(UpdateCheckReason.PackageMutation);
-
         try
         {
-            ApplyInstalledApps(await installedTask.ConfigureAwait(true));
-        }
-        catch (Exception ex)
-        {
-            installedRefreshError = ex;
-        }
+            Exception? installedRefreshError = null;
+            var installedVerificationTargets = GetInstalledVerificationTargetsForCurrentBoot();
+            var installedVerificationGeneration = _mutationGeneration;
+            var installedTask = LoadInstalledAppsAsync(_lifetimeCancellation.Token);
+            var updatesTask = RefreshUpdatesCoreAsync(UpdateCheckReason.PackageMutation);
 
-        await updatesTask.ConfigureAwait(true);
-        StatusMessage = installedRefreshError is null
-            ? "Installed packages and updates were refreshed."
-            : $"The operation finished, but installed package refresh failed: {installedRefreshError.Message}";
+            try
+            {
+                var installed = await installedTask.ConfigureAwait(true);
+                ApplyInstalledApps(installed);
+                CompleteInstalledMutationVerification(
+                    installed,
+                    installedVerificationTargets,
+                    installedVerificationGeneration);
+            }
+            catch (Exception ex)
+            {
+                installedRefreshError = ex;
+            }
+
+            var updateCheck = await updatesTask.ConfigureAwait(true);
+            StatusMessage = installedRefreshError is not null
+                ? $"The operation finished, but installed package refresh failed: {installedRefreshError.Message}"
+                : updateCheck?.State == UpdateCheckState.Current
+                    ? "Installed packages and updates were refreshed."
+                    : "The operation finished, but update verification is still pending.";
+        }
+        finally
+        {
+            _mutationRefreshRunning = false;
+            TryStartMutationRefresh();
+        }
     }
 
     private void ApplyUpdateSnapshot(UpdateSnapshot? snapshot, UpdateCheckState state)
@@ -887,6 +1197,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         }
 
         LastUpdateCheckAt = snapshot?.LastAttemptAt;
+        LastSuccessfulUpdateCheckAt = snapshot?.LastSuccessAt;
         UpdateCheckError = snapshot?.LastError;
         UpdatesCheckState = state;
     }
@@ -900,12 +1211,166 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(ActivitySummary));
     }
 
+    private static bool IsMatchingWingetOperation(
+        PackageOperation operation,
+        PackageKey package) =>
+        operation.EffectiveTarget is WingetTarget target
+        && target.Package == package;
+
+    private bool SeedPendingMutationVerifications(OperationQueueSnapshot queue)
+    {
+        if (!_mutationVerificationStoreInitialized)
+        {
+            _mutationVerificationTracker.SeedVerifiedOperations(queue.History);
+            _mutationVerificationStoreInitialized = PersistPendingMutationVerifications();
+            NotifyMutationVerificationStateChanged();
+            return false;
+        }
+
+        if (_mutationVerificationTracker.ReconcileHistory(
+                queue.History,
+                _updateSnapshot?.Updates ?? Array.Empty<PackageSummary>()))
+        {
+            OnMutationVerificationStateChanged();
+        }
+        return _mutationVerificationTracker.HasUpgradeTargetsEligibleForVerification;
+    }
+
+    private MutationVerificationTarget[] GetVerificationTargetsForCurrentBoot(
+        PackageOperationKind kind) =>
+        _mutationVerificationTracker.CaptureVerificationTargetsForCurrentBoot(kind);
+
+    private MutationVerificationTarget[] GetInstalledVerificationTargetsForCurrentBoot() =>
+        _mutationVerificationTracker.CaptureVerificationTargetsForCurrentBoot()
+            .Where(target => target.Kind is
+                PackageOperationKind.Install or PackageOperationKind.Uninstall)
+            .ToArray();
+
+    private bool ShouldSuppressNonMutationSnapshot() =>
+        _mutationVerificationTracker.HasUpgradeTargetsEligibleForVerification;
+
+    private void CompleteMutationVerification(IEnumerable<MutationVerificationTarget> targets)
+    {
+        if (_mutationVerificationTracker.CompleteVerification(targets))
+        {
+            OnMutationVerificationStateChanged();
+        }
+    }
+
+    private void CompleteInstalledMutationVerification(
+        InstalledLoadResult installed,
+        IReadOnlyCollection<MutationVerificationTarget> targets,
+        long mutationGeneration)
+    {
+        // Only a complete, exact WinGet inventory can prove the post-operation state
+        // of Install and Uninstall targets. The revision and generation checks prevent
+        // a scan that started before newer work from clearing a newer recovery marker.
+        if (!installed.IsWingetInventoryHealthy
+            || targets.Count == 0
+            || mutationGeneration != _mutationGeneration
+            || !_operationQueue.Snapshot.IsIdle)
+        {
+            return;
+        }
+
+        CompleteMutationVerification(targets);
+    }
+
+    private void LoadPendingMutationVerifications()
+    {
+        try
+        {
+            var snapshot = _mutationVerificationStore.Load();
+            if (snapshot is not null)
+            {
+                _mutationVerificationTracker.Import(snapshot);
+                _mutationVerificationStoreInitialized = true;
+            }
+            _mutationVerificationLoadFailed = false;
+            MutationVerificationPersistenceError = _bootSessionIdentityError;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            _mutationVerificationLoadFailed = true;
+            MutationVerificationPersistenceError = FormatRecoveryError(exception);
+        }
+    }
+
+    private void OnMutationVerificationStateChanged()
+    {
+        PersistPendingMutationVerifications();
+        NotifyMutationVerificationStateChanged();
+    }
+
+    private void NotifyMutationVerificationStateChanged()
+    {
+        OnPropertyChanged(nameof(PendingMutationVerificationCount));
+        OnPropertyChanged(nameof(PendingUpgradeVerifications));
+        OnPropertyChanged(nameof(RestartRequiredUpdates));
+    }
+
+    private bool PersistPendingMutationVerifications()
+    {
+        if (_mutationVerificationLoadFailed)
+        {
+            return false;
+        }
+
+        try
+        {
+            _mutationVerificationStore.Save(_mutationVerificationTracker.CreateSnapshot());
+            _mutationVerificationStoreInitialized = true;
+            MutationVerificationPersistenceError = _bootSessionIdentityError;
+            return true;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            MutationVerificationPersistenceError = FormatRecoveryError(exception);
+            StatusMessage = "Package Pilot could not save package-operation recovery state. Keep the app open while operations finish and check local storage access.";
+            return false;
+        }
+    }
+
+    private static string FormatRecoveryError(Exception exception) =>
+        string.IsNullOrWhiteSpace(exception.Message)
+            ? "Package-operation recovery state is unavailable."
+            : exception.Message;
+
+    private MutationRecoveryUnavailableException CreateMutationRecoveryUnavailableException() =>
+        new(
+            "Package Pilot paused package changes because it cannot safely read or write operation recovery state. Restart the app after checking local storage access.");
+
+    private Guid FindLatestOperationId(PackageKey package)
+    {
+        var snapshot = _operationQueue.Snapshot;
+        if (snapshot.Current is { } current
+            && IsMatchingWingetOperation(current.Operation, package))
+        {
+            return current.Operation.Id;
+        }
+
+        var pending = snapshot.Pending.FirstOrDefault(entry =>
+            IsMatchingWingetOperation(entry.Operation, package));
+        if (pending is not null)
+        {
+            return pending.Operation.Id;
+        }
+
+        return snapshot.History
+            .FirstOrDefault(result => result.EffectiveTarget is WingetTarget target
+                && target.Package == package)?.OperationId ?? Guid.Empty;
+    }
+
     private async Task<InstalledLoadResult> LoadInstalledAppsAsync(CancellationToken cancellationToken)
     {
         if (_installedAppInventory is null)
         {
             var packages = await _wingetClient.GetInstalledPackagesAsync(cancellationToken).ConfigureAwait(false);
-            return new InstalledLoadResult(packages, [], []);
+            return new InstalledLoadResult(
+                packages,
+                [],
+                [],
+                IsWingetInventoryHealthy: true);
         }
 
         var snapshot = await _installedAppInventory.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
@@ -924,7 +1389,14 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             .GroupBy(package => package.Key)
             .Select(group => group.First())
             .ToArray();
-        return new InstalledLoadResult(wingetPackages, snapshot.Apps, snapshot.Providers);
+        var wingetInventoryHealthy = snapshot.Providers.Any(provider =>
+            provider.Provider == InstalledAppProviderKind.Winget
+            && provider.Health == InventoryProviderHealth.Healthy);
+        return new InstalledLoadResult(
+            wingetPackages,
+            snapshot.Apps,
+            snapshot.Providers,
+            wingetInventoryHealthy);
     }
 
     private void ApplyInstalledApps(InstalledLoadResult result)
@@ -986,5 +1458,14 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     private sealed record InstalledLoadResult(
         IReadOnlyList<PackageSummary> WingetPackages,
         IReadOnlyList<InstalledApp> Apps,
-        IReadOnlyList<InstalledAppProviderStatus> Providers);
+        IReadOnlyList<InstalledAppProviderStatus> Providers,
+        bool IsWingetInventoryHealthy);
 }
+
+public sealed record PackageMutationRequest(
+    PackageSummary Package,
+    PackageOperationKind Kind,
+    bool AcceptedSourceAgreements = false,
+    bool AcceptedPackageAgreements = false,
+    InstallerScope Scope = InstallerScope.Unknown,
+    PackageArchitecture Architecture = PackageArchitecture.Unknown);

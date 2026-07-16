@@ -97,7 +97,7 @@ public sealed class UpdateCoordinator : IUpdateCoordinator
         UpdateMonitoringCadence cadence)
     {
         var result = await activeCheck.WaitAsync(cancellationToken).ConfigureAwait(false);
-        if (result.PerformedCheck)
+        if (result.PerformedCheck && reason != UpdateCheckReason.PackageMutation)
         {
             return result;
         }

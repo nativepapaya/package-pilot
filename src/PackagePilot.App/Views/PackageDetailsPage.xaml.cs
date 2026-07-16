@@ -11,6 +11,9 @@ public sealed partial class PackageDetailsPage : Page
     public PackageListItem? Package { get; private set; }
     public event EventHandler<PackageActionRequestedEventArgs>? PackageActionRequested;
 
+    public void SetMutationActionsAvailable(bool available) =>
+        DetailsPane.SetMutationActionsAvailable(available);
+
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);

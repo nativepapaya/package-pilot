@@ -236,6 +236,7 @@ public partial class App : Application, IAppLifetimeController
         ]);
         var monitoringState = new WindowsBackgroundUpdateRegistrationService()
             .GetCurrent().State;
+        var bootSession = new WindowsBootSessionIdentityProvider().GetCurrent();
         _shellViewModel = new ShellViewModel(
             wingetClient,
             _operationQueue,
@@ -249,7 +250,9 @@ public partial class App : Application, IAppLifetimeController
             backgroundMonitoringState: monitoringState,
             getUpdateMonitoringCadence: ReadMonitoringCadence,
             windowActivityService: _windowActivity,
-            lifetimeActivityGate: _lifetimeActivityGate);
+            lifetimeActivityGate: _lifetimeActivityGate,
+            currentBootSessionId: bootSession.Identity,
+            bootSessionIdentityError: bootSession.Error);
         _shellViewModel.AvailableUpdates.CollectionChanged += OnAvailableUpdatesChanged;
 
         _window = new MainWindow(
@@ -1092,11 +1095,11 @@ public partial class App : Application, IAppLifetimeController
 
     private static AppDestination ToBlockingDestination(
         AppLifetimeActivityKind activity) => activity switch
-    {
-        AppLifetimeActivityKind.SourceRefresh or
-        AppLifetimeActivityKind.SourceMutation => AppDestination.Sources,
-        _ => AppDestination.Settings
-    };
+        {
+            AppLifetimeActivityKind.SourceRefresh or
+            AppLifetimeActivityKind.SourceMutation => AppDestination.Sources,
+            _ => AppDestination.Settings
+        };
 
     private void ShowOperationsPreventExit(AppDestination destination)
     {

@@ -1,4 +1,6 @@
 using PackagePilot.App.Views;
+using PackagePilot.Core.Models;
+using PackagePilot.Core.Services;
 
 namespace PackagePilot.Tests.App;
 
@@ -20,6 +22,74 @@ public sealed class PackageListItemComparerTests
         Assert.False(PackageListItemComparer.HaveSameRows([current], [replacement]));
     }
 
+    [Fact]
+    public void HaveSameRows_DetectsActionAvailabilityChanges()
+    {
+        var current = CreateItem();
+        var replacement = CreateItem();
+        replacement.IsActionEnabled = false;
+
+        Assert.False(PackageListItemComparer.HaveSameRows([current], [replacement]));
+    }
+
+    [Fact]
+    public void HaveSameRows_DetectsOperationStateChanges()
+    {
+        var current = CreateItem();
+        var replacement = CreateItem();
+        replacement.OperationState = PackageOperationState.Queued;
+
+        Assert.False(PackageListItemComparer.HaveSameRows([current], [replacement]));
+    }
+
+    [Fact]
+    public void SameRowsExceptFeedback_AllowsAnInPlaceTransition()
+    {
+        var current = CreateItem();
+        var replacement = CreateItem();
+        replacement.Status = "Queued - waiting to start";
+        replacement.ActionLabel = "Queued";
+        replacement.IsActionEnabled = false;
+        replacement.OperationState = PackageOperationState.Queued;
+        replacement.VerificationPhase = MutationVerificationPhase.OutcomeUnknown;
+
+        Assert.True(PackageListItemComparer.HaveSameRowsExceptOperationFeedback(
+            [current],
+            [replacement]));
+    }
+
+    [Fact]
+    public void ApplyOperationFeedback_NotifiesEveryDynamicBinding()
+    {
+        var current = CreateItem();
+        var replacement = CreateItem();
+        replacement.Status = "Queued - waiting to start";
+        replacement.ActionLabel = "Queued";
+        replacement.IsActionEnabled = false;
+        replacement.OperationState = PackageOperationState.Queued;
+        replacement.VerificationPhase = MutationVerificationPhase.OutcomeUnknown;
+        var changed = new HashSet<string>();
+        current.PropertyChanged += (_, args) => changed.Add(args.PropertyName!);
+
+        current.ApplyOperationFeedback(replacement);
+
+        Assert.Contains(nameof(PackageListItem.Status), changed);
+        Assert.Contains(nameof(PackageListItem.ActionLabel), changed);
+        Assert.Contains(nameof(PackageListItem.IsActionEnabled), changed);
+        Assert.Contains(nameof(PackageListItem.OperationState), changed);
+        Assert.Contains(nameof(PackageListItem.VerificationPhase), changed);
+    }
+
+    [Fact]
+    public void HaveSameRows_DetectsRequestedOperationKindChanges()
+    {
+        var current = CreateItem();
+        var replacement = CreateItem();
+        replacement.RequestedOperationKind = PackageOperationKind.Install;
+
+        Assert.False(PackageListItemComparer.HaveSameRows([current], [replacement]));
+    }
+
     private static PackageListItem CreateItem() => new()
     {
         Name = "Package",
@@ -30,6 +100,8 @@ public sealed class PackageListItemComparerTests
         AvailableVersion = "2.0",
         Status = "UpdateAvailable",
         ActionLabel = "Update",
+        RequestedOperationKind = PackageOperationKind.Upgrade,
+        WingetPackage = new PackageKey("Publisher.Package", "winget"),
         IconUri = new Uri("https://example.test/icon.png")
     };
 }

@@ -98,36 +98,55 @@ public sealed class OperationQueue : IOperationQueue
 
         OperationQueueSnapshot snapshot;
 
-        lock (_gate)
+        try
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (!_acceptingOperations)
+            lock (_gate)
             {
-                item.Dispose();
-                throw new InvalidOperationException("The operation queue is shutting down and no longer accepts work.");
-            }
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (!_acceptingOperations)
+                {
+                    throw new InvalidOperationException("The operation queue is shutting down and no longer accepts work.");
+                }
 
-            if ((_current?.Operation.Id == operation.Id)
-                || _pending.Any(candidate => candidate.Operation.Id == operation.Id))
-            {
-                item.Dispose();
-                throw new ArgumentException($"Operation '{operation.Id}' is already queued.", nameof(operation));
-            }
+                if ((_current?.Operation.Id == operation.Id)
+                    || _pending.Any(candidate => candidate.Operation.Id == operation.Id))
+                {
+                    throw new ArgumentException($"Operation '{operation.Id}' is already queued.", nameof(operation));
+                }
 
-            if (_pending.Count == 0 && _current is null)
-            {
-                _idle = NewSource();
-            }
+                var duplicate = _current is not null
+                    && IsEquivalentActiveOperation(_current.Operation, operation)
+                        ? _current
+                        : _pending.FirstOrDefault(candidate =>
+                            IsEquivalentActiveOperation(candidate.Operation, operation));
+                if (duplicate is not null)
+                {
+                    throw new DuplicatePackageOperationException(
+                        duplicate.Operation.Id,
+                        operation.EffectiveTarget!.Id);
+                }
 
-            _pending.Add(item);
-            if (!_channel.Writer.TryWrite(item))
-            {
-                _pending.Remove(item);
-                item.Dispose();
-                throw new InvalidOperationException("The operation queue is no longer accepting work.");
-            }
+                if (_pending.Count == 0 && _current is null)
+                {
+                    _idle = NewSource();
+                }
 
-            snapshot = CreateSnapshotLocked();
+                _pending.Add(item);
+                if (!_channel.Writer.TryWrite(item))
+                {
+                    _pending.Remove(item);
+                    throw new InvalidOperationException("The operation queue is no longer accepting work.");
+                }
+
+                snapshot = CreateSnapshotLocked();
+            }
+        }
+        catch
+        {
+            // External cancellation callbacks call back into TryCancel and need _gate. Dispose
+            // only after the lock has been released so rejected work cannot deadlock cancellation.
+            item.Dispose();
+            throw;
         }
 
         RaiseChanged(snapshot);
@@ -572,6 +591,24 @@ public sealed class OperationQueue : IOperationQueue
         _history.Insert(0, result);
         TrimHistoryLocked();
     }
+
+    private static bool IsEquivalentActiveOperation(
+        PackageOperation existing,
+        PackageOperation candidate) =>
+        HaveSameTarget(existing.EffectiveTarget, candidate.EffectiveTarget);
+
+    private static bool HaveSameTarget(OperationTarget? left, OperationTarget? right) =>
+        (left, right) switch
+        {
+            (WingetTarget leftWinget, WingetTarget rightWinget) =>
+                leftWinget.Package == rightWinget.Package,
+            (MsixTarget leftMsix, MsixTarget rightMsix) =>
+                string.Equals(
+                    leftMsix.PackageFullName,
+                    rightMsix.PackageFullName,
+                    StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
 
     private void TrimHistoryLocked()
     {

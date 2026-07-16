@@ -122,6 +122,89 @@ public sealed class OperationQueueTests
     }
 
     [Fact]
+    public async Task Queue_RejectsAnyMutationForAnActiveOrPendingExactTarget()
+    {
+        var started = NewSource();
+        var release = NewSource();
+        var client = new FakeWingetClient
+        {
+            Execute = async (operation, _, cancellationToken) =>
+            {
+                started.TrySetResult();
+                await release.Task.WaitAsync(cancellationToken);
+                return Success(operation);
+            }
+        };
+        await using var queue = new OperationQueue(client);
+        var first = PackageOperation.Create(
+            PackageOperationKind.Upgrade,
+            new PackageKey("Contoso.App", "winget"));
+
+        queue.Enqueue(first);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var duplicate = Assert.Throws<DuplicatePackageOperationException>(() =>
+            queue.Enqueue(PackageOperation.Create(
+                PackageOperationKind.Upgrade,
+                new PackageKey("Contoso.App", "winget"))));
+        Assert.Equal(first.Id, duplicate.ExistingOperationId);
+
+        var differentKind = Assert.Throws<DuplicatePackageOperationException>(() =>
+            queue.Enqueue(PackageOperation.Create(
+                PackageOperationKind.Uninstall,
+                new PackageKey("Contoso.App", "winget"))));
+        Assert.Equal(first.Id, differentKind.ExistingOperationId);
+
+        var otherSource = PackageOperation.Create(
+            PackageOperationKind.Upgrade,
+            new PackageKey("Contoso.App", "store"));
+        queue.Enqueue(otherSource);
+
+        var pendingDuplicate = Assert.Throws<DuplicatePackageOperationException>(() =>
+            queue.Enqueue(PackageOperation.Create(
+                PackageOperationKind.Install,
+                new PackageKey("Contoso.App", "store"))));
+        Assert.Equal(otherSource.Id, pendingDuplicate.ExistingOperationId);
+
+        release.TrySetResult();
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(2, client.ExecutionOrder.Count);
+
+        queue.Enqueue(PackageOperation.Create(
+            PackageOperationKind.Upgrade,
+            new PackageKey("Contoso.App", "winget")));
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(3, client.ExecutionOrder.Count);
+    }
+
+    [Fact]
+    public async Task Queue_DeduplicatesMsixTargetsCaseInsensitively()
+    {
+        var started = NewSource();
+        var release = NewSource();
+        var msix = new FakeMsixClient(async operation =>
+        {
+            started.TrySetResult();
+            await release.Task;
+            return Success(operation) with { Target = operation.EffectiveTarget };
+        });
+        await using var queue = new OperationQueue(new FakeWingetClient(), msixClient: msix);
+        var first = MsixRemoval("Contoso.App_1.0.0.0_x64__Publisher");
+
+        queue.Enqueue(first);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var duplicate = Assert.Throws<DuplicatePackageOperationException>(() =>
+            queue.Enqueue(MsixRemoval("contoso.app_1.0.0.0_x64__publisher")));
+        Assert.Equal(first.Id, duplicate.ExistingOperationId);
+
+        release.TrySetResult();
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(1, msix.CallCount);
+    }
+
+    [Fact]
     public async Task TryCancel_RemovesQueuedOperationWithoutCallingWinget()
     {
         var firstStarted = NewSource();
@@ -590,6 +673,17 @@ public sealed class OperationQueueTests
         PackageOperationKind kind = PackageOperationKind.Install) => PackageOperation.Create(
         kind,
         new PackageKey(id, "winget"));
+
+    private static PackageOperation MsixRemoval(string packageFullName) => new()
+    {
+        Kind = PackageOperationKind.Uninstall,
+        DisplayName = "Contoso App",
+        Target = new MsixTarget
+        {
+            PackageFullName = packageFullName,
+            PackageFamilyName = "Contoso.App_publisher"
+        }
+    };
 
     private static OperationProgress Progress(
         PackageOperation operation,

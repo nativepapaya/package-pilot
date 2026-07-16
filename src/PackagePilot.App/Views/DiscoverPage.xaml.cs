@@ -66,6 +66,9 @@ public sealed partial class DiscoverPage : Page
         StatusBanner.IsOpen = true;
     }
 
+    public void SetMutationActionsAvailable(bool available) =>
+        DetailsPane.SetMutationActionsAvailable(available);
+
     private void OnSearchTextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
     {
         if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput)

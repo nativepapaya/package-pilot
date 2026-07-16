@@ -390,6 +390,100 @@ public sealed class LifecycleSafetyAcceptanceTests
         Assert.Contains("CreateToastNotifier().Show(notification);", sink, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void UpdatesPage_BindsQueueFeedbackAndDispatchesByExplicitOperationKind()
+    {
+        string updatesPage = ReadSource("PackagePilot.App", "Views", "UpdatesPage.xaml");
+        string mainPage = ReadSource("PackagePilot.App", "MainPage.xaml.cs");
+
+        Assert.Contains(
+            "IsActionEnabled=\"{x:Bind IsActionEnabled, Mode=OneWay}\"",
+            updatesPage,
+            StringComparison.Ordinal);
+        Assert.Contains("Tag=\"{x:Bind WingetPackage}\"", updatesPage, StringComparison.Ordinal);
+        Assert.Contains("e.Package.RequestedOperationKind ??", mainPage, StringComparison.Ordinal);
+        Assert.Contains("UpdateRowProjector.Apply", mainPage, StringComparison.Ordinal);
+        Assert.Contains(".Concat(ViewModel.PendingUpgradeVerifications)", mainPage, StringComparison.Ordinal);
+        Assert.Contains("ViewModel.IsRestartRequiredThisBoot(item.Key)", mainPage, StringComparison.Ordinal);
+
+        string shell = ReadSource("PackagePilot.App", "ViewModels", "ShellViewModel.cs");
+        string normalizedShell = shell.ReplaceLineEndings("\n");
+        Assert.Contains("SeedPendingMutationVerifications(initialQueueSnapshot)", shell, StringComparison.Ordinal);
+        Assert.Contains("GetEffectiveCheckReason(reason)", shell, StringComparison.Ordinal);
+        Assert.Contains("TryStartMutationRefresh()", shell, StringComparison.Ordinal);
+        Assert.Contains("|| _operationBatchDepth > 0", shell, StringComparison.Ordinal);
+        Assert.Contains("ShouldSuppressNonMutationSnapshot()", shell, StringComparison.Ordinal);
+        Assert.Contains("CompleteMutationVerification(verificationTargets)", shell, StringComparison.Ordinal);
+        Assert.Contains("if (scheduleMutationVerification && !_disposed)", shell, StringComparison.Ordinal);
+        Assert.Contains("if (!_operationHistoryInitialized)", shell, StringComparison.Ordinal);
+        Assert.Contains(
+            "public bool CanQueuePackageMutations =>\n        _operationHistoryInitialized\n        && IsReady",
+            normalizedShell,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "OnPropertyChanged(nameof(CanQueuePackageMutations));",
+            shell,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "GetVerificationTargetsForCurrentBoot(PackageOperationKind.Upgrade)",
+            shell,
+            StringComparison.Ordinal);
+        Assert.Contains("installed.IsWingetInventoryHealthy", shell, StringComparison.Ordinal);
+        Assert.Contains(
+            "PackageOperationKind.Install or PackageOperationKind.Uninstall",
+            shell,
+            StringComparison.Ordinal);
+        Assert.Contains("new JsonMutationVerificationStore", shell, StringComparison.Ordinal);
+        Assert.DoesNotContain("pendingMutationVerifications.v", shell, StringComparison.Ordinal);
+
+        string enqueueOperation = ExtractBlock(shell, "public Guid EnqueueOperation(");
+        Assert.Contains("EnqueueOperations", enqueueOperation, StringComparison.Ordinal);
+        string enqueueOperations = ExtractBlock(
+            shell,
+            "public MutationAdmissionBatchResult EnqueueOperations(");
+        Assert.Contains("if (!CanQueuePackageMutations)", enqueueOperations, StringComparison.Ordinal);
+
+        string admission = ReadSource(
+            "PackagePilot.Core",
+            "Services",
+            "MutationOperationAdmissionService.cs");
+        string admissionBatch = ExtractBlock(
+            admission,
+            "public MutationAdmissionBatchResult Enqueue(");
+        AssertOccursBefore(
+            admissionBatch,
+            "_store.Save(_tracker.CreateSnapshot())",
+            "_operationQueue.Enqueue(admission.Operation)");
+        string verificationTracker = ReadSource(
+            "PackagePilot.Core",
+            "Services",
+            "MutationVerificationTracker.cs");
+        string normalizedVerificationTracker = verificationTracker.ReplaceLineEndings("\n");
+        Assert.Contains(
+            "Phase = MutationVerificationPhase.OutcomeUnknown",
+            verificationTracker,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Guid RevisionId,\n    PackageOperationKind Kind",
+            normalizedVerificationTracker,
+            StringComparison.Ordinal);
+        Assert.Contains("PendingUpgradeVerifications", shell, StringComparison.Ordinal);
+
+        string bootSession = ReadSource(
+            "PackagePilot.Windows",
+            "Services",
+            "WindowsBootSessionIdentityProvider.cs");
+        Assert.Contains("BootIdAddress", bootSession, StringComparison.Ordinal);
+        Assert.DoesNotContain("TickCount64", shell, StringComparison.Ordinal);
+        Assert.Contains("Package operations paused", mainPage, StringComparison.Ordinal);
+
+        string detailsPane = ReadSource("PackagePilot.App", "Views", "PackageDetailsPane.xaml");
+        Assert.Contains(
+            "IsEnabled=\"{x:Bind IsPrimaryActionEnabled, Mode=OneWay}\"",
+            detailsPane,
+            StringComparison.Ordinal);
+    }
+
     private static void AssertTransitionIsGuarded(string method)
     {
         AssertOccursBefore(
