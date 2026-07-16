@@ -11,15 +11,16 @@
             <views:PackageRow
                 Margin="0,0,0,8"
                 ActionInvoked="OnPackageActionInvoked"
-                ActionLabel="{x:Bind ActionLabel}"
+                ActionLabel="{x:Bind ActionLabel, Mode=OneWay}"
                 IconGlyph="{x:Bind IconGlyph}"
                 IconUri="{x:Bind IconUri}"
+                IsActionEnabled="{x:Bind IsActionEnabled, Mode=OneWay}"
                 PackageId="{x:Bind PackageId}"
                 PackageName="{x:Bind Name}"
                 Publisher="{x:Bind Publisher}"
                 Source="{x:Bind Source}"
-                Status="{x:Bind Status}"
-                Tag="{x:Bind PackageId}"
+                Status="{x:Bind Status, Mode=OneWay}"
+                Tag="{x:Bind WingetPackage}"
                 Version="{x:Bind VersionLabel}" />
         </DataTemplate>
     </Page.Resources>
@@ -62,6 +63,7 @@
         <InfoBar
             x:Name="StatusBanner"
             Grid.Row="1"
+            Closed="OnStatusBannerClosed"
             IsClosable="True"
             IsOpen="False"
             Severity="Informational" />

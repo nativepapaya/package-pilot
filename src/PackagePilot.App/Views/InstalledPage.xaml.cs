@@ -30,6 +30,9 @@ public sealed partial class InstalledPage : Page
     public event EventHandler<PackageActionRequestedEventArgs>? PackageActionRequested;
     public event EventHandler<PackageActionRequestedEventArgs>? PackageSelected;
 
+    public void SetMutationActionsAvailable(bool available) =>
+        DetailsPane.SetMutationActionsAvailable(available);
+
     public void ShowStatus(string title, string message, InfoBarSeverity severity = InfoBarSeverity.Informational)
     {
         StatusBanner.Title = title;

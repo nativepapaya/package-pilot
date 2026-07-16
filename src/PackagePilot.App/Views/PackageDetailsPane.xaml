@@ -122,6 +122,7 @@
                     AutomationProperties.Name="{x:Bind PrimaryActionLabel, Mode=OneWay}"
                     Click="OnPrimaryActionClick"
                     Content="{x:Bind PrimaryActionLabel, Mode=OneWay}"
+                    IsEnabled="{x:Bind IsPrimaryActionEnabled, Mode=OneWay}"
                     Style="{StaticResource AccentButtonStyle}" />
                 <Button
                     HorizontalAlignment="Stretch"

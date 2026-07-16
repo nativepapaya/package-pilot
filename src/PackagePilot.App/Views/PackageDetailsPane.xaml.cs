@@ -1,11 +1,16 @@
+using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using PackagePilot.Core.Models;
 
 namespace PackagePilot.App.Views;
 
 public sealed partial class PackageDetailsPane : UserControl
 {
     private static readonly PropertyMetadata EmptyText = new(string.Empty);
+    private PackageListItem? _package;
+    private bool _mutationActionsAvailable = true;
+    private bool _isPackageSubscribed;
 
     public static readonly DependencyProperty PackageNameProperty = DependencyProperty.Register(nameof(PackageName), typeof(string), typeof(PackageDetailsPane), EmptyText);
     public static readonly DependencyProperty PublisherProperty = DependencyProperty.Register(nameof(Publisher), typeof(string), typeof(PackageDetailsPane), EmptyText);
@@ -23,8 +28,14 @@ public sealed partial class PackageDetailsPane : UserControl
     public static readonly DependencyProperty IconGlyphProperty = DependencyProperty.Register(nameof(IconGlyph), typeof(string), typeof(PackageDetailsPane), new PropertyMetadata("\uE896"));
     public static readonly DependencyProperty IconUriProperty = DependencyProperty.Register(nameof(IconUri), typeof(Uri), typeof(PackageDetailsPane), new PropertyMetadata(null));
     public static readonly DependencyProperty PrimaryActionLabelProperty = DependencyProperty.Register(nameof(PrimaryActionLabel), typeof(string), typeof(PackageDetailsPane), new PropertyMetadata("Install"));
+    public static readonly DependencyProperty IsPrimaryActionEnabledProperty = DependencyProperty.Register(nameof(IsPrimaryActionEnabled), typeof(bool), typeof(PackageDetailsPane), new PropertyMetadata(true));
 
-    public PackageDetailsPane() => InitializeComponent();
+    public PackageDetailsPane()
+    {
+        InitializeComponent();
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
+    }
 
     public string PackageName { get => (string)GetValue(PackageNameProperty); set => SetValue(PackageNameProperty, value); }
     public string Publisher { get => (string)GetValue(PublisherProperty); set => SetValue(PublisherProperty, value); }
@@ -42,6 +53,7 @@ public sealed partial class PackageDetailsPane : UserControl
     public string IconGlyph { get => (string)GetValue(IconGlyphProperty); set => SetValue(IconGlyphProperty, value); }
     public Uri? IconUri { get => (Uri?)GetValue(IconUriProperty); set => SetValue(IconUriProperty, value); }
     public string PrimaryActionLabel { get => (string)GetValue(PrimaryActionLabelProperty); set => SetValue(PrimaryActionLabelProperty, value); }
+    public bool IsPrimaryActionEnabled { get => (bool)GetValue(IsPrimaryActionEnabledProperty); set => SetValue(IsPrimaryActionEnabledProperty, value); }
 
     public event EventHandler? PrimaryActionInvoked;
     public event EventHandler? CloseRequested;
@@ -50,6 +62,11 @@ public sealed partial class PackageDetailsPane : UserControl
 
     public void ShowPackage(PackageListItem package)
     {
+        ArgumentNullException.ThrowIfNull(package);
+        DetachPackage();
+        _package = package;
+        AttachPackage();
+
         PackageName = package.Name;
         Publisher = package.Publisher;
         PackageId = package.PackageId;
@@ -66,6 +83,7 @@ public sealed partial class PackageDetailsPane : UserControl
         IconGlyph = package.IconGlyph;
         IconUri = package.IconUri;
         PrimaryActionLabel = package.ActionLabel;
+        UpdatePrimaryActionEnabled();
         SetLink(HomepageLink, package.HomepageUri);
         SetLink(PublisherLink, package.PublisherUri);
         SetLink(SupportLink, package.SupportUri);
@@ -81,6 +99,62 @@ public sealed partial class PackageDetailsPane : UserControl
         ReleaseNotesPanel.Visibility = string.IsNullOrWhiteSpace(package.ReleaseNotes)
             ? Visibility.Collapsed
             : Visibility.Visible;
+    }
+
+    public void SetMutationActionsAvailable(bool available)
+    {
+        _mutationActionsAvailable = available;
+        UpdatePrimaryActionEnabled();
+    }
+
+    private void OnPackagePropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(PackageListItem.IsActionEnabled))
+        {
+            UpdatePrimaryActionEnabled();
+        }
+        else if (e.PropertyName == nameof(PackageListItem.ActionLabel)
+            && _package is not null)
+        {
+            PrimaryActionLabel = _package.ActionLabel;
+        }
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e) => AttachPackage();
+
+    private void OnUnloaded(object sender, RoutedEventArgs e) => DetachPackage();
+
+    private void AttachPackage()
+    {
+        if (_package is not null && !_isPackageSubscribed)
+        {
+            _package.PropertyChanged += OnPackagePropertyChanged;
+            _isPackageSubscribed = true;
+        }
+    }
+
+    private void DetachPackage()
+    {
+        if (_package is not null && _isPackageSubscribed)
+        {
+            _package.PropertyChanged -= OnPackagePropertyChanged;
+            _isPackageSubscribed = false;
+        }
+    }
+
+    private void UpdatePrimaryActionEnabled()
+    {
+        if (_package is null)
+        {
+            IsPrimaryActionEnabled = false;
+            return;
+        }
+
+        var requiresMutationRecovery = _package.InstalledActionKind is null
+            or InstalledAppActionKind.UninstallWithWinget
+            or InstalledAppActionKind.RemoveMsix;
+        IsPrimaryActionEnabled = _package.IsActionEnabled
+            && (_mutationActionsAvailable || !requiresMutationRecovery);
     }
 
     private static void SetLink(HyperlinkButton button, Uri? uri)

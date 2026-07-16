@@ -370,6 +370,42 @@ public sealed class UpdateCoordinatorTests
     }
 
     [Fact]
+    public async Task PackageMutationConcurrentWithPerformedCheckRunsAFreshVerification()
+    {
+        var firstResult = new TaskCompletionSource<IReadOnlyList<PackageSummary>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var call = 0;
+        var client = new FakeUpdateDiscoveryClient
+        {
+            GetUpdates = _ =>
+            {
+                if (Interlocked.Increment(ref call) == 1)
+                {
+                    firstEntered.TrySetResult();
+                    return firstResult.Task;
+                }
+
+                return Task.FromResult<IReadOnlyList<PackageSummary>>(
+                    Array.Empty<PackageSummary>());
+            }
+        };
+        var coordinator = new UpdateCoordinator(client, new InMemoryUpdateSnapshotStore());
+
+        var manual = coordinator.CheckAsync(UpdateCheckReason.Manual);
+        await firstEntered.Task;
+        var mutation = coordinator.CheckAsync(UpdateCheckReason.PackageMutation);
+        firstResult.SetResult([Update("Contoso.Tool", "winget", "2.0", "Contoso Tool")]);
+
+        var manualResult = await manual;
+        var mutationResult = await mutation;
+
+        Assert.Single(manualResult.Snapshot.Updates);
+        Assert.Empty(mutationResult.Snapshot.Updates);
+        Assert.Equal(2, client.UpdateCallCount);
+    }
+
+    [Fact]
     public async Task ManualRequestConcurrentWithFreshAutomaticSkipStillPerformsCheck()
     {
         var time = new ManualTimeProvider();

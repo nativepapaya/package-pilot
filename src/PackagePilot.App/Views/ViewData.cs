@@ -1,18 +1,36 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using PackagePilot.Core.Models;
+using PackagePilot.Core.Services;
 
 namespace PackagePilot.App.Views;
 
-public sealed class PackageListItem
+public sealed class PackageListItem : INotifyPropertyChanged
 {
+    private string _status = string.Empty;
+    private string _actionLabel = "Install";
+    private bool _isActionEnabled = true;
+    private PackageOperationState? _operationState;
+    private MutationVerificationPhase? _verificationPhase;
+
     public string Name { get; set; } = string.Empty;
     public string Publisher { get; set; } = string.Empty;
     public string PackageId { get; set; } = string.Empty;
     public string Source { get; set; } = string.Empty;
     public string InstalledVersion { get; set; } = string.Empty;
     public string AvailableVersion { get; set; } = string.Empty;
-    public string Status { get; set; } = string.Empty;
-    public string ActionLabel { get; set; } = "Install";
+    public string Status
+    {
+        get => _status;
+        set => SetProperty(ref _status, value);
+    }
+
+    public string ActionLabel
+    {
+        get => _actionLabel;
+        set => SetProperty(ref _actionLabel, value);
+    }
     public string IconGlyph { get; set; } = "\uE896";
     public Uri? IconUri { get; set; }
     public string Description { get; set; } = "Package details are not available from this source.";
@@ -28,7 +46,23 @@ public sealed class PackageListItem
     public Uri? LicenseUri { get; set; }
     public Uri? ReleaseNotesUri { get; set; }
     public bool RequiresElevation { get; set; }
-    public bool IsActionEnabled { get; set; } = true;
+    public bool IsActionEnabled
+    {
+        get => _isActionEnabled;
+        set => SetProperty(ref _isActionEnabled, value);
+    }
+
+    public PackageOperationKind? RequestedOperationKind { get; set; }
+    public PackageOperationState? OperationState
+    {
+        get => _operationState;
+        set => SetProperty(ref _operationState, value);
+    }
+    public MutationVerificationPhase? VerificationPhase
+    {
+        get => _verificationPhase;
+        set => SetProperty(ref _verificationPhase, value);
+    }
     public string? InstalledAppId { get; set; }
     public InstalledAppActionKind? InstalledActionKind { get; set; }
     public PackageKey? WingetPackage { get; set; }
@@ -49,13 +83,46 @@ public sealed class PackageListItem
     }
 
     public string ElevationLabel => RequiresElevation ? "Administrator approval expected" : "No elevation expected";
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    internal void ApplyOperationFeedback(PackageListItem source)
+    {
+        Status = source.Status;
+        ActionLabel = source.ActionLabel;
+        IsActionEnabled = source.IsActionEnabled;
+        OperationState = source.OperationState;
+        VerificationPhase = source.VerificationPhase;
+    }
+
+    private void SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return;
+        }
+
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
 }
 
 internal static class PackageListItemComparer
 {
     public static bool HaveSameRows(
         IReadOnlyList<PackageListItem> current,
-        IReadOnlyList<PackageListItem> replacement)
+        IReadOnlyList<PackageListItem> replacement) =>
+        HaveSameRowsCore(current, replacement, includeOperationFeedback: true);
+
+    public static bool HaveSameRowsExceptOperationFeedback(
+        IReadOnlyList<PackageListItem> current,
+        IReadOnlyList<PackageListItem> replacement) =>
+        HaveSameRowsCore(current, replacement, includeOperationFeedback: false);
+
+    private static bool HaveSameRowsCore(
+        IReadOnlyList<PackageListItem> current,
+        IReadOnlyList<PackageListItem> replacement,
+        bool includeOperationFeedback)
     {
         if (current.Count != replacement.Count)
         {
@@ -72,11 +139,15 @@ internal static class PackageListItemComparer
                 || !string.Equals(left.Publisher, right.Publisher, StringComparison.Ordinal)
                 || !string.Equals(left.InstalledVersion, right.InstalledVersion, StringComparison.Ordinal)
                 || !string.Equals(left.AvailableVersion, right.AvailableVersion, StringComparison.Ordinal)
-                || !string.Equals(left.Status, right.Status, StringComparison.Ordinal)
-                || !string.Equals(left.ActionLabel, right.ActionLabel, StringComparison.Ordinal)
+                || (includeOperationFeedback
+                    && (!string.Equals(left.Status, right.Status, StringComparison.Ordinal)
+                        || !string.Equals(left.ActionLabel, right.ActionLabel, StringComparison.Ordinal)
+                        || left.IsActionEnabled != right.IsActionEnabled
+                        || left.OperationState != right.OperationState
+                        || left.VerificationPhase != right.VerificationPhase))
                 || !string.Equals(left.IconGlyph, right.IconGlyph, StringComparison.Ordinal)
                 || left.RequiresElevation != right.RequiresElevation
-                || left.IsActionEnabled != right.IsActionEnabled
+                || left.RequestedOperationKind != right.RequestedOperationKind
                 || left.InstalledActionKind != right.InstalledActionKind
                 || left.WingetPackage != right.WingetPackage
                 || !string.Equals(left.InstalledAppId, right.InstalledAppId, StringComparison.Ordinal)
@@ -105,6 +176,10 @@ public sealed class OperationListItem
     public bool IsActive { get; set; }
     public bool IsIndeterminate { get; set; }
     public bool CanCancel { get; set; }
+    public bool CanViewDiagnostic { get; set; }
+    public string DiagnosticProviderLabel { get; set; } = string.Empty;
+    public string DiagnosticAutomationName { get; set; } = string.Empty;
+    public string DiagnosticToolTip { get; set; } = string.Empty;
 }
 
 public sealed class SourceHealthItem

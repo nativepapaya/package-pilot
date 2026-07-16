@@ -1,8 +1,11 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Navigation;
 using PackagePilot.App.ViewModels;
@@ -31,17 +34,21 @@ public sealed partial class MainPage : Page
     private readonly IPrivilegedSourceManagementBroker? _sourceManagementBroker;
     private readonly IAppLifetimeController? _appLifetimeController;
     private readonly IAppLifetimeActivityGate _lifetimeActivityGate;
+    private readonly IOperationDiagnosticsService? _operationDiagnosticsService;
+    private bool _operationDiagnosticDialogOpen;
 
     public MainPage(
         ShellViewModel viewModel,
         IPrivilegedSourceManagementBroker? sourceManagementBroker = null,
         IAppLifetimeController? appLifetimeController = null,
-        IAppLifetimeActivityGate? lifetimeActivityGate = null)
+        IAppLifetimeActivityGate? lifetimeActivityGate = null,
+        IOperationDiagnosticsService? operationDiagnosticsService = null)
     {
         ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _sourceManagementBroker = sourceManagementBroker;
         _appLifetimeController = appLifetimeController;
         _lifetimeActivityGate = lifetimeActivityGate ?? new AppLifetimeActivityGate();
+        _operationDiagnosticsService = operationDiagnosticsService;
         InitializeComponent();
 
         ContentFrame.CacheSize = 8;
@@ -234,6 +241,7 @@ public sealed partial class MainPage : Page
                     page.CancelOperationRequested += OnCancelOperationRequested;
                     page.CancelQueuedRequested += OnCancelQueuedRequested;
                     page.ClearCompletedRequested += OnClearCompletedRequested;
+                    page.ViewDiagnosticRequested += OnViewDiagnosticRequested;
                 }
                 break;
             case SourcesPage page:
@@ -708,12 +716,29 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var kind = e.Package.ActionLabel switch
+        if (!ViewModel.CanQueuePackageMutations)
         {
-            "Update" => PackageOperationKind.Upgrade,
-            "Uninstall" => PackageOperationKind.Uninstall,
-            _ => PackageOperationKind.Install
-        };
+            ShowMutationRecoveryUnavailable();
+            return;
+        }
+
+        var kind = e.Package.RequestedOperationKind ??
+            (e.Package.ActionLabel switch
+            {
+                "Update" or "Retry" => PackageOperationKind.Upgrade,
+                "Uninstall" => PackageOperationKind.Uninstall,
+                _ => PackageOperationKind.Install
+            });
+
+        if (ViewModel.IsPackageMutationBlocked(package.Key))
+        {
+            ShowPageStatus(
+                "Already queued",
+                $"{package.Name} already has this operation queued or running. Follow it in Activity.",
+                InfoBarSeverity.Informational);
+            SyncViewData();
+            return;
+        }
 
         if (kind == PackageOperationKind.Uninstall && !await ConfirmUninstallAsync(package))
         {
@@ -735,14 +760,49 @@ public sealed partial class MainPage : Page
         }
 
         var (scope, architecture) = ReadInstallPreferences();
-        ViewModel.EnqueueOperation(
-            package,
-            kind,
-            acceptance.AcceptedSourceAgreements,
-            acceptance.AcceptedPackageAgreements,
-            scope,
-            architecture);
+        try
+        {
+            ViewModel.EnqueueOperation(
+                package,
+                kind,
+                acceptance.AcceptedSourceAgreements,
+                acceptance.AcceptedPackageAgreements,
+                scope,
+                architecture);
+        }
+        catch (MutationRecoveryUnavailableException)
+        {
+            ShowMutationRecoveryUnavailable();
+            SyncViewData();
+            return;
+        }
+        catch (DuplicatePackageOperationException)
+        {
+            ShowPageStatus(
+                "Already queued",
+                $"{package.Name} already has this operation queued or running. Follow it in Activity.",
+                InfoBarSeverity.Informational);
+            SyncViewData();
+            return;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            ShowPageStatus(
+                "Could not queue package operation",
+                exception.Message,
+                InfoBarSeverity.Warning);
+            SyncViewData();
+            return;
+        }
+
         ViewModel.SetStatusMessage($"{package.Name} was added to the operation queue.");
+        if (kind == PackageOperationKind.Upgrade && sender is UpdatesPage)
+        {
+            _updatesPage?.ShowOperationStatus(
+                "Update queued",
+                $"{package.Name} is queued. Its row now shows progress, and full details remain available in Activity.",
+                InfoBarSeverity.Informational);
+        }
         UpdateShellChrome();
         SyncViewData();
     }
@@ -757,6 +817,14 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        if (actionKind is InstalledAppActionKind.UninstallWithWinget
+                or InstalledAppActionKind.RemoveMsix
+            && !ViewModel.CanQueuePackageMutations)
+        {
+            ShowMutationRecoveryUnavailable();
+            return;
+        }
+
         switch (actionKind)
         {
             case InstalledAppActionKind.UninstallWithWinget:
@@ -766,7 +834,31 @@ public sealed partial class MainPage : Page
                     return;
                 }
 
-                ViewModel.EnqueueOperation(wingetPackage, PackageOperationKind.Uninstall);
+                try
+                {
+                    ViewModel.EnqueueOperation(wingetPackage, PackageOperationKind.Uninstall);
+                }
+                catch (MutationRecoveryUnavailableException)
+                {
+                    ShowMutationRecoveryUnavailable();
+                    return;
+                }
+                catch (DuplicatePackageOperationException)
+                {
+                    ShowPageStatus(
+                        "Already queued",
+                        $"{app.Name} already has this operation queued or running. Follow it in Activity.",
+                        InfoBarSeverity.Informational);
+                    return;
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                {
+                    ShowPageStatus(
+                        "Could not queue uninstall",
+                        exception.Message,
+                        InfoBarSeverity.Warning);
+                    return;
+                }
                 ViewModel.SetStatusMessage($"{app.Name} was added to the operation queue.");
                 break;
             case InstalledAppActionKind.RemoveMsix:
@@ -776,7 +868,31 @@ public sealed partial class MainPage : Page
                     return;
                 }
 
-                ViewModel.EnqueueMsixRemoval(app, item.PackageFullName);
+                try
+                {
+                    ViewModel.EnqueueMsixRemoval(app, item.PackageFullName);
+                }
+                catch (MutationRecoveryUnavailableException)
+                {
+                    ShowMutationRecoveryUnavailable();
+                    return;
+                }
+                catch (DuplicatePackageOperationException)
+                {
+                    ShowPageStatus(
+                        "Already queued",
+                        $"{app.Name} already has this operation queued or running. Follow it in Activity.",
+                        InfoBarSeverity.Informational);
+                    return;
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                {
+                    ShowPageStatus(
+                        "Could not queue uninstall",
+                        exception.Message,
+                        InfoBarSeverity.Warning);
+                    return;
+                }
                 ViewModel.SetStatusMessage($"{app.Name} was added to the operation queue.");
                 break;
             case InstalledAppActionKind.OpenStoreUpdates:
@@ -808,7 +924,15 @@ public sealed partial class MainPage : Page
 
     private async void OnBulkUpdateRequested(object? sender, BulkPackageActionRequestedEventArgs e)
     {
+        if (!ViewModel.CanQueuePackageMutations)
+        {
+            ShowMutationRecoveryUnavailable();
+            return;
+        }
+
         var queued = 0;
+        var alreadyQueued = 0;
+        var approved = new List<(PackageSummary Package, AgreementAcceptance Acceptance)>();
         foreach (var viewPackage in e.Packages)
         {
             var package = FindPackage(viewPackage);
@@ -817,26 +941,76 @@ public sealed partial class MainPage : Page
                 continue;
             }
 
-            var acceptance = await ConfirmAgreementsAsync(package);
-            if (!acceptance.Accepted)
+            if (ViewModel.IsPackageMutationBlocked(package.Key))
             {
+                alreadyQueued++;
                 continue;
             }
 
-            var (scope, architecture) = ReadInstallPreferences();
-            ViewModel.EnqueueOperation(
-                package,
-                PackageOperationKind.Upgrade,
-                acceptance.AcceptedSourceAgreements,
-                acceptance.AcceptedPackageAgreements,
-                scope,
-                architecture);
-            queued++;
+            var acceptance = await ConfirmAgreementsAsync(package);
+            if (acceptance.Accepted)
+            {
+                approved.Add((package, acceptance));
+            }
+        }
+
+        var (scope, architecture) = ReadInstallPreferences();
+        try
+        {
+            var result = ViewModel.EnqueueOperations(
+                approved.Select(entry => new PackageMutationRequest(
+                    entry.Package,
+                    PackageOperationKind.Upgrade,
+                    entry.Acceptance.AcceptedSourceAgreements,
+                    entry.Acceptance.AcceptedPackageAgreements,
+                    scope,
+                    architecture)),
+                skipDuplicates: true);
+            queued = result.OperationIds.Count;
+            alreadyQueued += result.DuplicateCount;
+        }
+        catch (MutationRecoveryUnavailableException)
+        {
+            ShowMutationRecoveryUnavailable();
+            return;
+        }
+        catch (DuplicatePackageOperationException)
+        {
+            // The batch API normally counts duplicates. Keep this conservative fallback
+            // for an unexpected queue race between preflight and admission.
+            alreadyQueued++;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            _updatesPage?.ShowOperationStatus(
+                "Could not queue updates",
+                exception.Message,
+                InfoBarSeverity.Warning);
+            SyncViewData();
+            return;
         }
 
         ViewModel.SetStatusMessage(queued == 0
-            ? "No updates were queued."
+            ? alreadyQueued > 0
+                ? "The selected updates are already queued or running."
+                : "No updates were queued."
             : $"Queued {queued} update{(queued == 1 ? string.Empty : "s")}.");
+        if (queued > 0 || alreadyQueued > 0)
+        {
+            _updatesPage?.ShowOperationStatus(
+                queued > 0 ? "Updates queued" : "Already queued",
+                queued > 0
+                    ? $"Queued {queued} update{(queued == 1 ? string.Empty : "s")} for sequential installation. Track each row here or open Activity for details."
+                    : "The selected updates are already queued or running. Track them here or in Activity.",
+                InfoBarSeverity.Informational);
+        }
+        else
+        {
+            _updatesPage?.ShowStatus(
+                "No updates queued",
+                "No package changes were queued.",
+                InfoBarSeverity.Warning);
+        }
         UpdateShellChrome();
         SyncViewData();
     }
@@ -860,7 +1034,170 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private void OnClearCompletedRequested(object? sender, EventArgs e) => ViewModel.ClearHistory();
+    private async void OnClearCompletedRequested(object? sender, EventArgs e)
+    {
+        var diagnostics = ViewModel.OperationHistory
+            .Select(result => result.EffectiveDiagnostic)
+            .OfType<OperationDiagnosticReference>()
+            .ToArray();
+        if (!ViewModel.ClearHistory()
+            || diagnostics.Length == 0
+            || _operationDiagnosticsService is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _operationDiagnosticsService.DeleteOwnedLogsAsync(diagnostics);
+        }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            ViewModel.SetStatusMessage(
+                "Activity was cleared, but one or more app-owned installer logs could not be removed.");
+        }
+    }
+
+    private async void OnViewDiagnosticRequested(
+        object? sender,
+        OperationDiagnosticRequestedEventArgs e)
+    {
+        if (_operationDiagnosticDialogOpen || _operationDiagnosticsService is null)
+        {
+            return;
+        }
+
+        var operation = ViewModel.OperationHistory.FirstOrDefault(result =>
+            result.OperationId == e.OperationId && result.EffectiveDiagnostic is not null);
+        if (operation is null)
+        {
+            ShowPageStatus(
+                "Log unavailable",
+                "This activity is no longer retained.",
+                InfoBarSeverity.Warning);
+            return;
+        }
+
+        _operationDiagnosticDialogOpen = true;
+        using var cancellation = new CancellationTokenSource();
+        var progress = new ProgressRing
+        {
+            IsActive = true,
+            Width = 32,
+            Height = 32,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        var loadingText = new TextBlock
+        {
+            Text = "Loading operation diagnostics...",
+            TextAlignment = TextAlignment.Center
+        };
+        var loadingPanel = new StackPanel
+        {
+            Spacing = 12,
+            Padding = new Thickness(16)
+        };
+        loadingPanel.Children.Add(progress);
+        loadingPanel.Children.Add(loadingText);
+
+        var notice = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap,
+            Visibility = Visibility.Collapsed
+        };
+        AutomationProperties.SetLiveSetting(notice, AutomationLiveSetting.Polite);
+        var rootSize = XamlRoot?.Size;
+        var maximumLogWidth = rootSize is { } size && size.Width > 0
+            ? Math.Max(0, Math.Min(760, size.Width - 64))
+            : 760;
+        var maximumLogHeight = rootSize is { } heightSize && heightSize.Height > 0
+            ? Math.Max(0, Math.Min(480, heightSize.Height - 180))
+            : 480;
+        var logText = new TextBox
+        {
+            IsReadOnly = true,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.NoWrap,
+            FontFamily = new FontFamily("Consolas"),
+            MaxWidth = maximumLogWidth,
+            MaxHeight = maximumLogHeight,
+            Visibility = Visibility.Collapsed
+        };
+        AutomationProperties.SetName(logText, "Operation diagnostic details");
+        ScrollViewer.SetHorizontalScrollBarVisibility(logText, ScrollBarVisibility.Auto);
+        ScrollViewer.SetVerticalScrollBarVisibility(logText, ScrollBarVisibility.Auto);
+
+        var content = new StackPanel { Spacing = 12 };
+        content.Children.Add(loadingPanel);
+        content.Children.Add(notice);
+        content.Children.Add(logText);
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "Operation diagnostics",
+            Content = content,
+            CloseButtonText = "Close",
+            DefaultButton = ContentDialogButton.Close
+        };
+
+        async void LoadDiagnostic(object? _, ContentDialogOpenedEventArgs __)
+        {
+            try
+            {
+                var document = await _operationDiagnosticsService.ReadAsync(
+                    operation,
+                    cancellation.Token);
+                if (cancellation.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                dialog.Title = document.Title;
+                notice.Text = document.IsTruncated
+                    ? $"{document.Notice} Earlier content was omitted to keep the viewer responsive."
+                    : document.Notice;
+                notice.Visibility = Visibility.Visible;
+                logText.Text = document.Text;
+                logText.Header = document.ProviderLabel;
+                logText.Visibility = Visibility.Visible;
+                loadingPanel.Visibility = Visibility.Collapsed;
+                _ = logText.Focus(FocusState.Programmatic);
+            }
+            catch (OperationCanceledException)
+            {
+                // Closing the dialog cancels the bounded read.
+            }
+            catch (Exception exception) when (IsRecoverable(exception))
+            {
+                loadingPanel.Visibility = Visibility.Collapsed;
+                notice.Text = $"The operation log could not be read (0x{exception.HResult:X8}).";
+                notice.Visibility = Visibility.Visible;
+            }
+        }
+
+        void CancelDiagnostic(object? _, ContentDialogClosedEventArgs __) => cancellation.Cancel();
+        dialog.Opened += LoadDiagnostic;
+        dialog.Closed += CancelDiagnostic;
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        catch (Exception exception) when (IsRecoverable(exception))
+        {
+            ShowPageStatus(
+                "Log unavailable",
+                $"The operation log viewer could not be opened (0x{exception.HResult:X8}).",
+                InfoBarSeverity.Warning);
+        }
+        finally
+        {
+            cancellation.Cancel();
+            dialog.Opened -= LoadDiagnostic;
+            dialog.Closed -= CancelDiagnostic;
+            _operationDiagnosticDialogOpen = false;
+        }
+    }
 
     private void OnSettingChanged(object? sender, SettingChangedEventArgs e)
     {
@@ -1035,12 +1372,14 @@ public sealed partial class MainPage : Page
             return ViewModel.SearchResults
                 .Concat(ViewModel.InstalledPackages)
                 .Concat(ViewModel.AvailableUpdates)
+                .Concat(ViewModel.PendingUpgradeVerifications)
                 .FirstOrDefault(package => package.Key == wingetKey);
         }
 
         return ViewModel.SearchResults
             .Concat(ViewModel.InstalledPackages)
             .Concat(ViewModel.AvailableUpdates)
+            .Concat(ViewModel.PendingUpgradeVerifications)
             .FirstOrDefault(package =>
                 string.Equals(package.Key.Id, item.PackageId, StringComparison.OrdinalIgnoreCase) &&
                 (string.IsNullOrWhiteSpace(item.Source) ||
@@ -1081,11 +1420,23 @@ public sealed partial class MainPage : Page
         StatusText.Text = ViewModel.StatusMessage;
         ActivitySummaryText.Text = ViewModel.ActivitySummary;
         ActivityProgress.IsActive = ViewModel.HasActiveOperation;
-        UpdatesBadge.Value = ViewModel.AvailableUpdates.Count > 0 ? ViewModel.AvailableUpdates.Count : -1;
+        var visibleUpdateCount = ViewModel.AvailableUpdates
+            .Concat(ViewModel.PendingUpgradeVerifications)
+            .Select(package => package.Key)
+            .Distinct()
+            .Count();
+        UpdatesBadge.Value = visibleUpdateCount > 0 ? visibleUpdateCount : -1;
 
-        HealthBanner.IsOpen = _initialized && !ViewModel.IsReady && !ViewModel.IsBusy;
-        HealthBanner.Title = ViewModel.HealthTitle;
-        HealthBanner.Message = ViewModel.HealthMessage;
+        var mutationRecoveryUnavailable =
+            ViewModel.IsReady && !ViewModel.CanQueuePackageMutations;
+        HealthBanner.IsOpen = _initialized
+            && (mutationRecoveryUnavailable || (!ViewModel.IsReady && !ViewModel.IsBusy));
+        HealthBanner.Title = mutationRecoveryUnavailable
+            ? "Package operations paused"
+            : ViewModel.HealthTitle;
+        HealthBanner.Message = mutationRecoveryUnavailable
+            ? $"Package changes are disabled to protect operation recovery state. {ViewModel.MutationVerificationPersistenceError}"
+            : ViewModel.HealthMessage;
     }
 
     private void SyncViewData()
@@ -1094,6 +1445,7 @@ public sealed partial class MainPage : Page
         {
             _discoverPage.SetResults(ViewModel.SearchResults.Select(item => ToViewItem(item)));
             _discoverPage.SetLoading(ViewModel.IsBusy);
+            _discoverPage.SetMutationActionsAvailable(ViewModel.CanQueuePackageMutations);
         }
 
         if (_installedPage is not null)
@@ -1102,11 +1454,30 @@ public sealed partial class MainPage : Page
                 ViewModel.InstalledAppProviders.Count > 0 || ViewModel.InstalledApps.Count > 0
                     ? ViewModel.InstalledApps.Select(ToViewItem)
                     : ViewModel.InstalledPackages.Select(item => ToViewItem(item, "Uninstall")));
+            _installedPage.SetMutationActionsAvailable(ViewModel.CanQueuePackageMutations);
+        }
+
+        if (ContentFrame.Content is PackageDetailsPage detailsPage)
+        {
+            detailsPage.SetMutationActionsAvailable(ViewModel.CanQueuePackageMutations);
         }
 
         if (_updatesPage is not null)
         {
-            _updatesPage.SetUpdates(ViewModel.AvailableUpdates.Select(item => ToViewItem(item, "Update")));
+            var queue = ViewModel.OperationQueueSnapshot;
+            var visibleUpdates = ViewModel.AvailableUpdates
+                .Concat(ViewModel.PendingUpgradeVerifications)
+                .GroupBy(package => package.Key)
+                .Select(group => group.First());
+            _updatesPage.SetUpdates(visibleUpdates.Select(item =>
+                UpdateRowProjector.Apply(
+                    ToViewItem(item, "Update"),
+                    queue,
+                    ViewModel.LastSuccessfulUpdateCheckAt,
+                    ViewModel.IsMutationVerificationPending(item.Key),
+                    ViewModel.IsRestartRequiredThisBoot(item.Key),
+                    ViewModel.CanQueuePackageMutations,
+                    ViewModel.GetMutationVerificationPhase(item.Key))));
             _updatesPage.SetCheckState(
                 ViewModel.UpdatesCheckState,
                 ViewModel.LastUpdateCheckAt,
@@ -1121,7 +1492,7 @@ public sealed partial class MainPage : Page
                 operations.Add(ToViewItem(current));
             }
             operations.AddRange(ViewModel.PendingOperations.Select(ToViewItem));
-            operations.AddRange(ViewModel.OperationHistory.Select(ToViewItem));
+            operations.AddRange(ViewModel.OperationHistory.Select(OperationRowProjector.FromResult));
             _activityPage.SetOperations(operations);
         }
 
@@ -1174,7 +1545,7 @@ public sealed partial class MainPage : Page
         UpdateShellChrome();
     }
 
-    private static PackageListItem ToViewItem(
+    private PackageListItem ToViewItem(
         PackageSummary package,
         string? actionOverride = null,
         PackageDetails? details = null)
@@ -1195,6 +1566,14 @@ public sealed partial class MainPage : Page
             AvailableVersion = package.AvailableVersion ?? string.Empty,
             Status = package.Status.ToString(),
             ActionLabel = action,
+            IsActionEnabled = ViewModel.CanQueuePackageMutations,
+            RequestedOperationKind = action switch
+            {
+                "Update" => PackageOperationKind.Upgrade,
+                "Uninstall" => PackageOperationKind.Uninstall,
+                _ => PackageOperationKind.Install
+            },
+            WingetPackage = package.Key,
             Description = FirstNonEmpty(details?.Description, package.Description, "No description was supplied by this source."),
             IconUri = package.IconUri,
             Publisher = FirstNonEmpty(details?.Publisher, package.Publisher),
@@ -1213,7 +1592,7 @@ public sealed partial class MainPage : Page
         };
     }
 
-    private static PackageListItem ToViewItem(InstalledApp app)
+    private PackageListItem ToViewItem(InstalledApp app)
     {
         var action = app.PrimaryAction;
         var providers = app.Installations
@@ -1243,7 +1622,11 @@ public sealed partial class MainPage : Page
             InstalledVersion = app.VersionDisplay,
             Status = app.HasMultipleVersions ? "Multiple versions" : "Installed",
             ActionLabel = action?.Label ?? "Managed by Windows",
-            IsActionEnabled = action is not null,
+            IsActionEnabled = action is not null
+                && (action.Kind is not (
+                        InstalledAppActionKind.UninstallWithWinget
+                        or InstalledAppActionKind.RemoveMsix)
+                    || ViewModel.CanQueuePackageMutations),
             InstalledActionKind = action?.Kind,
             WingetPackage = action?.WingetPackage,
             PackageFullName = action?.PackageFullName,
@@ -1277,21 +1660,6 @@ public sealed partial class MainPage : Page
             or PackageOperationState.Uninstalling,
         IsIndeterminate = entry.Progress.Percent is null && entry.Progress.State is not PackageOperationState.Queued,
         CanCancel = entry.Progress.CanCancel
-    };
-
-    private static OperationListItem ToViewItem(OperationResult result) => new()
-    {
-        OperationId = result.OperationId,
-        PackageName = result.EffectiveTarget?.Id ?? result.Package.Id,
-        PackageId = result.EffectiveTarget?.Id ?? result.Package.Id,
-        Action = result.Kind.ToString(),
-        Status = result.State.ToString(),
-        Detail = result.Error?.Message ?? (result.RebootRequired ? "Restart Windows to complete this operation." : "Completed"),
-        Timestamp = result.CompletedAt.LocalDateTime.ToString("g"),
-        Progress = result.IsSuccess ? 100 : 0,
-        IsActive = false,
-        IsIndeterminate = false,
-        CanCancel = false
     };
 
     private static void ReplaceAll<T>(ICollection<T> target, IEnumerable<T> values)
@@ -1390,6 +1758,16 @@ public sealed partial class MainPage : Page
         InstallerScope.Machine => "All users",
         _ => "Installer default"
     };
+
+    private void ShowMutationRecoveryUnavailable()
+    {
+        ViewModel.SetStatusMessage(
+            "Package operations are paused because recovery state is unavailable.");
+        ShowPageStatus(
+            "Package operations paused",
+            "Package Pilot cannot safely preserve package-operation recovery state. Restart the app after checking local storage access.",
+            InfoBarSeverity.Warning);
+    }
 
     private void ShowPageStatus(string title, string message, InfoBarSeverity severity)
     {
@@ -1491,6 +1869,11 @@ public sealed partial class MainPage : Page
         NavigateTo("discover");
         _discoverPage?.FocusSearch();
     }
+
+    private static bool IsRecoverable(Exception exception) =>
+        exception is not (OutOfMemoryException
+            or StackOverflowException
+            or AccessViolationException);
 
     private sealed record AgreementAcceptance(
         bool Accepted,

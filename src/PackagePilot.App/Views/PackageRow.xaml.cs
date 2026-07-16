@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace PackagePilot.App.Views;
@@ -6,7 +7,10 @@ namespace PackagePilot.App.Views;
 public sealed partial class PackageRow : UserControl
 {
     public static readonly DependencyProperty PackageNameProperty = DependencyProperty.Register(
-        nameof(PackageName), typeof(string), typeof(PackageRow), new PropertyMetadata(string.Empty));
+        nameof(PackageName),
+        typeof(string),
+        typeof(PackageRow),
+        new PropertyMetadata(string.Empty, OnActionAutomationPropertyChanged));
     public static readonly DependencyProperty PublisherProperty = DependencyProperty.Register(
         nameof(Publisher), typeof(string), typeof(PackageRow), new PropertyMetadata(string.Empty));
     public static readonly DependencyProperty PackageIdProperty = DependencyProperty.Register(
@@ -18,7 +22,10 @@ public sealed partial class PackageRow : UserControl
     public static readonly DependencyProperty StatusProperty = DependencyProperty.Register(
         nameof(Status), typeof(string), typeof(PackageRow), new PropertyMetadata(string.Empty));
     public static readonly DependencyProperty ActionLabelProperty = DependencyProperty.Register(
-        nameof(ActionLabel), typeof(string), typeof(PackageRow), new PropertyMetadata("Install"));
+        nameof(ActionLabel),
+        typeof(string),
+        typeof(PackageRow),
+        new PropertyMetadata("Install", OnActionAutomationPropertyChanged));
     public static readonly DependencyProperty IconGlyphProperty = DependencyProperty.Register(
         nameof(IconGlyph), typeof(string), typeof(PackageRow), new PropertyMetadata("\uE896"));
     public static readonly DependencyProperty IconUriProperty = DependencyProperty.Register(
@@ -26,7 +33,11 @@ public sealed partial class PackageRow : UserControl
     public static readonly DependencyProperty IsActionEnabledProperty = DependencyProperty.Register(
         nameof(IsActionEnabled), typeof(bool), typeof(PackageRow), new PropertyMetadata(true));
 
-    public PackageRow() => InitializeComponent();
+    public PackageRow()
+    {
+        InitializeComponent();
+        UpdateActionAutomationName();
+    }
 
     public string PackageName { get => (string)GetValue(PackageNameProperty); set => SetValue(PackageNameProperty, value); }
     public string Publisher { get => (string)GetValue(PublisherProperty); set => SetValue(PublisherProperty, value); }
@@ -43,4 +54,22 @@ public sealed partial class PackageRow : UserControl
     public event EventHandler? ActionInvoked;
 
     private void OnActionClick(object sender, RoutedEventArgs e) => ActionInvoked?.Invoke(this, EventArgs.Empty);
+
+    private static void OnActionAutomationPropertyChanged(
+        DependencyObject sender,
+        DependencyPropertyChangedEventArgs args)
+    {
+        if (sender is PackageRow row)
+        {
+            row.UpdateActionAutomationName();
+        }
+    }
+
+    private void UpdateActionAutomationName()
+    {
+        if (ActionButton is not null)
+        {
+            AutomationProperties.SetName(ActionButton, ActionAutomationName);
+        }
+    }
 }
