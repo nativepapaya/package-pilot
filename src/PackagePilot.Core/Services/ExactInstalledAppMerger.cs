@@ -117,7 +117,16 @@ public sealed class ExactInstalledAppMerger : IInstalledAppMerger
         var winget = installations.FirstOrDefault(installation =>
             installation.Provider == InstalledAppProviderKind.Winget
             && installation.WingetPackage is not null);
-        if (winget is not null)
+        var removableMsix = installations.FirstOrDefault(installation =>
+            installation.IsDirectRemovalAllowed);
+
+        // WinGet's installed catalog exposes unmatched MSIX packages through
+        // version-bound synthetic IDs such as MSIX\Package_1.2.3.4_.... Those
+        // identifiers can become stale as soon as the package is updated and
+        // are not safe mutation targets. Never send one back through WinGet;
+        // the exact PFN join below may instead provide the current, removable
+        // MSIX registration or an honest Store/Windows handoff.
+        if (winget is not null && !IsSyntheticMsixPackage(winget.WingetPackage))
         {
             return
             [
@@ -134,8 +143,6 @@ public sealed class ExactInstalledAppMerger : IInstalledAppMerger
         }
 
         var actions = new List<InstalledAppActionDescriptor>();
-        var removableMsix = installations.FirstOrDefault(installation =>
-            installation.IsDirectRemovalAllowed);
         if (removableMsix is not null)
         {
             actions.Add(new InstalledAppActionDescriptor
@@ -175,6 +182,10 @@ public sealed class ExactInstalledAppMerger : IInstalledAppMerger
 
         return actions;
     }
+
+    private static bool IsSyntheticMsixPackage(PackageKey? package) =>
+        package is { Id: { } id }
+        && id.StartsWith("MSIX\\", StringComparison.OrdinalIgnoreCase);
 
     private static bool TryCreateMergeKey(InstalledAppAlias alias, out AliasKey key)
     {

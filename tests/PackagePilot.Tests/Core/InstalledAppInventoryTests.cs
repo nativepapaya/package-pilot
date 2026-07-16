@@ -139,6 +139,62 @@ public sealed class InstalledAppInventoryTests
     }
 
     [Fact]
+    public void Merger_RoutesSyntheticWingetMsixToCurrentDirectRemovalTarget()
+    {
+        const string currentPackageFullName =
+            "Claude_1.21459.3.0_x64__pzs8sxrjxfjjc";
+        var syntheticWinget = Winget(
+            "winget-msix",
+            "Claude",
+            new InstalledAppAlias(InstalledAppAliasKind.PackageFamilyName, FamilyName)) with
+        {
+            WingetPackage = new PackageKey(
+                "MSIX\\Claude_1.20186.1.0_x64__pzs8sxrjxfjjc",
+                "*PredefinedInstalledSource")
+        };
+        var currentMsix = Msix("msix-current", "Claude", FamilyName) with
+        {
+            PackageFullName = currentPackageFullName
+        };
+
+        var app = Assert.Single(new ExactInstalledAppMerger().Merge(
+            [syntheticWinget, currentMsix]));
+
+        var action = Assert.Single(app.Actions);
+        Assert.Equal(InstalledAppActionKind.RemoveMsix, action.Kind);
+        Assert.Equal(currentPackageFullName, action.PackageFullName);
+        Assert.True(action.IsPrimary);
+        Assert.False(action.CanCancel);
+    }
+
+    [Fact]
+    public void Merger_DoesNotRouteProtectedSyntheticMsixThroughWinget()
+    {
+        var syntheticWinget = Winget(
+            "winget-msix",
+            "Protected",
+            new InstalledAppAlias(InstalledAppAliasKind.PackageFamilyName, FamilyName)) with
+        {
+            WingetPackage = new PackageKey(
+                "MSIX\\Protected_1.0.0.0_x64__abcd1234",
+                "*PredefinedInstalledSource")
+        };
+        var protectedMsix = Msix("msix-protected", "Protected", FamilyName) with
+        {
+            IsStoreApp = true,
+            IsSystem = true
+        };
+
+        var app = Assert.Single(new ExactInstalledAppMerger().Merge(
+            [syntheticWinget, protectedMsix]));
+
+        Assert.DoesNotContain(app.Actions,
+            action => action.Kind is InstalledAppActionKind.UninstallWithWinget
+                or InstalledAppActionKind.RemoveMsix);
+        Assert.Equal(InstalledAppActionKind.OpenStoreUpdates, app.PrimaryAction?.Kind);
+    }
+
+    [Fact]
     public void Merger_OffersNonCancelableMsixRemovalAndStoreHandoff()
     {
         var app = Assert.Single(new ExactInstalledAppMerger().Merge(
