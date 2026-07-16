@@ -1,6 +1,7 @@
 using PackagePilot.Core.Abstractions;
 using PackagePilot.Core.Models;
 using Windows.ApplicationModel;
+using Windows.Foundation;
 using Windows.Management.Deployment;
 
 namespace PackagePilot.Windows.Services;
@@ -9,6 +10,18 @@ namespace PackagePilot.Windows.Services;
 public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationClient
 {
     private readonly PackageManager _packageManager = new();
+    private readonly IMsixRemovalCompletionMonitor _completionMonitor;
+
+    public WindowsMsixPackageOperationClient()
+        : this(new WindowsMsixRemovalCompletionMonitor())
+    {
+    }
+
+    internal WindowsMsixPackageOperationClient(IMsixRemovalCompletionMonitor completionMonitor)
+    {
+        _completionMonitor = completionMonitor
+            ?? throw new ArgumentNullException(nameof(completionMonitor));
+    }
 
     public async Task<OperationResult> UninstallAsync(
         PackageOperation operation,
@@ -55,9 +68,34 @@ public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationCli
 
         try
         {
-            var result = await _packageManager.RemovePackageAsync(
+            var deploymentOperation = _packageManager.RemovePackageAsync(
                 target.PackageFullName,
                 RemovalOptions.None);
+            var nativeCompletion = AwaitAsync(deploymentOperation);
+            using var recoveryCancellation = new CancellationTokenSource();
+            var recoveredCompletion = _completionMonitor.WaitForSuccessfulRemovalAsync(
+                target.PackageFullName,
+                startedAt,
+                recoveryCancellation.Token);
+            var completion = await MsixRemovalCompletionCoordinator.WaitAsync(
+                    nativeCompletion,
+                    recoveredCompletion,
+                    recoveryCancellation)
+                .ConfigureAwait(false);
+            if (completion.WasRecovered)
+            {
+                // Event 400 is Windows' exact successful completion record. The native WinRT
+                // callback has stalled, so release that completed projection after preserving
+                // its Activity ID through the event log.
+                TryClose(deploymentOperation);
+                return Completed(
+                    operation,
+                    target,
+                    startedAt,
+                    CreateDeploymentDiagnostic(completion.ActivityId));
+            }
+
+            var result = completion.NativeResult;
             var diagnostic = CreateDeploymentDiagnostic(result.ActivityId);
             var extended = result.ExtendedErrorCode;
             if (extended is not null && extended.HResult < 0)
@@ -71,23 +109,47 @@ public sealed class WindowsMsixPackageOperationClient : IMsixPackageOperationCli
                     diagnostic);
             }
 
-            return new OperationResult
-            {
-                OperationId = operation.Id,
-                Package = operation.Package,
-                Target = target,
-                Kind = PackageOperationKind.Uninstall,
-                State = PackageOperationState.Completed,
-                StartedAt = startedAt,
-                CompletedAt = DateTimeOffset.UtcNow,
-                Diagnostic = diagnostic
-            };
+            return Completed(operation, target, startedAt, diagnostic);
         }
         catch (Exception ex)
         {
             return Failed(operation, $"0x{ex.HResult:X8}", ex.Message, ex.HResult, startedAt);
         }
     }
+
+    private static async Task<TResult> AwaitAsync<TResult, TProgress>(
+        IAsyncOperationWithProgress<TResult, TProgress> operation) =>
+        await operation;
+
+    private static void TryClose(IAsyncInfo operation)
+    {
+        try
+        {
+            operation.Close();
+        }
+        catch (Exception exception) when (
+            exception is not (OutOfMemoryException or StackOverflowException or AccessViolationException))
+        {
+            // Cleanup of a completed WinRT projection must not overwrite Windows' exact success.
+        }
+    }
+
+    private static OperationResult Completed(
+        PackageOperation operation,
+        MsixTarget target,
+        DateTimeOffset startedAt,
+        OperationDiagnosticReference? diagnostic) =>
+        new()
+        {
+            OperationId = operation.Id,
+            Package = operation.Package,
+            Target = target,
+            Kind = PackageOperationKind.Uninstall,
+            State = PackageOperationState.Completed,
+            StartedAt = startedAt,
+            CompletedAt = DateTimeOffset.UtcNow,
+            Diagnostic = diagnostic
+        };
 
     private static string? GetSafetyError(Package package)
     {
