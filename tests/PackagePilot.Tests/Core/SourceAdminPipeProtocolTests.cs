@@ -1,9 +1,9 @@
 using System.Buffers.Binary;
-using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using PackagePilot.Core.Models;
 using PackagePilot.Core.Services;
+using PackagePilot.Windows.Services;
 
 namespace PackagePilot.Tests.Core;
 
@@ -16,20 +16,11 @@ public sealed class SourceAdminPipeProtocolTests
         var secret = SourceAdminPipeProtocol.CreateSecret();
         var request = PrivilegedSourceRequest.Remove("contoso");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        using var server = new NamedPipeServerStream(
-            pipeName,
-            PipeDirection.InOut,
-            1,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        using var server = ElevatedPipeAclFactory.CreateServerForCurrentUser(pipeName);
 
         var clientTask = Task.Run(async () =>
         {
-            using var client = new NamedPipeClientStream(
-                ".",
-                pipeName,
-                PipeDirection.InOut,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            using var client = ElevatedPipeAclFactory.CreateClient(pipeName);
             await client.ConnectAsync(timeout.Token);
             await SourceAdminPipeProtocol.AuthenticateClientAsync(
                 client,
@@ -80,20 +71,11 @@ public sealed class SourceAdminPipeProtocolTests
         var serverSecret = SourceAdminPipeProtocol.CreateSecret();
         var clientSecret = SourceAdminPipeProtocol.CreateSecret();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        using var server = new NamedPipeServerStream(
-            pipeName,
-            PipeDirection.InOut,
-            1,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        using var server = ElevatedPipeAclFactory.CreateServerForCurrentUser(pipeName);
 
         var clientTask = Task.Run(async () =>
         {
-            using var client = new NamedPipeClientStream(
-                ".",
-                pipeName,
-                PipeDirection.InOut,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            using var client = ElevatedPipeAclFactory.CreateClient(pipeName);
             await client.ConnectAsync(timeout.Token);
             await SourceAdminPipeProtocol.AuthenticateClientAsync(
                 client,

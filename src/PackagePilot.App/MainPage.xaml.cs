@@ -340,13 +340,17 @@ public sealed partial class MainPage : Page
 
         await ViewModel.SelectPackageAsync(package);
         var details = ViewModel.SelectedDetails;
-        var item = ToViewItem(package, e.Package.ActionLabel, details);
         if (sender is DiscoverPage discoverPage)
         {
+            var item = ToDiscoverViewItem(
+                package,
+                CreateDiscoverStateIndex(),
+                details);
             discoverPage.ShowPackageDetails(item);
         }
         else if (sender is InstalledPage installedPage)
         {
+            var item = ToViewItem(package, e.Package.ActionLabel, details);
             installedPage.ShowPackageDetails(item);
         }
     }
@@ -722,6 +726,16 @@ public sealed partial class MainPage : Page
             return;
         }
 
+        var retryAsAdministrator = e.Package.RequiresAdministratorRetry;
+        if (retryAsAdministrator && !ViewModel.CanRetryPackageAsAdministrator)
+        {
+            ShowPageStatus(
+                "Administrator retry unavailable",
+                "The packaged one-shot administrator helper is unavailable. Reinstall or update Package Pilot before retrying this operation.",
+                InfoBarSeverity.Warning);
+            return;
+        }
+
         var kind = e.Package.RequestedOperationKind ??
             (e.Package.ActionLabel switch
             {
@@ -729,6 +743,17 @@ public sealed partial class MainPage : Page
                 "Uninstall" => PackageOperationKind.Uninstall,
                 _ => PackageOperationKind.Install
             });
+
+        if (retryAsAdministrator
+            && !ViewModel.CanRetryPackageAsAdministratorFor(package.Key, kind))
+        {
+            ShowPageStatus(
+                "Administrator retry no longer applies",
+                "The latest result for this exact package and source no longer requires an administrator retry. Refresh and review its current state before continuing.",
+                InfoBarSeverity.Informational);
+            SyncViewData();
+            return;
+        }
 
         if (ViewModel.IsPackageMutationBlocked(package.Key))
         {
@@ -745,17 +770,39 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        if (kind != PackageOperationKind.Uninstall && !await ConfirmElevationAsync(package))
+        if (!retryAsAdministrator
+            && kind != PackageOperationKind.Uninstall
+            && !await ConfirmElevationAsync(package))
         {
             return;
         }
 
         var acceptance = kind == PackageOperationKind.Uninstall
-            ? new AgreementAcceptance(true, false, false)
-            : await ConfirmAgreementsAsync(package);
+            ? new AgreementAcceptance(true, false, null, false, null)
+            : await ConfirmAgreementsAsync(
+                package,
+                requireExactAgreementSnapshot: retryAsAdministrator);
 
         if (!acceptance.Accepted)
         {
+            return;
+        }
+
+        if (retryAsAdministrator
+            && !await ConfirmAdministratorRetryAsync(package, kind))
+        {
+            return;
+        }
+
+        if (retryAsAdministrator
+            && (!ViewModel.CanRetryPackageAsAdministratorFor(package.Key, kind)
+                || ViewModel.IsPackageMutationBlocked(package.Key)))
+        {
+            ShowPageStatus(
+                "Administrator retry state changed",
+                "This package changed while you were reviewing the request. Refresh and review its latest state before authorizing an administrator retry.",
+                InfoBarSeverity.Informational);
+            SyncViewData();
             return;
         }
 
@@ -768,7 +815,10 @@ public sealed partial class MainPage : Page
                 acceptance.AcceptedSourceAgreements,
                 acceptance.AcceptedPackageAgreements,
                 scope,
-                architecture);
+                architecture,
+                acceptance.AcceptedSourceAgreementFingerprint,
+                acceptance.AcceptedPackageAgreementFingerprint,
+                retryAsAdministrator);
         }
         catch (MutationRecoveryUnavailableException)
         {
@@ -795,12 +845,16 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        ViewModel.SetStatusMessage($"{package.Name} was added to the operation queue.");
+        ViewModel.SetStatusMessage(retryAsAdministrator
+            ? $"{package.Name} was queued for one administrator-approved retry."
+            : $"{package.Name} was added to the operation queue.");
         if (kind == PackageOperationKind.Upgrade && sender is UpdatesPage)
         {
             _updatesPage?.ShowOperationStatus(
-                "Update queued",
-                $"{package.Name} is queued. Its row now shows progress, and full details remain available in Activity.",
+                retryAsAdministrator ? "Administrator retry queued" : "Update queued",
+                retryAsAdministrator
+                    ? $"{package.Name} is queued. Windows will show one UAC prompt when it reaches the front of the queue."
+                    : $"{package.Name} is queued. Its row now shows progress, and full details remain available in Activity.",
                 InfoBarSeverity.Informational);
         }
         UpdateShellChrome();
@@ -964,7 +1018,9 @@ public sealed partial class MainPage : Page
                     entry.Acceptance.AcceptedSourceAgreements,
                     entry.Acceptance.AcceptedPackageAgreements,
                     scope,
-                    architecture)),
+                    architecture,
+                    entry.Acceptance.AcceptedSourceAgreementFingerprint,
+                    entry.Acceptance.AcceptedPackageAgreementFingerprint)),
                 skipDuplicates: true);
             queued = result.OperationIds.Count;
             alreadyQueued += result.DuplicateCount;
@@ -1067,19 +1123,18 @@ public sealed partial class MainPage : Page
             return;
         }
 
-        var operation = ViewModel.OperationHistory.FirstOrDefault(result =>
-            result.OperationId == e.OperationId && result.EffectiveDiagnostic is not null);
-        if (operation is null)
+        if (!TryFindDiagnosticOperation(e.OperationId, out _, out _))
         {
             ShowPageStatus(
                 "Log unavailable",
-                "This activity is no longer retained.",
+                "This activity is no longer queued, running, or retained.",
                 InfoBarSeverity.Warning);
             return;
         }
 
         _operationDiagnosticDialogOpen = true;
         using var cancellation = new CancellationTokenSource();
+        using var refreshGate = new SemaphoreSlim(1, 1);
         var progress = new ProgressRing
         {
             IsActive = true,
@@ -1106,6 +1161,30 @@ public sealed partial class MainPage : Page
             Visibility = Visibility.Collapsed
         };
         AutomationProperties.SetLiveSetting(notice, AutomationLiveSetting.Polite);
+        var refreshStatus = new TextBlock
+        {
+            Text = "Preparing diagnostics...",
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center,
+            FontSize = 12,
+            Opacity = 0.8
+        };
+        AutomationProperties.SetName(refreshStatus, "Diagnostic refresh status");
+        var refreshButton = new Button
+        {
+            Content = "Refresh now",
+            IsEnabled = false,
+            HorizontalAlignment = HorizontalAlignment.Right
+        };
+        AutomationProperties.SetName(refreshButton, "Refresh operation diagnostics now");
+        var refreshControls = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 12,
+            HorizontalAlignment = HorizontalAlignment.Right
+        };
+        refreshControls.Children.Add(refreshStatus);
+        refreshControls.Children.Add(refreshButton);
         var rootSize = XamlRoot?.Size;
         var maximumLogWidth = rootSize is { } size && size.Width > 0
             ? Math.Max(0, Math.Min(760, size.Width - 64))
@@ -1129,6 +1208,7 @@ public sealed partial class MainPage : Page
 
         var content = new StackPanel { Spacing = 12 };
         content.Children.Add(loadingPanel);
+        content.Children.Add(refreshControls);
         content.Children.Add(notice);
         content.Children.Add(logText);
 
@@ -1141,44 +1221,147 @@ public sealed partial class MainPage : Page
             DefaultButton = ContentDialogButton.Close
         };
 
-        async void LoadDiagnostic(object? _, ContentDialogOpenedEventArgs __)
+        var refreshLoop = new OperationDiagnosticRefreshLoop();
+        Task? automaticRefreshTask = null;
+        Task? manualRefreshTask = null;
+
+        async Task<bool> RefreshDiagnosticAsync(CancellationToken cancellationToken)
         {
+            await refreshGate.WaitAsync(cancellationToken);
             try
             {
-                var document = await _operationDiagnosticsService.ReadAsync(
-                    operation,
-                    cancellation.Token);
-                if (cancellation.IsCancellationRequested)
+                refreshButton.IsEnabled = false;
+                if (!TryFindDiagnosticOperation(
+                        e.OperationId,
+                        out var completedOperation,
+                        out var liveOperation))
                 {
-                    return;
+                    loadingPanel.Visibility = Visibility.Collapsed;
+                    refreshStatus.Text = "Activity is no longer retained.";
+                    notice.Text = "The operation left Activity history while this viewer was open.";
+                    notice.Visibility = Visibility.Visible;
+                    return false;
                 }
 
+                var isLive = liveOperation is not null;
+                var document = completedOperation is not null
+                    ? await _operationDiagnosticsService.ReadAsync(
+                        completedOperation,
+                        cancellationToken)
+                    : await _operationDiagnosticsService.ReadLiveAsync(
+                        liveOperation!,
+                        cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+
                 dialog.Title = document.Title;
-                notice.Text = document.IsTruncated
+                var noticeText = document.IsTruncated
                     ? $"{document.Notice} Earlier content was omitted to keep the viewer responsive."
                     : document.Notice;
+                if (!string.Equals(notice.Text, noticeText, StringComparison.Ordinal))
+                {
+                    notice.Text = noticeText;
+                }
+
                 notice.Visibility = Visibility.Visible;
-                logText.Text = document.Text;
+                var firstDisplay = logText.Visibility != Visibility.Visible;
+                if (!string.Equals(logText.Text, document.Text, StringComparison.Ordinal))
+                {
+                    var priorSelection = logText.SelectionStart;
+                    var updatedSelection = OperationDiagnosticRefreshLoop.GetUpdatedSelectionStart(
+                        firstDisplay,
+                        isLive,
+                        priorSelection,
+                        logText.SelectionLength,
+                        logText.Text.Length,
+                        document.Text.Length);
+                    logText.Text = document.Text;
+                    logText.SelectionStart = updatedSelection;
+                    logText.SelectionLength = 0;
+                }
+
                 logText.Header = document.ProviderLabel;
                 logText.Visibility = Visibility.Visible;
                 loadingPanel.Visibility = Visibility.Collapsed;
-                _ = logText.Focus(FocusState.Programmatic);
+                progress.IsActive = false;
+                refreshStatus.Text = isLive
+                    ? $"Live - refreshes every {OperationDiagnosticRefreshLoop.AutomaticRefreshInterval.TotalSeconds:0} seconds while this dialog is open"
+                    : "Completed - use Refresh now to re-read retained logs";
+                refreshButton.IsEnabled = true;
+                if (firstDisplay)
+                {
+                    _ = logText.Focus(FocusState.Programmatic);
+                }
+
+                return isLive;
             }
-            catch (OperationCanceledException)
+            finally
             {
-                // Closing the dialog cancels the bounded read.
-            }
-            catch (Exception exception) when (IsRecoverable(exception))
-            {
-                loadingPanel.Visibility = Visibility.Collapsed;
-                notice.Text = $"The operation log could not be read (0x{exception.HResult:X8}).";
-                notice.Visibility = Visibility.Visible;
+                refreshGate.Release();
             }
         }
 
+        void ShowDiagnosticReadError(Exception exception)
+        {
+            progress.IsActive = false;
+            loadingPanel.Visibility = Visibility.Collapsed;
+            refreshStatus.Text = "Automatic refresh paused; use Refresh now to retry.";
+            notice.Text = $"The operation log could not be read (0x{exception.HResult:X8}).";
+            notice.Visibility = Visibility.Visible;
+            refreshButton.IsEnabled = !cancellation.IsCancellationRequested;
+        }
+
+        async Task RunAutomaticRefreshAsync()
+        {
+            try
+            {
+                var result = await refreshLoop.RunAsync(
+                    RefreshDiagnosticAsync,
+                    cancellation.Token);
+                if (result == OperationDiagnosticRefreshLoopResult.LimitReached
+                    && !cancellation.IsCancellationRequested)
+                {
+                    refreshStatus.Text = "Live auto-refresh paused after five minutes; use Refresh now to continue.";
+                }
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                // Closing the dialog cancels the current bounded read or delay.
+            }
+            catch (Exception exception) when (IsRecoverable(exception))
+            {
+                ShowDiagnosticReadError(exception);
+            }
+        }
+
+        async Task RefreshManuallyAsync()
+        {
+            try
+            {
+                await RefreshDiagnosticAsync(cancellation.Token);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                // The dialog was closed during a manual read.
+            }
+            catch (Exception exception) when (IsRecoverable(exception))
+            {
+                ShowDiagnosticReadError(exception);
+            }
+        }
+
+        void LoadDiagnostic(object? _, ContentDialogOpenedEventArgs __) =>
+            automaticRefreshTask = RunAutomaticRefreshAsync();
+        void RefreshDiagnostic(object? _, RoutedEventArgs __)
+        {
+            if (manualRefreshTask is null || manualRefreshTask.IsCompleted)
+            {
+                manualRefreshTask = RefreshManuallyAsync();
+            }
+        }
         void CancelDiagnostic(object? _, ContentDialogClosedEventArgs __) => cancellation.Cancel();
         dialog.Opened += LoadDiagnostic;
         dialog.Closed += CancelDiagnostic;
+        refreshButton.Click += RefreshDiagnostic;
         try
         {
             await dialog.ShowAsync();
@@ -1193,10 +1376,46 @@ public sealed partial class MainPage : Page
         finally
         {
             cancellation.Cancel();
+            var pendingReads = new[] { automaticRefreshTask, manualRefreshTask }
+                .OfType<Task>()
+                .ToArray();
+            if (pendingReads.Length > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(pendingReads);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Cancellation is the expected dialog-close path.
+                }
+            }
+
             dialog.Opened -= LoadDiagnostic;
             dialog.Closed -= CancelDiagnostic;
+            refreshButton.Click -= RefreshDiagnostic;
             _operationDiagnosticDialogOpen = false;
         }
+    }
+
+    private bool TryFindDiagnosticOperation(
+        Guid operationId,
+        out OperationResult? completedOperation,
+        out OperationQueueEntry? liveOperation)
+    {
+        completedOperation = ViewModel.OperationHistory.FirstOrDefault(result =>
+            result.OperationId == operationId);
+        if (completedOperation is not null)
+        {
+            liveOperation = null;
+            return true;
+        }
+
+        var queue = ViewModel.OperationQueueSnapshot;
+        liveOperation = queue.Current?.Operation.Id == operationId
+            ? queue.Current
+            : queue.Pending.FirstOrDefault(entry => entry.Operation.Id == operationId);
+        return liveOperation is not null;
     }
 
     private void OnSettingChanged(object? sender, SettingChangedEventArgs e)
@@ -1261,14 +1480,61 @@ public sealed partial class MainPage : Page
         return await dialog.ShowAsync() == ContentDialogResult.Primary;
     }
 
-    private async Task<AgreementAcceptance> ConfirmAgreementsAsync(PackageSummary package)
+    private async Task<bool> ConfirmAdministratorRetryAsync(
+        PackageSummary package,
+        PackageOperationKind kind)
+    {
+        var action = kind switch
+        {
+            PackageOperationKind.Install => "install",
+            PackageOperationKind.Upgrade => "update",
+            PackageOperationKind.Uninstall => "uninstall",
+            _ => "change"
+        };
+        var source = string.IsNullOrWhiteSpace(package.Key.SourceId)
+            ? "(missing source)"
+            : package.Key.SourceId;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = $"Retry {package.Name} as administrator?",
+            Content =
+                $"When this operation reaches the front of the queue, Package Pilot will ask Windows for one UAC approval. A short-lived helper will then {action} only this exact WinGet package:{Environment.NewLine}{Environment.NewLine}" +
+                $"Package: {package.Key.Id}{Environment.NewLine}Source: {source}{Environment.NewLine}{Environment.NewLine}" +
+                "The main app remains at normal integrity. Approve with the current Windows account; alternate administrator credentials are rejected so Package Pilot cannot change another user's package profile. You can cancel the queued request in Activity until it reaches the front. After Windows begins the UAC request, Package Pilot cannot safely cancel it; you can decline the UAC prompt instead. The helper exits after returning one result.",
+            PrimaryButtonText = "Queue administrator retry",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close
+        };
+
+        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+    }
+
+    private async Task<AgreementAcceptance> ConfirmAgreementsAsync(
+        PackageSummary package,
+        bool requireExactAgreementSnapshot = false)
     {
         await ViewModel.SelectPackageAsync(package);
+        if (requireExactAgreementSnapshot
+            && ViewModel.SelectedDetails?.Summary.Key != package.Key)
+        {
+            ShowPageStatus(
+                "Could not verify current agreements",
+                "Package Pilot will not send this operation to the administrator helper until WinGet returns current details for the exact package and source.",
+                InfoBarSeverity.Warning);
+            return new AgreementAcceptance(false, false, null, false, null);
+        }
+
         var sourceAgreements = (ViewModel.SelectedDetails?.Agreements ?? [])
             .Where(item => item.Kind == AgreementKind.Source)
             .ToArray();
-        var acceptedSource = ViewModel.IsSourceAgreementAccepted(package.Key.SourceId)
-            || sourceAgreements.Length == 0;
+        var currentSourceSnapshot = sourceAgreements.Length > 0
+            ? SourceAgreementSnapshot.Create(package.Key.SourceId, sourceAgreements)
+            : null;
+        var acceptedSourceFingerprint =
+            ViewModel.GetAcceptedSourceAgreementFingerprint(package.Key.SourceId);
+        var acceptedSource = currentSourceSnapshot is null
+            || currentSourceSnapshot.Matches(acceptedSourceFingerprint);
         if (!acceptedSource)
         {
             acceptedSource = await ConfirmAgreementSetAsync(
@@ -1278,11 +1544,38 @@ public sealed partial class MainPage : Page
                 "Accept source terms");
             if (!acceptedSource)
             {
-                return new AgreementAcceptance(false, false, false);
+                return new AgreementAcceptance(false, false, null, false, null);
             }
 
+            acceptedSourceFingerprint = currentSourceSnapshot!.Fingerprint;
             ViewModel.AcceptPackageSourceAgreement(package, sourceAgreements);
+        }
+
+        if (currentSourceSnapshot is not null)
+        {
+            // AgreementRequired details contain only source terms. Even when persisted consent
+            // exactly matches those current terms, reconnect before reviewing package terms.
             await ViewModel.SelectPackageAcceptingSourceAgreementsAsync(package);
+            if (requireExactAgreementSnapshot
+                && ViewModel.SelectedDetails?.Summary.Key != package.Key)
+            {
+                ShowPageStatus(
+                    "Could not verify current agreements",
+                    "The exact package details were unavailable after source-term review, so the administrator retry was not queued.",
+                    InfoBarSeverity.Warning);
+                return new AgreementAcceptance(false, false, null, false, null);
+            }
+
+            if (requireExactAgreementSnapshot
+                && (ViewModel.SelectedDetails?.Agreements ?? [])
+                    .Any(item => item.Kind == AgreementKind.Source))
+            {
+                ShowPageStatus(
+                    "Source agreements changed",
+                    "The source terms changed while the administrator retry was being reviewed. Review the updated terms in a new retry instead of authorizing stale consent.",
+                    InfoBarSeverity.Warning);
+                return new AgreementAcceptance(false, false, null, false, null);
+            }
         }
 
         var packageAgreements = (ViewModel.SelectedDetails?.Agreements ?? [])
@@ -1294,12 +1587,19 @@ public sealed partial class MainPage : Page
                 "Review the package terms supplied by WinGet before continuing.",
                 packageAgreements,
                 "Accept package terms");
+        var acceptedPackageFingerprint =
+            acceptedPackage && packageAgreements.Length > 0
+                ? PackageAgreementSnapshot.Create(
+                    package.Key,
+                    packageAgreements).Fingerprint
+                : null;
 
         return new AgreementAcceptance(
             acceptedPackage,
-            ViewModel.IsSourceAgreementAccepted(package.Key.SourceId)
-                || (acceptedSource && sourceAgreements.Length > 0),
-            acceptedPackage && packageAgreements.Length > 0);
+            acceptedSourceFingerprint is not null,
+            acceptedSourceFingerprint,
+            acceptedPackage && packageAgreements.Length > 0,
+            acceptedPackageFingerprint);
     }
 
     private async Task<bool> ConfirmAgreementSetAsync(
@@ -1443,7 +1743,9 @@ public sealed partial class MainPage : Page
     {
         if (_discoverPage is not null)
         {
-            _discoverPage.SetResults(ViewModel.SearchResults.Select(item => ToViewItem(item)));
+            var discoverState = CreateDiscoverStateIndex();
+            _discoverPage.SetResults(ViewModel.SearchResults.Select(item =>
+                ToDiscoverViewItem(item, discoverState)));
             _discoverPage.SetLoading(ViewModel.IsBusy);
             _discoverPage.SetMutationActionsAvailable(ViewModel.CanQueuePackageMutations);
         }
@@ -1477,7 +1779,8 @@ public sealed partial class MainPage : Page
                     ViewModel.IsMutationVerificationPending(item.Key),
                     ViewModel.IsRestartRequiredThisBoot(item.Key),
                     ViewModel.CanQueuePackageMutations,
-                    ViewModel.GetMutationVerificationPhase(item.Key))));
+                    ViewModel.GetMutationVerificationPhase(item.Key),
+                    ViewModel.CanRetryPackageAsAdministrator)));
             _updatesPage.SetCheckState(
                 ViewModel.UpdatesCheckState,
                 ViewModel.LastUpdateCheckAt,
@@ -1489,9 +1792,9 @@ public sealed partial class MainPage : Page
             var operations = new List<OperationListItem>();
             if (ViewModel.CurrentOperation is { } current)
             {
-                operations.Add(ToViewItem(current));
+                operations.Add(OperationRowProjector.FromEntry(current));
             }
-            operations.AddRange(ViewModel.PendingOperations.Select(ToViewItem));
+            operations.AddRange(ViewModel.PendingOperations.Select(OperationRowProjector.FromEntry));
             operations.AddRange(ViewModel.OperationHistory.Select(OperationRowProjector.FromResult));
             _activityPage.SetOperations(operations);
         }
@@ -1544,6 +1847,27 @@ public sealed partial class MainPage : Page
 
         UpdateShellChrome();
     }
+
+    private DiscoverPackageStateIndex CreateDiscoverStateIndex() =>
+        DiscoverRowProjector.CreateIndex(
+            ViewModel.SearchResults,
+            ViewModel.InstalledPackages,
+            ViewModel.AvailableUpdates,
+            ViewModel.OperationQueueSnapshot);
+
+    private PackageListItem ToDiscoverViewItem(
+        PackageSummary package,
+        DiscoverPackageStateIndex index,
+        PackageDetails? details = null) =>
+        DiscoverRowProjector.Apply(
+            ToViewItem(package, details: details),
+            package,
+            index,
+            ViewModel.CanQueuePackageMutations,
+            ViewModel.IsMutationVerificationPending(package.Key),
+            ViewModel.IsRestartRequiredThisBoot(package.Key),
+            ViewModel.GetMutationVerificationPhase(package.Key),
+            ViewModel.CanRetryPackageAsAdministrator);
 
     private PackageListItem ToViewItem(
         PackageSummary package,
@@ -1642,25 +1966,6 @@ public sealed partial class MainPage : Page
                 .Distinct(StringComparer.OrdinalIgnoreCase))
         };
     }
-
-    private static OperationListItem ToViewItem(OperationQueueEntry entry) => new()
-    {
-        OperationId = entry.Operation.Id,
-        PackageName = entry.Operation.DisplayName,
-        PackageId = entry.Operation.EffectiveTarget?.Id ?? entry.Operation.Package.Id,
-        Action = entry.Operation.Kind.ToString(),
-        Status = entry.Progress.State.ToString(),
-        Detail = entry.Progress.Message ?? (entry.Progress.CanCancel ? "Waiting or downloading" : "The installer controls completion"),
-        Timestamp = entry.Progress.Timestamp.LocalDateTime.ToString("g"),
-        Progress = entry.Progress.Percent ?? 0,
-        IsActive = entry.Progress.State is PackageOperationState.Resolving
-            or PackageOperationState.Downloading
-            or PackageOperationState.Installing
-            or PackageOperationState.Upgrading
-            or PackageOperationState.Uninstalling,
-        IsIndeterminate = entry.Progress.Percent is null && entry.Progress.State is not PackageOperationState.Queued,
-        CanCancel = entry.Progress.CanCancel
-    };
 
     private static void ReplaceAll<T>(ICollection<T> target, IEnumerable<T> values)
     {
@@ -1878,5 +2183,7 @@ public sealed partial class MainPage : Page
     private sealed record AgreementAcceptance(
         bool Accepted,
         bool AcceptedSourceAgreements,
-        bool AcceptedPackageAgreements);
+        string? AcceptedSourceAgreementFingerprint,
+        bool AcceptedPackageAgreements,
+        string? AcceptedPackageAgreementFingerprint);
 }

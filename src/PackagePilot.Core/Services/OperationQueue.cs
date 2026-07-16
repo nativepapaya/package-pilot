@@ -17,6 +17,7 @@ public sealed class OperationQueue : IOperationQueue
     private readonly object _persistenceScheduleGate = new();
     private readonly IWingetClient _wingetClient;
     private readonly IMsixPackageOperationClient? _msixClient;
+    private readonly IPrivilegedPackageOperationBroker? _privilegedPackageOperationBroker;
     private readonly IOperationHistoryStore? _historyStore;
     private readonly TimeProvider _timeProvider;
     private readonly Channel<QueueItem> _channel;
@@ -35,12 +36,14 @@ public sealed class OperationQueue : IOperationQueue
         IWingetClient wingetClient,
         IOperationHistoryStore? historyStore = null,
         TimeProvider? timeProvider = null,
-        IMsixPackageOperationClient? msixClient = null)
+        IMsixPackageOperationClient? msixClient = null,
+        IPrivilegedPackageOperationBroker? privilegedPackageOperationBroker = null)
     {
         _wingetClient = wingetClient ?? throw new ArgumentNullException(nameof(wingetClient));
         _historyStore = historyStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _msixClient = msixClient;
+        _privilegedPackageOperationBroker = privilegedPackageOperationBroker;
         _channel = Channel.CreateUnbounded<QueueItem>(new UnboundedChannelOptions
         {
             SingleReader = true,
@@ -376,7 +379,12 @@ public sealed class OperationQueue : IOperationQueue
                         _current = item;
                         startedAt = _timeProvider.GetUtcNow();
                         item.StartedAt = startedAt;
-                        item.Progress = NewProgress(item.Operation, PackageOperationState.Resolving, "Resolving package…");
+                        item.Progress = NewProgress(
+                            item.Operation,
+                            PackageOperationState.Resolving,
+                            item.Operation.RunAsAdministrator
+                                ? "Preparing administrator approval (UAC)..."
+                                : "Resolving package…");
                         snapshot = CreateSnapshotLocked();
                     }
                 }
@@ -399,21 +407,23 @@ public sealed class OperationQueue : IOperationQueue
             try
             {
                 var progress = new InlineProgress<OperationProgress>(value => ReportProgress(item, value));
-                result = item.Operation.EffectiveTarget switch
-                {
-                    MsixTarget => await ExecuteMsixOperationAsync(item, progress).ConfigureAwait(false),
-                    WingetTarget => item.Operation.Kind switch
+                result = item.Operation.RunAsAdministrator
+                    ? await ExecutePrivilegedOperationAsync(item, progress).ConfigureAwait(false)
+                    : item.Operation.EffectiveTarget switch
                     {
-                        PackageOperationKind.Install => await _wingetClient.InstallAsync(
-                            item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
-                        PackageOperationKind.Upgrade => await _wingetClient.UpgradeAsync(
-                            item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
-                        PackageOperationKind.Uninstall => await _wingetClient.UninstallAsync(
-                            item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
-                        _ => throw new InvalidOperationException($"Unsupported operation kind '{item.Operation.Kind}'.")
-                    },
-                    _ => throw new InvalidOperationException("The package operation target is not supported.")
-                };
+                        MsixTarget => await ExecuteMsixOperationAsync(item, progress).ConfigureAwait(false),
+                        WingetTarget => item.Operation.Kind switch
+                        {
+                            PackageOperationKind.Install => await _wingetClient.InstallAsync(
+                                item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
+                            PackageOperationKind.Upgrade => await _wingetClient.UpgradeAsync(
+                                item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
+                            PackageOperationKind.Uninstall => await _wingetClient.UninstallAsync(
+                                item.Operation, progress, item.Cancellation.Token).ConfigureAwait(false),
+                            _ => throw new InvalidOperationException($"Unsupported operation kind '{item.Operation.Kind}'.")
+                        },
+                        _ => throw new InvalidOperationException("The package operation target is not supported.")
+                    };
 
                 result = NormalizeResult(item.Operation, result, startedAt, _timeProvider.GetUtcNow());
             }
@@ -468,7 +478,10 @@ public sealed class OperationQueue : IOperationQueue
                 OperationId = item.Operation.Id,
                 State = state,
                 Percent = percent,
-                Timestamp = reported.Timestamp == default ? _timeProvider.GetUtcNow() : reported.Timestamp
+                Timestamp = reported.Timestamp == default ? _timeProvider.GetUtcNow() : reported.Timestamp,
+                CancellationSupported = reported.CancellationSupported
+                    && !item.Operation.RunAsAdministrator
+                    && item.Operation.EffectiveTarget is not MsixTarget
             };
             item.Progress = progress;
 
@@ -507,6 +520,34 @@ public sealed class OperationQueue : IOperationQueue
         // RemovePackageAsync cannot be cancelled once deployment begins. Do not pass the
         // queue token through or imply that Windows can safely roll the operation back.
         return _msixClient.UninstallAsync(item.Operation, progress, CancellationToken.None);
+    }
+
+    private Task<OperationResult> ExecutePrivilegedOperationAsync(
+        QueueItem item,
+        IProgress<OperationProgress> progress)
+    {
+        if (item.Operation.Target is not WingetTarget wingetTarget
+            || wingetTarget.Package.IsEmpty
+            || string.IsNullOrWhiteSpace(wingetTarget.Package.SourceId)
+            || item.Operation.Package != wingetTarget.Package)
+        {
+            throw new InvalidOperationException(
+                "Administrator execution requires an exact WinGet package and source target.");
+        }
+
+        if (_privilegedPackageOperationBroker is null
+            || !_privilegedPackageOperationBroker.IsAvailable)
+        {
+            throw new InvalidOperationException(
+                "Administrator package execution is unavailable.");
+        }
+
+        // Once the queue exposes the UAC preparation state this work is deliberately
+        // non-cancelable. The elevated broker owns the exact one-shot operation result.
+        return _privilegedPackageOperationBroker.ExecuteElevatedAsync(
+            item.Operation,
+            progress,
+            CancellationToken.None);
     }
 
     private bool ShouldPublishProgress(
@@ -639,7 +680,8 @@ public sealed class OperationQueue : IOperationQueue
             State = state,
             Message = message,
             Timestamp = _timeProvider.GetUtcNow(),
-            CancellationSupported = operation.EffectiveTarget is not MsixTarget
+            CancellationSupported = !operation.RunAsAdministrator
+                && operation.EffectiveTarget is not MsixTarget
         };
 
     private OperationResult CreateCancelledResult(
@@ -655,6 +697,7 @@ public sealed class OperationQueue : IOperationQueue
             State = PackageOperationState.Cancelled,
             StartedAt = startedAt ?? completedAt,
             CompletedAt = completedAt,
+            AdministratorRetryRequested = operation.RunAsAdministrator,
             Error = new WingetError
             {
                 Kind = WingetErrorKind.Cancelled,
@@ -676,6 +719,7 @@ public sealed class OperationQueue : IOperationQueue
             State = PackageOperationState.Failed,
             StartedAt = startedAt,
             CompletedAt = _timeProvider.GetUtcNow(),
+            AdministratorRetryRequested = operation.RunAsAdministrator,
             Error = error
         };
 
@@ -717,7 +761,9 @@ public sealed class OperationQueue : IOperationQueue
             State = state,
             StartedAt = result.StartedAt == default ? startedAt : result.StartedAt,
             CompletedAt = result.CompletedAt == default ? completedAt : result.CompletedAt,
-            RebootRequired = result.RebootRequired || state == PackageOperationState.RebootRequired
+            RebootRequired = result.RebootRequired || state == PackageOperationState.RebootRequired,
+            AdministratorRetryRequested = operation.RunAsAdministrator,
+            RanAsAdministrator = operation.RunAsAdministrator && result.RanAsAdministrator
         };
     }
 

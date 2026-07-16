@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 using PackagePilot.Core.Abstractions;
@@ -56,12 +55,7 @@ public sealed class ElevatedSourceManagementBroker : IPrivilegedSourceManagement
 
         var pipeName = SourceAdminPipeProtocol.CreatePipeName();
         var secret = SourceAdminPipeProtocol.CreateSecret();
-        using var pipe = new NamedPipeServerStream(
-            pipeName,
-            PipeDirection.InOut,
-            1,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        using var pipe = ElevatedPipeAclFactory.CreateServerForCurrentUser(pipeName);
 
         Process? process = null;
         try
@@ -72,7 +66,10 @@ public sealed class ElevatedSourceManagementBroker : IPrivilegedSourceManagement
             using var connectionCts = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken);
             connectionCts.CancelAfter(_connectionTimeout);
-            await pipe.WaitForConnectionAsync(connectionCts.Token).ConfigureAwait(false);
+            await WaitForConnectionOrHelperExitAsync(
+                pipe,
+                process,
+                connectionCts.Token).ConfigureAwait(false);
             VerifyClientProcess(pipe.SafePipeHandle, process.Id);
             await SourceAdminPipeProtocol.AuthenticateServerAsync(
                 pipe,
@@ -133,7 +130,8 @@ public sealed class ElevatedSourceManagementBroker : IPrivilegedSourceManagement
             return Failure(
                 request,
                 SourceOperationStatus.AccessDenied,
-                "The elevated source helper connection could not be authenticated.",
+                "The helper must run under the same Windows account. Alternate administrator " +
+                    "credentials are rejected to avoid mutating another user's source profile.",
                 exception.HResult);
         }
         catch (Exception exception) when (exception is not OutOfMemoryException
@@ -185,6 +183,24 @@ public sealed class ElevatedSourceManagementBroker : IPrivilegedSourceManagement
             throw new UnauthorizedAccessException(
                 "An unexpected process connected to the source helper pipe.");
         }
+    }
+
+    private static async Task WaitForConnectionOrHelperExitAsync(
+        System.IO.Pipes.NamedPipeServerStream pipe,
+        Process helper,
+        CancellationToken cancellationToken)
+    {
+        var connectionTask = pipe.WaitForConnectionAsync(cancellationToken);
+        var exitTask = helper.WaitForExitAsync(cancellationToken);
+        var completed = await Task.WhenAny(connectionTask, exitTask).ConfigureAwait(false);
+        if (completed == exitTask && !pipe.IsConnected)
+        {
+            await exitTask.ConfigureAwait(false);
+            throw new UnauthorizedAccessException(
+                "The elevated helper exited before authenticating the source pipe.");
+        }
+
+        await connectionTask.ConfigureAwait(false);
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]

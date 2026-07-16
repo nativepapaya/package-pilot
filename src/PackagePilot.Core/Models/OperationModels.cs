@@ -31,6 +31,7 @@ public sealed record InstallPreferences
     public bool AcceptSourceAgreements { get; init; }
     public string? AcceptedSourceAgreementFingerprint { get; init; }
     public bool AcceptPackageAgreements { get; init; }
+    public string? AcceptedPackageAgreementFingerprint { get; init; }
     public bool AllowElevation { get; init; } = true;
 }
 
@@ -42,6 +43,7 @@ public sealed record PackageOperation
     public OperationTarget? Target { get; init; }
     public string DisplayName { get; init; } = string.Empty;
     public InstallPreferences Preferences { get; init; } = new();
+    public bool RunAsAdministrator { get; init; }
     public DateTimeOffset EnqueuedAt { get; init; } = DateTimeOffset.UtcNow;
 
     [JsonIgnore]
@@ -91,6 +93,8 @@ public sealed record OperationResult
     public DateTimeOffset CompletedAt { get; init; }
     public WingetError? Error { get; init; }
     public bool RebootRequired { get; init; }
+    public bool AdministratorRetryRequested { get; init; }
+    public bool RanAsAdministrator { get; init; }
     public OperationDiagnosticReference? Diagnostic { get; init; }
 
     public bool IsSuccess => State is PackageOperationState.Completed or PackageOperationState.RebootRequired;
@@ -206,5 +210,7 @@ public enum WingetErrorKind
     AgreementRequired,
     ElevationDenied,
     Cancelled,
-    ComFailure
+    ComFailure,
+    AdministratorRequired,
+    OutcomeUnknown
 }

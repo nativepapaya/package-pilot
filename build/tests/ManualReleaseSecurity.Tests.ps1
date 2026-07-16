@@ -415,6 +415,17 @@ Assert-True -Condition (
     -Message 'The hosted Release workflow must build both architectures and create the bundle.'
 Assert-True -Condition ($workflow -match [regex]::Escape('PackagePilot.Windows.ReadOnly.dll')) `
     -Message 'The hosted Release workflow must assert the read-only WinGet infrastructure payload.'
+foreach ($packageAdminPayload in @(
+    'PackagePilot.PackageAdmin.exe'
+    'PackagePilot.PackageAdmin.dll'
+    'PackagePilot.PackageAdmin.deps.json'
+    'PackagePilot.PackageAdmin.runtimeconfig.json'
+)) {
+    Assert-True -Condition (
+        $publisher -match [regex]::Escape($packageAdminPayload) -and
+        $workflow -match [regex]::Escape($packageAdminPayload)) `
+        -Message "Both release paths must require the privileged package helper payload '$packageAdminPayload'."
+}
 foreach ($requiredWinGetRuntimePayload in @(
     'Microsoft.Management.Deployment.CsWinRTProjection.dll'
     'Microsoft.Management.Deployment.dll'

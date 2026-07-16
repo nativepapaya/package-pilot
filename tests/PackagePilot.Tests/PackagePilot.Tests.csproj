@@ -31,8 +31,10 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\PackagePilot.App\Views\ViewData.cs" Link="App\ViewData.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\Views\DiscoverRowProjector.cs" Link="App\DiscoverRowProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\OperationRowProjector.cs" Link="App\OperationRowProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\UpdateRowProjector.cs" Link="App\UpdateRowProjector.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\OperationDiagnosticRefreshLoop.cs" Link="App\OperationDiagnosticRefreshLoop.cs" />
   </ItemGroup>
 
 </Project>

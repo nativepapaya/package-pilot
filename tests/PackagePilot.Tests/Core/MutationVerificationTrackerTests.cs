@@ -315,6 +315,39 @@ public sealed class MutationVerificationTrackerTests
     }
 
     [Fact]
+    public void ElevatedTransportOutcomeUnknown_PreservesRecoveryLockUntilRestartVerification()
+    {
+        var package = Update("Contoso.Tool", "winget");
+        var operation = Operation(package, RecordedAt) with
+        {
+            RunAsAdministrator = true
+        };
+        var tracker = new MutationVerificationTracker(BootA);
+        tracker.MarkEnqueued(operation, package);
+        var transportFailure = Result(
+            operation,
+            PackageOperationState.Failed,
+            RecordedAt.AddMinutes(5)) with
+        {
+            RanAsAdministrator = true,
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.OutcomeUnknown,
+                Code = "PackageAdminResponseLost",
+                Message = "The administrator helper started the package operation, but its final result was not received."
+            }
+        };
+
+        Assert.False(tracker.RecordResult(transportFailure));
+        Assert.True(tracker.Contains(package.Key));
+        Assert.Equal(
+            MutationVerificationPhase.OutcomeUnknown,
+            Assert.Single(tracker.Export()).Phase);
+        Assert.True(tracker.IsRestartRequiredThisBoot(package.Key));
+        Assert.False(tracker.HasTargetsEligibleForVerification);
+    }
+
+    [Fact]
     public void TargetsRemainExactAcrossSources()
     {
         var winget = Update("Contoso.Tool", "winget");

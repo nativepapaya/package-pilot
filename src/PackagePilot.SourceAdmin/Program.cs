@@ -1,4 +1,3 @@
-using System.IO.Pipes;
 using System.Security.Principal;
 using PackagePilot.Core.Models;
 using PackagePilot.Core.Services;
@@ -21,12 +20,9 @@ internal static class Program
         try
         {
             using var connectionCts = new CancellationTokenSource(ConnectionTimeout);
-            using var pipe = new NamedPipeClientStream(
-                ".",
-                pipeName,
-                PipeDirection.InOut,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            using var pipe = ElevatedPipeAclFactory.CreateClient(pipeName);
             await pipe.ConnectAsync(connectionCts.Token).ConfigureAwait(false);
+            ElevatedPipeServerVerifier.VerifyTrustedAppServer(pipe.SafePipeHandle);
             await SourceAdminPipeProtocol.AuthenticateClientAsync(
                 pipe,
                 pipeName,

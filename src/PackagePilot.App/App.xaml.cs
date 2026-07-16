@@ -212,7 +212,7 @@ public partial class App : Application, IAppLifetimeController
             "operation-diagnostics",
             "installer-logs"),
             ApplicationData.Current.LocalFolder.Path);
-        var wingetClient = new WingetClient(operationDiagnostics);
+        var wingetClient = new WingetClient();
         var updateCoordinator = new UpdateCoordinator(
             wingetClient,
             new JsonUpdateSnapshotStore(Path.Combine(
@@ -228,11 +228,13 @@ public partial class App : Application, IAppLifetimeController
         var historyPath = Path.Combine(
             ApplicationData.Current.LocalFolder.Path,
             "operation-history.json");
+        var packageOperationBroker = new ElevatedPackageOperationBroker();
 
         _operationQueue = new OperationQueue(
             wingetClient,
             new JsonOperationHistoryStore(historyPath),
-            msixClient: new WindowsMsixPackageOperationClient());
+            msixClient: new WindowsMsixPackageOperationClient(),
+            privilegedPackageOperationBroker: packageOperationBroker);
         var installedAppInventory = new InstalledAppInventory(
         [
             new WingetInstalledAppProvider(wingetClient, new WindowsWingetInstalledAliasResolver()),
@@ -257,7 +259,8 @@ public partial class App : Application, IAppLifetimeController
             windowActivityService: _windowActivity,
             lifetimeActivityGate: _lifetimeActivityGate,
             currentBootSessionId: bootSession.Identity,
-            bootSessionIdentityError: bootSession.Error);
+            bootSessionIdentityError: bootSession.Error,
+            elevatedPackageOperationsAvailable: packageOperationBroker.IsAvailable);
         _shellViewModel.AvailableUpdates.CollectionChanged += OnAvailableUpdatesChanged;
 
         _window = new MainWindow(

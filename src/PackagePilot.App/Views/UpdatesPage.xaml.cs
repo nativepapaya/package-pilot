@@ -131,7 +131,7 @@ public sealed partial class UpdatesPage : Page
         }
         AvailableUpdates.CollectionChanged += OnUpdatesChanged;
         foreach (var update in AvailableUpdates.Where(item =>
-                     item.IsActionEnabled
+                     UpdateRowProjector.IsBulkActionEligible(item)
                      && item.WingetPackage is { } package
                      && selectedPackages.Contains(package)))
         {
@@ -157,7 +157,7 @@ public sealed partial class UpdatesPage : Page
         EmptyStateIconContainer.Visibility = _checkState == UpdateCheckState.Checking
             ? Visibility.Collapsed
             : Visibility.Visible;
-        var actionableCount = AvailableUpdates.Count(item => item.IsActionEnabled);
+        var actionableCount = AvailableUpdates.Count(UpdateRowProjector.IsBulkActionEligible);
         SelectAllBox.IsEnabled = actionableCount > 0;
         UpdateSummaryText.Text = AvailableUpdates.Count switch
         {
@@ -228,6 +228,19 @@ public sealed partial class UpdatesPage : Page
     {
         if (!_ownsOperationStatus)
         {
+            return;
+        }
+
+        if (AvailableUpdates.Any(item => item.RequiresAdministratorRetry))
+        {
+            var retryAvailable = AvailableUpdates.Any(item =>
+                item.RequiresAdministratorRetry && item.IsActionEnabled);
+            SetOperationStatus(
+                "Administrator privileges required",
+                retryAvailable
+                    ? "Package Pilot did not retry automatically. Use Retry as administrator on the affected row after reviewing the one-shot UAC request. Administrator retries are intentionally excluded from bulk updates."
+                    : "The one-shot administrator helper is unavailable, so Package Pilot will not attempt an ineffective retry. Open Activity for the exact error and diagnostic log.",
+                InfoBarSeverity.Warning);
             return;
         }
 
@@ -334,7 +347,7 @@ public sealed partial class UpdatesPage : Page
 
         var unavailableSelections = UpdatesList.SelectedItems
             .OfType<PackageListItem>()
-            .Where(item => !item.IsActionEnabled)
+            .Where(item => !UpdateRowProjector.IsBulkActionEligible(item))
             .ToArray();
         if (unavailableSelections.Length > 0)
         {
@@ -346,10 +359,10 @@ public sealed partial class UpdatesPage : Page
             _changingSelection = false;
         }
 
-        var actionableCount = AvailableUpdates.Count(item => item.IsActionEnabled);
+        var actionableCount = AvailableUpdates.Count(UpdateRowProjector.IsBulkActionEligible);
         var selectedCount = UpdatesList.SelectedItems
             .OfType<PackageListItem>()
-            .Count(item => item.IsActionEnabled);
+            .Count(UpdateRowProjector.IsBulkActionEligible);
         ReviewButton.IsEnabled = selectedCount > 0;
         ReviewButton.Content = selectedCount > 0 ? $"Review selected ({selectedCount})" : "Review selected";
 
@@ -369,7 +382,7 @@ public sealed partial class UpdatesPage : Page
         if (SelectAllBox.IsChecked == true)
         {
             UpdatesList.SelectedItems.Clear();
-            foreach (var update in AvailableUpdates.Where(item => item.IsActionEnabled))
+            foreach (var update in AvailableUpdates.Where(UpdateRowProjector.IsBulkActionEligible))
             {
                 UpdatesList.SelectedItems.Add(update);
             }
@@ -398,7 +411,7 @@ public sealed partial class UpdatesPage : Page
     {
         var selected = UpdatesList.SelectedItems
             .OfType<PackageListItem>()
-            .Where(item => item.IsActionEnabled)
+            .Where(UpdateRowProjector.IsBulkActionEligible)
             .ToList();
         if (selected.Count == 0)
         {

@@ -484,6 +484,65 @@ public sealed class LifecycleSafetyAcceptanceTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void AdministratorRetry_IsFinalExplicitAndCarriesOnlyReviewedAgreementFingerprints()
+    {
+        string mainPage = ReadSource("PackagePilot.App", "MainPage.xaml.cs");
+        string shell = ReadSource("PackagePilot.App", "ViewModels", "ShellViewModel.cs");
+        string action = ExtractBlock(mainPage, "private async void OnPackageActionRequested");
+        string agreementReview = ExtractBlock(
+            mainPage,
+            "private async Task<AgreementAcceptance> ConfirmAgreementsAsync");
+        string sourceReconnect = ExtractBlock(
+            agreementReview,
+            "if (currentSourceSnapshot is not null)");
+        string enqueueOperations = ExtractBlock(
+            shell,
+            "public MutationAdmissionBatchResult EnqueueOperations(");
+
+        AssertOccursBefore(
+            action,
+            "await ConfirmAgreementsAsync(",
+            "await ConfirmAdministratorRetryAsync(package, kind)");
+        Assert.Contains(
+            "CanRetryPackageAsAdministratorFor(package.Key, kind)",
+            action,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            2,
+            CountOccurrences(
+                action,
+                "ViewModel.CanRetryPackageAsAdministratorFor(package.Key, kind)"));
+        AssertOccursBefore(
+            action,
+            "await ConfirmAdministratorRetryAsync(package, kind)",
+            "var (scope, architecture) = ReadInstallPreferences();");
+        AssertOccursBefore(
+            action,
+            "|| ViewModel.IsPackageMutationBlocked(package.Key)",
+            "var (scope, architecture) = ReadInstallPreferences();");
+        Assert.Contains(
+            "SourceAgreementSnapshot.Create(",
+            agreementReview,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "currentSourceSnapshot.Matches(acceptedSourceFingerprint)",
+            agreementReview,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "SelectPackageAcceptingSourceAgreementsAsync(package)",
+            sourceReconnect,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "AcceptedSourceAgreementFingerprint = request.AcceptedSourceAgreements",
+            enqueueOperations,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "AcceptedPackageAgreementFingerprint = request.AcceptedPackageAgreements",
+            enqueueOperations,
+            StringComparison.Ordinal);
+    }
+
     private static void AssertTransitionIsGuarded(string method)
     {
         AssertOccursBefore(

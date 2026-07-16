@@ -468,6 +468,285 @@ public sealed class OperationQueueTests
     }
 
     [Fact]
+    public async Task ElevatedWingetOperation_UsesOnlyBrokerAndNormalizesExactResultIdentity()
+    {
+        var client = new FakeWingetClient();
+        var broker = new FakePrivilegedPackageOperationBroker
+        {
+            Execute = static (operation, _, _) => Task.FromResult(new OperationResult
+            {
+                OperationId = Guid.NewGuid(),
+                Package = new PackageKey("Spoofed.Package", "spoofed"),
+                Target = new WingetTarget
+                {
+                    Package = new PackageKey("Spoofed.Package", "spoofed")
+                },
+                Kind = PackageOperationKind.Uninstall,
+                State = PackageOperationState.Completed,
+                RanAsAdministrator = true
+            })
+        };
+        await using var queue = new OperationQueue(
+            client,
+            privilegedPackageOperationBroker: broker);
+        var operation = Operation("Package.Elevated", PackageOperationKind.Upgrade) with
+        {
+            RunAsAdministrator = true
+        };
+
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(client.ExecutionOrder);
+        Assert.Equal(1, broker.CallCount);
+        Assert.Equal(operation.Id, Assert.Single(broker.Operations).Id);
+        var result = Assert.Single(queue.Snapshot.History);
+        Assert.Equal(operation.Id, result.OperationId);
+        Assert.Equal(operation.Package, result.Package);
+        Assert.Equal(operation.EffectiveTarget, result.Target);
+        Assert.Equal(operation.Kind, result.Kind);
+        Assert.True(result.AdministratorRetryRequested);
+        Assert.True(result.RanAsAdministrator);
+    }
+
+    [Fact]
+    public async Task ElevatedOperation_WithoutBrokerFailsClosedWithoutCallingWinget()
+    {
+        var client = new FakeWingetClient();
+        await using var queue = new OperationQueue(client);
+        var operation = Operation("Package.NoBroker") with
+        {
+            RunAsAdministrator = true
+        };
+
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(client.ExecutionOrder);
+        var result = Assert.Single(queue.Snapshot.History);
+        Assert.Equal(PackageOperationState.Failed, result.State);
+        Assert.True(result.AdministratorRetryRequested);
+        Assert.False(result.RanAsAdministrator);
+        Assert.Contains("Administrator package execution is unavailable", result.Error?.Message);
+    }
+
+    [Fact]
+    public async Task ElevatedOperation_WithUnavailableBrokerFailsBeforeBrokerInvocation()
+    {
+        var client = new FakeWingetClient();
+        var broker = new FakePrivilegedPackageOperationBroker { IsAvailable = false };
+        await using var queue = new OperationQueue(
+            client,
+            privilegedPackageOperationBroker: broker);
+        var operation = Operation("Package.UnavailableBroker") with
+        {
+            RunAsAdministrator = true
+        };
+
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(client.ExecutionOrder);
+        Assert.Equal(0, broker.CallCount);
+        var result = Assert.Single(queue.Snapshot.History);
+        Assert.Equal(PackageOperationState.Failed, result.State);
+        Assert.False(result.RanAsAdministrator);
+    }
+
+    [Fact]
+    public async Task ElevatedOperation_IsNonCancelableAsSoonAsUacPreparationStarts()
+    {
+        var brokerStarted = NewSource();
+        var releaseBroker = NewSource();
+        var broker = new FakePrivilegedPackageOperationBroker
+        {
+            Execute = async (operation, progress, _) =>
+            {
+                progress?.Report(new OperationProgress
+                {
+                    OperationId = operation.Id,
+                    State = PackageOperationState.Installing,
+                    Message = "Elevated helper running",
+                    CancellationSupported = true
+                });
+                brokerStarted.TrySetResult();
+                await releaseBroker.Task;
+                return Success(operation) with { RanAsAdministrator = true };
+            }
+        };
+        await using var queue = new OperationQueue(
+            new FakeWingetClient(),
+            privilegedPackageOperationBroker: broker);
+        var operation = Operation("Package.NonCancelable") with
+        {
+            RunAsAdministrator = true
+        };
+        var currentProgress = new ConcurrentQueue<OperationProgress>();
+        queue.Changed += (_, args) =>
+        {
+            if (args.Snapshot.Current is { } current
+                && current.Operation.Id == operation.Id)
+            {
+                currentProgress.Enqueue(current.Progress);
+            }
+        };
+
+        queue.Enqueue(operation);
+        await brokerStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Contains(currentProgress, item =>
+            item.Message == "Preparing administrator approval (UAC)..."
+            && !item.CanCancel);
+        Assert.False(queue.Snapshot.Current!.Progress.CanCancel);
+        Assert.False(queue.TryCancel(operation.Id));
+        Assert.False(broker.LastCancellationToken.CanBeCanceled);
+
+        releaseBroker.TrySetResult();
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True(Assert.Single(queue.Snapshot.History).RanAsAdministrator);
+    }
+
+    [Fact]
+    public async Task ElevatedBrokerResult_DoesNotInventAdministratorExecution()
+    {
+        var broker = new FakePrivilegedPackageOperationBroker
+        {
+            Execute = static (operation, _, _) => Task.FromResult(Success(operation) with
+            {
+                RanAsAdministrator = false
+            })
+        };
+        await using var queue = new OperationQueue(
+            new FakeWingetClient(),
+            privilegedPackageOperationBroker: broker);
+        var operation = Operation("Package.NoElevationProof") with
+        {
+            RunAsAdministrator = true
+        };
+
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        var result = Assert.Single(queue.Snapshot.History);
+        Assert.True(result.IsSuccess);
+        Assert.False(result.RanAsAdministrator);
+    }
+
+    [Fact]
+    public async Task QueuedElevatedOperation_RemainsCancelableBeforeUacPreparation()
+    {
+        var firstStarted = NewSource();
+        var releaseFirst = NewSource();
+        var client = new FakeWingetClient
+        {
+            Execute = async (operation, _, cancellationToken) =>
+            {
+                firstStarted.TrySetResult();
+                await releaseFirst.Task.WaitAsync(cancellationToken);
+                return Success(operation);
+            }
+        };
+        var broker = new FakePrivilegedPackageOperationBroker();
+        await using var queue = new OperationQueue(
+            client,
+            privilegedPackageOperationBroker: broker);
+        queue.Enqueue(Operation("Package.First"));
+        await firstStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var elevated = Operation("Package.QueuedElevated") with
+        {
+            RunAsAdministrator = true
+        };
+
+        queue.Enqueue(elevated);
+
+        var pending = Assert.Single(queue.Snapshot.Pending);
+        Assert.True(pending.Progress.CanCancel);
+        Assert.True(queue.TryCancel(elevated.Id));
+
+        releaseFirst.TrySetResult();
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(0, broker.CallCount);
+        Assert.Contains(queue.Snapshot.History, result =>
+            result.OperationId == elevated.Id
+            && result.State == PackageOperationState.Cancelled
+            && result.AdministratorRetryRequested
+            && !result.RanAsAdministrator);
+    }
+
+    [Fact]
+    public async Task ElevatedMsixOperation_IsRejectedWithoutCallingEitherMutationClient()
+    {
+        var client = new FakeWingetClient();
+        var msix = new FakeMsixClient(operation => Task.FromResult(Success(operation)));
+        var broker = new FakePrivilegedPackageOperationBroker();
+        await using var queue = new OperationQueue(
+            client,
+            msixClient: msix,
+            privilegedPackageOperationBroker: broker);
+        var operation = MsixRemoval("Contoso.App_1.0.0.0_x64__publisher") with
+        {
+            RunAsAdministrator = true
+        };
+
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(client.ExecutionOrder);
+        Assert.Equal(0, msix.CallCount);
+        Assert.Equal(0, broker.CallCount);
+        var result = Assert.Single(queue.Snapshot.History);
+        Assert.Equal(PackageOperationState.Failed, result.State);
+        Assert.Contains("exact WinGet package and source target", result.Error?.Message);
+    }
+
+    [Fact]
+    public async Task ElevatedOperation_RejectsLegacyImplicitWingetTarget()
+    {
+        var client = new FakeWingetClient();
+        var broker = new FakePrivilegedPackageOperationBroker();
+        await using var queue = new OperationQueue(
+            client,
+            privilegedPackageOperationBroker: broker);
+        var operation = new PackageOperation
+        {
+            Package = new PackageKey("Package.Implicit", "winget"),
+            Target = null,
+            Kind = PackageOperationKind.Install,
+            DisplayName = "Implicit target",
+            RunAsAdministrator = true
+        };
+
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(client.ExecutionOrder);
+        Assert.Equal(0, broker.CallCount);
+        var result = Assert.Single(queue.Snapshot.History);
+        Assert.Equal(PackageOperationState.Failed, result.State);
+        Assert.Contains("exact WinGet package and source target", result.Error?.Message);
+    }
+
+    [Fact]
+    public async Task NormalWingetOperation_DoesNotUseAvailableElevatedBroker()
+    {
+        var client = new FakeWingetClient();
+        var broker = new FakePrivilegedPackageOperationBroker();
+        await using var queue = new OperationQueue(
+            client,
+            privilegedPackageOperationBroker: broker);
+        var operation = Operation("Package.Normal");
+
+        queue.Enqueue(operation);
+        await queue.WaitForIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal([operation.Id], client.ExecutionOrder);
+        Assert.Equal(0, broker.CallCount);
+        var result = Assert.Single(queue.Snapshot.History);
+        Assert.False(result.AdministratorRetryRequested);
+        Assert.False(result.RanAsAdministrator);
+    }
+
+    [Fact]
     public async Task NonTerminalClientResult_IsConvertedToTypedFailure()
     {
         var client = new FakeWingetClient
@@ -880,6 +1159,32 @@ public sealed class OperationQueueTests
         {
             CallCount++;
             return await execute(operation);
+        }
+    }
+
+    private sealed class FakePrivilegedPackageOperationBroker : IPrivilegedPackageOperationBroker
+    {
+        private int _callCount;
+
+        public bool IsAvailable { get; init; } = true;
+        public int CallCount => Volatile.Read(ref _callCount);
+        public ConcurrentQueue<PackageOperation> Operations { get; } = new();
+        public CancellationToken LastCancellationToken { get; private set; }
+        public Func<PackageOperation, IProgress<OperationProgress>?, CancellationToken, Task<OperationResult>> Execute { get; init; } =
+            static (operation, _, _) => Task.FromResult(Success(operation) with
+            {
+                RanAsAdministrator = true
+            });
+
+        public Task<OperationResult> ExecuteElevatedAsync(
+            PackageOperation operation,
+            IProgress<OperationProgress>? progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _callCount);
+            Operations.Enqueue(operation);
+            LastCancellationToken = cancellationToken;
+            return Execute(operation, progress, cancellationToken);
         }
     }
 }

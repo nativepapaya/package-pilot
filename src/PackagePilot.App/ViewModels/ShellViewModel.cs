@@ -25,6 +25,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     private readonly DispatcherQueue _dispatcher;
     private readonly Func<UpdateMonitoringCadence> _getUpdateMonitoringCadence;
     private readonly IWindowActivityService? _windowActivityService;
+    private readonly bool _elevatedPackageOperationsAvailable;
     private readonly string? _bootSessionIdentityError;
     private readonly HashSet<Guid> _observedCompletions = [];
     private readonly MutationVerificationTracker _mutationVerificationTracker;
@@ -76,7 +77,8 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         IAppLifetimeActivityGate? lifetimeActivityGate = null,
         IMutationVerificationStore? mutationVerificationStore = null,
         string? currentBootSessionId = null,
-        string? bootSessionIdentityError = null)
+        string? bootSessionIdentityError = null,
+        bool elevatedPackageOperationsAvailable = false)
     {
         _wingetClient = wingetClient;
         _operationQueue = operationQueue;
@@ -87,6 +89,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         _getUpdateMonitoringCadence = getUpdateMonitoringCadence
             ?? (() => UpdateMonitoringCadence.Daily);
         _windowActivityService = windowActivityService;
+        _elevatedPackageOperationsAvailable = elevatedPackageOperationsAvailable;
         _bootSessionIdentityError = string.IsNullOrWhiteSpace(currentBootSessionId)
             ? bootSessionIdentityError
                 ?? "Package Pilot could not identify the current Windows boot session."
@@ -150,6 +153,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             {
                 OnPropertyChanged(nameof(IsReady));
                 OnPropertyChanged(nameof(CanQueuePackageMutations));
+                OnPropertyChanged(nameof(CanRetryPackageAsAdministrator));
                 OnPropertyChanged(nameof(HealthTitle));
                 OnPropertyChanged(nameof(HealthMessage));
                 UpdateWindowsIntegrationCapabilities();
@@ -242,6 +246,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             if (SetProperty(ref _mutationVerificationPersistenceError, value))
             {
                 OnPropertyChanged(nameof(CanQueuePackageMutations));
+                OnPropertyChanged(nameof(CanRetryPackageAsAdministrator));
             }
         }
     }
@@ -252,6 +257,32 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         && !_mutationVerificationLoadFailed
         && _mutationVerificationTracker.CanAdmitMutations
         && string.IsNullOrWhiteSpace(MutationVerificationPersistenceError);
+
+    public bool CanRetryPackageAsAdministrator =>
+        _elevatedPackageOperationsAvailable && CanQueuePackageMutations;
+
+    public bool CanRetryPackageAsAdministratorFor(
+        PackageKey package,
+        PackageOperationKind kind)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        if (!CanRetryPackageAsAdministrator
+            || kind is not (PackageOperationKind.Install or PackageOperationKind.Upgrade))
+        {
+            return false;
+        }
+
+        var latest = OperationHistory
+            .Where(result => result.EffectiveTarget is WingetTarget target
+                && target.Package == package)
+            .OrderByDescending(result => result.CompletedAt)
+            .FirstOrDefault();
+        return latest is not null
+            && latest.Kind == kind
+            && latest.State is PackageOperationState.Failed or PackageOperationState.Cancelled
+            && (latest.Error?.Kind == WingetErrorKind.AdministratorRequired
+                || latest.AdministratorRetryRequested);
+    }
 
     public SourceManagementCapabilities SourceManagementCapabilities
     {
@@ -384,6 +415,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             scheduleMutationVerification = SeedPendingMutationVerifications(initialQueueSnapshot);
             _operationHistoryInitialized = true;
             OnPropertyChanged(nameof(CanQueuePackageMutations));
+            OnPropertyChanged(nameof(CanRetryPackageAsAdministrator));
 
             Capabilities = await _wingetClient.GetCapabilitiesAsync(_lifetimeCancellation.Token).ConfigureAwait(true);
             if (!IsReady)
@@ -777,6 +809,11 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                 StringComparison.Ordinal);
     }
 
+    public string? GetAcceptedSourceAgreementFingerprint(string sourceId) =>
+        IsSourceAgreementAccepted(sourceId)
+            ? _acceptedSourceAgreementFingerprints.GetValueOrDefault(sourceId)
+            : null;
+
     private async Task SelectPackageCoreAsync(
         PackageSummary? package,
         bool acceptSourceAgreements)
@@ -820,7 +857,10 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         bool acceptedSourceAgreements = false,
         bool acceptedPackageAgreements = false,
         InstallerScope scope = InstallerScope.Unknown,
-        PackageArchitecture architecture = PackageArchitecture.Unknown)
+        PackageArchitecture architecture = PackageArchitecture.Unknown,
+        string? acceptedSourceAgreementFingerprint = null,
+        string? acceptedPackageAgreementFingerprint = null,
+        bool runAsAdministrator = false)
     {
         var result = EnqueueOperations([
             new PackageMutationRequest(
@@ -829,7 +869,10 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                 acceptedSourceAgreements,
                 acceptedPackageAgreements,
                 scope,
-                architecture)
+                architecture,
+                acceptedSourceAgreementFingerprint,
+                acceptedPackageAgreementFingerprint,
+                runAsAdministrator)
         ]);
         return result.OperationIds.Single();
     }
@@ -858,10 +901,13 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             var preferences = new InstallPreferences
             {
                 AcceptSourceAgreements = request.AcceptedSourceAgreements,
-                AcceptedSourceAgreementFingerprint =
-                    _acceptedSourceAgreementFingerprints.GetValueOrDefault(
-                        request.Package.Key.SourceId),
+                AcceptedSourceAgreementFingerprint = request.AcceptedSourceAgreements
+                    ? request.AcceptedSourceAgreementFingerprint
+                    : null,
                 AcceptPackageAgreements = request.AcceptedPackageAgreements,
+                AcceptedPackageAgreementFingerprint = request.AcceptedPackageAgreements
+                    ? request.AcceptedPackageAgreementFingerprint
+                    : null,
                 Scope = request.Scope,
                 Architecture = request.Architecture
             };
@@ -870,7 +916,10 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                     request.Kind,
                     request.Package.Key,
                     request.Package.Name,
-                    preferences),
+                    preferences) with
+                    {
+                        RunAsAdministrator = request.RunAsAdministrator
+                    },
                 request.Package);
         }).ToArray();
 
@@ -1469,4 +1518,7 @@ public sealed record PackageMutationRequest(
     bool AcceptedSourceAgreements = false,
     bool AcceptedPackageAgreements = false,
     InstallerScope Scope = InstallerScope.Unknown,
-    PackageArchitecture Architecture = PackageArchitecture.Unknown);
+    PackageArchitecture Architecture = PackageArchitecture.Unknown,
+    string? AcceptedSourceAgreementFingerprint = null,
+    string? AcceptedPackageAgreementFingerprint = null,
+    bool RunAsAdministrator = false);

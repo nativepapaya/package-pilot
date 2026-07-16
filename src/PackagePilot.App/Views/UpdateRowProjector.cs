@@ -9,6 +9,9 @@ namespace PackagePilot.App.Views;
 /// </summary>
 internal static class UpdateRowProjector
 {
+    internal static bool IsBulkActionEligible(PackageListItem item) =>
+        item.IsActionEnabled && !item.RequiresAdministratorRetry;
+
     public static PackageListItem Apply(
         PackageListItem item,
         OperationQueueSnapshot queue,
@@ -16,7 +19,8 @@ internal static class UpdateRowProjector
         bool mutationVerificationPending = false,
         bool restartRequiredThisBoot = false,
         bool mutationActionsAvailable = true,
-        MutationVerificationPhase? mutationVerificationPhase = null)
+        MutationVerificationPhase? mutationVerificationPhase = null,
+        bool administratorRetryAvailable = false)
     {
         ArgumentNullException.ThrowIfNull(item);
         ArgumentNullException.ThrowIfNull(queue);
@@ -26,10 +30,17 @@ internal static class UpdateRowProjector
             return item;
         }
 
+        item.OperationErrorKind = null;
+        item.RequiresAdministratorRetry = false;
+
         var active = FindActiveOperation(queue, package);
         if (active is not null)
         {
-            ApplyActiveState(item, active.Operation.Kind, active.Progress.State);
+            ApplyActiveState(
+                item,
+                active.Operation.Kind,
+                active.Progress.State,
+                active.Operation.RunAsAdministrator);
             return item;
         }
 
@@ -63,15 +74,14 @@ internal static class UpdateRowProjector
 
         var latestResult = queue.History
             .Where(result => IsMatchingOperation(result.EffectiveTarget, package)
-                && AffectsUpdateRow(result)
-                && IsResultRelevant(
-                    result,
-                    lastSuccessfulCheckAt))
+                && AffectsUpdateRow(result))
             .OrderByDescending(result => result.CompletedAt)
             .FirstOrDefault();
-        if (latestResult is not null)
+        if (latestResult is not null
+            && (RequiresAdministratorRetry(latestResult)
+                || IsResultRelevant(latestResult, lastSuccessfulCheckAt)))
         {
-            ApplyTerminalState(item, latestResult);
+            ApplyTerminalState(item, latestResult, administratorRetryAvailable);
         }
 
         if (!mutationActionsAvailable)
@@ -111,10 +121,17 @@ internal static class UpdateRowProjector
     private static bool AffectsUpdateRow(OperationResult result) =>
         result.Kind == PackageOperationKind.Upgrade || result.IsSuccess;
 
+    private static bool RequiresAdministratorRetry(OperationResult result) =>
+        result.Kind == PackageOperationKind.Upgrade
+        && result.State is PackageOperationState.Failed or PackageOperationState.Cancelled
+        && (result.Error?.Kind == WingetErrorKind.AdministratorRequired
+            || result.AdministratorRetryRequested);
+
     private static void ApplyActiveState(
         PackageListItem item,
         PackageOperationKind kind,
-        PackageOperationState state)
+        PackageOperationState state,
+        bool runAsAdministrator)
     {
         item.OperationState = state;
         item.IsActionEnabled = false;
@@ -132,6 +149,8 @@ internal static class UpdateRowProjector
 
         (item.Status, item.ActionLabel) = state switch
         {
+            PackageOperationState.Resolving when runAsAdministrator =>
+                ("Waiting for Windows administrator approval...", "Admin approval"),
             PackageOperationState.Queued => ("Queued - waiting to start", "Queued"),
             PackageOperationState.Resolving => ("Preparing update...", "Preparing"),
             PackageOperationState.Downloading => ("Downloading update...", "Downloading"),
@@ -143,7 +162,8 @@ internal static class UpdateRowProjector
 
     private static void ApplyTerminalState(
         PackageListItem item,
-        OperationResult result)
+        OperationResult result,
+        bool administratorRetryAvailable)
     {
         if (result.Kind != PackageOperationKind.Upgrade
             && result.State is PackageOperationState.Failed or PackageOperationState.Cancelled)
@@ -152,6 +172,8 @@ internal static class UpdateRowProjector
         }
 
         item.OperationState = result.State;
+        item.OperationErrorKind = result.Error?.Kind;
+        item.RequiresAdministratorRetry = RequiresAdministratorRetry(result);
         (item.Status, item.ActionLabel, item.IsActionEnabled) = result.State switch
         {
             PackageOperationState.Completed when result.Kind != PackageOperationKind.Upgrade =>
@@ -160,6 +182,15 @@ internal static class UpdateRowProjector
                 ("Updated - verifying result...", "Verifying", false),
             PackageOperationState.RebootRequired =>
                 ("Updated - restart required", "Restart required", false),
+            PackageOperationState.Failed or PackageOperationState.Cancelled
+                when item.RequiresAdministratorRetry =>
+                administratorRetryAvailable
+                    ? (result.Error?.Kind == WingetErrorKind.ElevationDenied
+                            ? "Administrator approval was canceled - elevated retry available"
+                            : "Administrator approval required - elevated retry available",
+                        "Retry as administrator", true)
+                    : ("Administrator required - see Activity for details",
+                        "Admin required", false),
             PackageOperationState.Failed =>
                 ("Update failed - retry available", "Retry", true),
             PackageOperationState.Cancelled =>

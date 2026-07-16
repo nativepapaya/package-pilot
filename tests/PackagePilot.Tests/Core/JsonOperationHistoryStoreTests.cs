@@ -71,6 +71,32 @@ public sealed class JsonOperationHistoryStoreTests : IDisposable
         Assert.Equal(new PackageKey("Contoso.Tool", "winget"), target.Package);
         Assert.Equal(OperationDiagnosticProvider.Winget, result.Diagnostic?.Provider);
         Assert.Equal(result.OperationId, result.Diagnostic?.ReferenceId);
+        Assert.False(result.AdministratorRetryRequested);
+    }
+
+    [Fact]
+    public async Task SaveAndLoad_RoundTripsAdministratorRetryIntent()
+    {
+        var path = Path.Combine(_directory, "history.json");
+        var store = new JsonOperationHistoryStore(path);
+        var source = Result(1, PackageOperationState.Failed) with
+        {
+            AdministratorRetryRequested = true,
+            RanAsAdministrator = false,
+            Error = new WingetError
+            {
+                Kind = WingetErrorKind.ElevationDenied,
+                Code = "ElevationCancelled",
+                Message = "Administrator approval was canceled."
+            }
+        };
+
+        await store.SaveAsync([source]);
+        var loaded = Assert.Single(await store.LoadAsync());
+
+        Assert.True(loaded.AdministratorRetryRequested);
+        Assert.False(loaded.RanAsAdministrator);
+        Assert.Equal(WingetErrorKind.ElevationDenied, loaded.Error?.Kind);
     }
 
     [Fact]

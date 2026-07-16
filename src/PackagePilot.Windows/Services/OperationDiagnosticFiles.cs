@@ -9,35 +9,6 @@ internal static class OperationDiagnosticFiles
     private const int MaximumHeaderBytes = 128 * 1024;
     internal const int MaximumCorrelationCandidates = 32;
     internal const int MaximumEnumeratedLogFiles = 512;
-    internal const int MaximumOwnedLogCount = 100;
-    internal const long MaximumIndividualOwnedLogBytes = 16L * 1024 * 1024;
-    private const long MaximumOwnedLogBytes = 64L * 1024 * 1024;
-    private static readonly TimeSpan MaximumOwnedLogAge = TimeSpan.FromDays(30);
-
-    public static bool TryPrepareInstallerLog(
-        string trustedRoot,
-        string root,
-        Guid operationId,
-        out string logPath)
-    {
-        logPath = GetInstallerLogPath(root, operationId);
-        try
-        {
-            if (!TryEnsureSafeOwnedRoot(trustedRoot, root, create: true)
-                || (File.Exists(logPath) && IsReparsePoint(logPath)))
-            {
-                return false;
-            }
-
-            VerifyWriteAccess(root);
-            PruneOwnedLogs(root, operationId);
-            return true;
-        }
-        catch (Exception exception) when (IsExpectedFileException(exception))
-        {
-            return false;
-        }
-    }
 
     public static string GetInstallerLogPath(string root, Guid operationId) =>
         Path.Combine(root, $"{operationId:N}.log");
@@ -51,7 +22,7 @@ internal static class OperationDiagnosticFiles
         try
         {
             if (!Directory.Exists(root)
-                || !TryEnsureSafeOwnedRoot(trustedRoot, root, create: false))
+                || !TryEnsureSafeOwnedRoot(trustedRoot, root))
             {
                 return null;
             }
@@ -164,7 +135,7 @@ internal static class OperationDiagnosticFiles
                     return;
                 }
 
-                if (!TryEnsureSafeOwnedRoot(trustedRoot, root, create: false))
+                if (!TryEnsureSafeOwnedRoot(trustedRoot, root))
                 {
                     throw new IOException("The app-owned installer log folder is not safe to modify.");
                 }
@@ -204,45 +175,6 @@ internal static class OperationDiagnosticFiles
                 throw new IOException("One or more app-owned installer logs could not be removed.");
             }
         }, cancellationToken);
-    }
-
-    public static Task FinalizeInstallerLogAsync(
-        string trustedRoot,
-        string root,
-        Guid operationId)
-    {
-        return Task.Run(() =>
-        {
-            try
-            {
-                if (!Directory.Exists(root)
-                    || !TryEnsureSafeOwnedRoot(trustedRoot, root, create: false))
-                {
-                    return;
-                }
-
-                var path = GetInstallerLogPath(root, operationId);
-                if (File.Exists(path)
-                    && !IsReparsePoint(path))
-                {
-                    var file = new FileInfo(path);
-                    if (file.Length > MaximumIndividualOwnedLogBytes)
-                    {
-                        File.Delete(path);
-                        File.WriteAllText(
-                            path,
-                            "[Installer log removed because it exceeded Package Pilot's 16 MB safety limit.]",
-                            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-                    }
-                }
-            }
-            catch (Exception exception) when (IsExpectedFileException(exception))
-            {
-                // Finalization is best-effort and must never change the package result.
-            }
-
-            PruneOwnedLogs(root, Guid.Empty);
-        });
     }
 
     private static async Task<BoundedLogText?> ReadBoundedAsync(
@@ -463,70 +395,12 @@ internal static class OperationDiagnosticFiles
         return builder.ToString();
     }
 
-    private static void PruneOwnedLogs(string root, Guid currentOperationId)
-    {
-        try
-        {
-            if (!Directory.Exists(root) || IsReparsePoint(root))
-            {
-                return;
-            }
-
-            var cutoff = DateTime.UtcNow - MaximumOwnedLogAge;
-            var files = Directory.EnumerateFiles(root, "*.log", SearchOption.TopDirectoryOnly)
-                .Take(MaximumEnumeratedLogFiles)
-                .Select(path => new FileInfo(path))
-                .Where(file => Guid.TryParseExact(
-                        Path.GetFileNameWithoutExtension(file.Name),
-                        "N",
-                        out _)
-                    && (file.Attributes & FileAttributes.ReparsePoint) == 0
-                    && !string.Equals(
-                        Path.GetFileNameWithoutExtension(file.Name),
-                        currentOperationId.ToString("N"),
-                        StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(file => file.LastWriteTimeUtc)
-                .ToArray();
-
-            long retainedBytes = 0;
-            var maximumRetained = currentOperationId == Guid.Empty
-                ? MaximumOwnedLogCount
-                : MaximumOwnedLogCount - 1;
-            for (var index = 0; index < files.Length; index++)
-            {
-                var file = files[index];
-                var retain = index < maximumRetained
-                    && file.LastWriteTimeUtc >= cutoff
-                    && retainedBytes + file.Length <= MaximumOwnedLogBytes;
-                if (retain)
-                {
-                    retainedBytes += file.Length;
-                    continue;
-                }
-
-                try
-                {
-                    file.Delete();
-                }
-                catch (Exception exception) when (IsExpectedFileException(exception))
-                {
-                    // Retention is best-effort and must never block a package operation.
-                }
-            }
-        }
-        catch (Exception exception) when (IsExpectedFileException(exception))
-        {
-            // Retention is best-effort and must never block a package operation.
-        }
-    }
-
     private static bool IsReparsePoint(string path) =>
         (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
 
     private static bool TryEnsureSafeOwnedRoot(
         string trustedRoot,
-        string root,
-        bool create)
+        string root)
     {
         var anchor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(trustedRoot));
         var candidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
@@ -556,43 +430,10 @@ internal static class OperationDiagnosticFiles
                 continue;
             }
 
-            if (!create || File.Exists(current))
-            {
-                return false;
-            }
-
-            Directory.CreateDirectory(current);
-            if (IsReparsePoint(current))
-            {
-                return false;
-            }
+            return false;
         }
 
         return Directory.Exists(candidate) && !IsReparsePoint(candidate);
-    }
-
-    private static void VerifyWriteAccess(string root)
-    {
-        var probePath = Path.Combine(root, $".write-probe-{Guid.NewGuid():N}.tmp");
-        try
-        {
-            using var stream = new FileStream(
-                probePath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                bufferSize: 1,
-                FileOptions.WriteThrough);
-            stream.WriteByte(0);
-            stream.Flush(flushToDisk: true);
-        }
-        finally
-        {
-            if (File.Exists(probePath))
-            {
-                File.Delete(probePath);
-            }
-        }
     }
 
     private static bool IsExpectedFileException(Exception exception) =>

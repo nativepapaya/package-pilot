@@ -3,6 +3,7 @@
     <Project Path="src/PackagePilot.App/PackagePilot.App.csproj" />
     <Project Path="src/PackagePilot.Background/PackagePilot.Background.csproj" />
     <Project Path="src/PackagePilot.Core/PackagePilot.Core.csproj" />
+    <Project Path="src/PackagePilot.PackageAdmin/PackagePilot.PackageAdmin.csproj" />
     <Project Path="src/PackagePilot.SourceAdmin/PackagePilot.SourceAdmin.csproj" />
     <Project Path="src/PackagePilot.Windows/PackagePilot.Windows.csproj" />
     <Project Path="src/PackagePilot.Windows.ReadOnly/PackagePilot.Windows.ReadOnly.csproj" />

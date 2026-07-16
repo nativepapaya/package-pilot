@@ -11,7 +11,20 @@
     mc:Ignorable="d">
 
     <Border Style="{StaticResource PackagePilotCardStyle}">
-        <Grid RowSpacing="16">
+        <Grid x:Name="RootGrid" RowSpacing="16">
+            <VisualStateManager.VisualStateGroups>
+                <VisualStateGroup>
+                    <VisualState x:Name="NeutralState" />
+                    <VisualState x:Name="PositiveState">
+                        <VisualState.Setters>
+                            <Setter Target="DetailsStateBadge.Background" Value="{ThemeResource PackagePilotSuccessSoftBrush}" />
+                            <Setter Target="DetailsStateBadge.BorderBrush" Value="{ThemeResource PackagePilotSuccessBrush}" />
+                            <Setter Target="DetailsStateIcon.Foreground" Value="{ThemeResource PackagePilotSuccessBrush}" />
+                            <Setter Target="DetailsStateText.Foreground" Value="{ThemeResource PackagePilotSuccessBrush}" />
+                        </VisualState.Setters>
+                    </VisualState>
+                </VisualStateGroup>
+            </VisualStateManager.VisualStateGroups>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
@@ -37,6 +50,28 @@
                         Style="{StaticResource PackagePilotSubtitleStyle}"
                         Text="{x:Bind Publisher, Mode=OneWay}"
                         TextTrimming="CharacterEllipsis" />
+                    <Border
+                        x:Name="DetailsStateBadge"
+                        HorizontalAlignment="Left"
+                        Margin="0,4,0,0"
+                        Padding="7,2"
+                        Background="{ThemeResource PackagePilotSurfaceTertiaryBrush}"
+                        BorderBrush="{ThemeResource PackagePilotStrokeBrush}"
+                        BorderThickness="1"
+                        CornerRadius="10"
+                        Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal" Spacing="4">
+                            <FontIcon
+                                x:Name="DetailsStateIcon"
+                                FontFamily="Segoe Fluent Icons"
+                                FontSize="10"
+                                Glyph="{x:Bind StateGlyph, Mode=OneWay}" />
+                            <TextBlock
+                                x:Name="DetailsStateText"
+                                FontSize="11"
+                                Text="{x:Bind Status, Mode=OneWay}" />
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </Grid>
 

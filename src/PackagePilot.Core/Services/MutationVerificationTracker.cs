@@ -114,6 +114,15 @@ public sealed class MutationVerificationTracker
 
         if (result.State is PackageOperationState.Failed or PackageOperationState.Cancelled)
         {
+            // A one-shot elevated helper can lose its response after the exact mutation has
+            // crossed the privilege boundary. That transport failure is not evidence that
+            // nothing changed. Preserve the durable outcome-unknown marker so another
+            // mutation stays blocked until the normal post-restart verification flow runs.
+            if (result.Error?.Kind == WingetErrorKind.OutcomeUnknown)
+            {
+                return false;
+            }
+
             var removed = _markers.Remove(target.Package);
             return AddVerifiedOperation(result.OperationId) || removed;
         }
