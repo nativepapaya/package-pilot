@@ -73,43 +73,56 @@
                 Navigated="OnContentNavigated" />
 
             <Border
+                x:Name="ActivityStrip"
                 Grid.Row="2"
                 Margin="12,0,12,12"
-                Padding="12,9"
-                Background="{ThemeResource PackagePilotSurfaceSecondaryBrush}"
-                BorderBrush="{ThemeResource PackagePilotStrokeBrush}"
+                Padding="12,10"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                 BorderThickness="1"
-                CornerRadius="10">
+                CornerRadius="12"
+                Visibility="Collapsed">
                 <Grid ColumnSpacing="10">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <ProgressRing
-                        x:Name="ActivityProgress"
-                        Width="18"
-                        Height="18"
-                        AutomationProperties.Name="Package operation progress"
-                        IsActive="False" />
-                    <StackPanel Grid.Column="1" Spacing="1">
+                    <Border
+                        x:Name="ActivityStateIconContainer"
+                        Width="36"
+                        Height="36"
+                        Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                        CornerRadius="9">
+                        <FontIcon
+                            x:Name="ActivityStateIcon"
+                            FontFamily="Segoe Fluent Icons"
+                            FontSize="16"
+                            Glyph="&#xE895;" />
+                    </Border>
+                    <StackPanel Grid.Column="1" Spacing="3">
                         <TextBlock
                             x:Name="ActivitySummaryText"
-                            FontSize="12"
+                            FontSize="13"
                             FontWeight="SemiBold"
-                            Text="No active operations" />
+                            TextTrimming="CharacterEllipsis" />
                         <TextBlock
                             x:Name="StatusText"
                             Style="{StaticResource PackagePilotCaptionStyle}"
                             AutomationProperties.LiveSetting="Polite"
-                            Text="Preparing Package Pilot…"
                             TextTrimming="CharacterEllipsis" />
+                        <ProgressBar
+                            x:Name="ActivityProgress"
+                            Height="3"
+                            AutomationProperties.Name="Package operation progress"
+                            Maximum="100"
+                            Visibility="Collapsed" />
                     </StackPanel>
                     <Button
                         Grid.Column="2"
                         AutomationProperties.Name="Open activity"
                         Click="OnOpenActivityClick"
-                        Content="View activity" />
+                        Content="View details" />
                 </Grid>
             </Border>
         </Grid>

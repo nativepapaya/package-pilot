@@ -8,6 +8,10 @@ namespace PackagePilot.Windows.Services;
 /// <summary>Enumerates current-user MSIX/Store registrations without mutating package state.</summary>
 public sealed class WindowsMsixPackageReader : IMsixPackageReader
 {
+    private static readonly HashSet<string> AllowedIconExtensions = new(
+        [".png", ".jpg", ".jpeg", ".webp", ".ico"],
+        StringComparer.OrdinalIgnoreCase);
+
     public Task<IReadOnlyList<MsixPackageRecord>> ReadCurrentUserPackagesAsync(
         CancellationToken cancellationToken = default) =>
         Task.Run(() => ReadCoreAsync(cancellationToken), cancellationToken);
@@ -48,6 +52,7 @@ public sealed class WindowsMsixPackageReader : IMsixPackageReader
                 Name = FirstNonEmpty(package.DisplayName, id.Name, familyName),
                 Publisher = package.PublisherDisplayName ?? string.Empty,
                 Version = $"{version.Major}.{version.Minor}.{version.Build}.{version.Revision}",
+                Icon = TryGetIconReference(package),
                 Architecture = ToCoreArchitecture(id.Architecture),
                 IsStoreApp = package.SignatureKind == PackageSignatureKind.Store,
                 IsSystem = package.SignatureKind == PackageSignatureKind.System,
@@ -70,6 +75,43 @@ public sealed class WindowsMsixPackageReader : IMsixPackageReader
         catch (InvalidOperationException)
         {
             return string.Empty;
+        }
+    }
+
+    private static AppIconReference? TryGetIconReference(Package package)
+    {
+        try
+        {
+            var root = Path.GetFullPath(package.InstalledLocation.Path)
+                .TrimEnd(Path.DirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            var logo = package.Logo;
+            if (logo is null
+                || !logo.Scheme.Equals("ms-appx", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var relative = Uri.UnescapeDataString(logo.AbsolutePath)
+                .TrimStart('/')
+                .Replace('/', Path.DirectorySeparatorChar);
+            var fullPath = Path.GetFullPath(Path.Combine(root, relative));
+            if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)
+                || !AllowedIconExtensions.Contains(Path.GetExtension(fullPath)))
+            {
+                return null;
+            }
+
+            return new AppIconReference
+            {
+                Kind = AppIconSourceKind.MsixPackageAsset,
+                ResourcePath = fullPath
+            };
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return null;
         }
     }
 

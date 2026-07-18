@@ -1,16 +1,20 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
+using System.Diagnostics;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using PackagePilot.Core.Models;
+using PackagePilot.App.ViewModels;
+using PackagePilot.App.Services;
 
 namespace PackagePilot.App.Views;
 
 public sealed partial class DiscoverPage : Page
 {
     private PackageListItem? _selectedPackage;
+    private readonly KeyedCollectionReconciler<PackageListItemKey, PackageListItem> _reconciler = new();
 
     public DiscoverPage()
     {
@@ -28,9 +32,15 @@ public sealed partial class DiscoverPage : Page
 
     public void SetLoading(bool isLoading)
     {
-        LoadingRing.IsActive = isLoading;
-        LoadingRing.Visibility = isLoading ? Visibility.Visible : Visibility.Collapsed;
-        ResultsList.IsEnabled = !isLoading;
+        LoadingBar.Visibility = isLoading ? Visibility.Visible : Visibility.Collapsed;
+        ResultCountText.Text = isLoading && Results.Count > 0
+            ? $"Searching… showing {Results.Count} previous result{(Results.Count == 1 ? string.Empty : "s")}"
+            : Results.Count switch
+            {
+                0 => "No results loaded",
+                1 => "1 package",
+                _ => $"{Results.Count} packages"
+            };
     }
 
     public void FocusSearch() => PackageSearchBox.Focus(FocusState.Programmatic);
@@ -43,6 +53,7 @@ public sealed partial class DiscoverPage : Page
 
     public void SetResults(IEnumerable<PackageListItem> results)
     {
+        var startedAt = Stopwatch.GetTimestamp();
         var snapshot = results.ToArray();
         if (PackageListItemComparer.HaveSameRows(Results, snapshot))
         {
@@ -50,24 +61,17 @@ public sealed partial class DiscoverPage : Page
         }
 
         SynchronizeSelectedPackageState(snapshot);
-        if (PackageListItemComparer.HaveSameRowsExceptOperationFeedback(Results, snapshot))
-        {
-            for (var index = 0; index < Results.Count; index++)
-            {
-                Results[index].ApplyOperationFeedback(snapshot[index]);
-            }
-            UpdateResultState();
-            return;
-        }
-
         Results.CollectionChanged -= OnResultsChanged;
-        Results.Clear();
-        foreach (var result in snapshot)
-        {
-            Results.Add(result);
-        }
+        _reconciler.Reconcile(
+            Results,
+            snapshot,
+            static item => item.StableKey,
+            static (current, replacement) => current.ApplyPresentation(replacement));
         Results.CollectionChanged += OnResultsChanged;
         UpdateResultState();
+        PackagePilotUiEventSource.Log.SearchResultsPresented(
+            Results.Count,
+            Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
     }
 
     public void ShowStatus(string title, string message, InfoBarSeverity severity = InfoBarSeverity.Informational)

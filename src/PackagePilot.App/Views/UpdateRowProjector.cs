@@ -53,6 +53,8 @@ internal static class UpdateRowProjector
             item.VerificationPhase = mutationVerificationPhase;
             (item.Status, item.ActionLabel, item.IsActionEnabled) =
                 ("Restart Windows to verify the update result", "Restart required", false);
+            item.StateGlyph = "\uE7BA";
+            item.IsPositiveState = false;
             return item;
         }
 
@@ -73,6 +75,8 @@ internal static class UpdateRowProjector
                 }, mutationVerificationPhase == MutationVerificationPhase.ApplicationRestartPending
                     ? "App restart needed"
                     : "Verifying", false);
+            item.StateGlyph = "\uE895";
+            item.IsPositiveState = false;
             return item;
         }
 
@@ -139,6 +143,8 @@ internal static class UpdateRowProjector
     {
         item.OperationState = state;
         item.IsActionEnabled = false;
+        item.StateGlyph = state == PackageOperationState.Queued ? "\uE823" : "\uE895";
+        item.IsPositiveState = false;
         if (kind == PackageOperationKind.Uninstall)
         {
             (item.Status, item.ActionLabel) = ("Uninstalling app...", "Busy");
@@ -178,6 +184,14 @@ internal static class UpdateRowProjector
         item.OperationState = result.State;
         item.OperationErrorKind = result.Error?.Kind;
         item.RequiresAdministratorRetry = RequiresAdministratorRetry(result);
+        item.StateGlyph = result.State switch
+        {
+            PackageOperationState.Completed => "\uE73E",
+            PackageOperationState.RebootRequired => "\uE7BA",
+            PackageOperationState.Failed or PackageOperationState.Cancelled => "\uEA39",
+            _ => "\uE895"
+        };
+        item.IsPositiveState = result.State == PackageOperationState.Completed;
         (item.Status, item.ActionLabel, item.IsActionEnabled) = result.State switch
         {
             PackageOperationState.Completed when result.Kind != PackageOperationKind.Upgrade =>

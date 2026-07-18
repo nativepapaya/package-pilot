@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using PackagePilot.Core.Models;
 
 namespace PackagePilot.App.Views;
 
@@ -40,6 +41,8 @@ public sealed partial class PackageRow : UserControl
         nameof(IconGlyph), typeof(string), typeof(PackageRow), new PropertyMetadata("\uE896"));
     public static readonly DependencyProperty IconUriProperty = DependencyProperty.Register(
         nameof(IconUri), typeof(Uri), typeof(PackageRow), new PropertyMetadata(null));
+    public static readonly DependencyProperty IconReferenceProperty = DependencyProperty.Register(
+        nameof(IconReference), typeof(AppIconReference), typeof(PackageRow), new PropertyMetadata(null));
     public static readonly DependencyProperty IsActionEnabledProperty = DependencyProperty.Register(
         nameof(IsActionEnabled), typeof(bool), typeof(PackageRow), new PropertyMetadata(true));
 
@@ -61,6 +64,11 @@ public sealed partial class PackageRow : UserControl
     public string ActionLabel { get => (string)GetValue(ActionLabelProperty); set => SetValue(ActionLabelProperty, value); }
     public string IconGlyph { get => (string)GetValue(IconGlyphProperty); set => SetValue(IconGlyphProperty, value); }
     public Uri? IconUri { get => (Uri?)GetValue(IconUriProperty); set => SetValue(IconUriProperty, value); }
+    public AppIconReference? IconReference
+    {
+        get => (AppIconReference?)GetValue(IconReferenceProperty);
+        set => SetValue(IconReferenceProperty, value);
+    }
     public bool IsActionEnabled { get => (bool)GetValue(IsActionEnabledProperty); set => SetValue(IsActionEnabledProperty, value); }
     public string ActionAutomationName => $"{ActionLabel} {PackageName}";
 

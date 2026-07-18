@@ -1,5 +1,6 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
@@ -10,6 +11,7 @@ using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Navigation;
 using PackagePilot.App.ViewModels;
 using PackagePilot.App.Views;
+using PackagePilot.App.Services;
 using PackagePilot.Core.Abstractions;
 using PackagePilot.Core.Models;
 using PackagePilot.Core.Services;
@@ -29,13 +31,23 @@ public sealed partial class MainPage : Page
     private AppActivationRequest? _pendingActivation;
     private bool _initialized;
     private bool _activationReady;
-    private bool _syncScheduled;
     private bool _synchronizingNavigationSelection;
     private readonly IPrivilegedSourceManagementBroker? _sourceManagementBroker;
     private readonly IAppLifetimeController? _appLifetimeController;
     private readonly IAppLifetimeActivityGate _lifetimeActivityGate;
     private readonly IOperationDiagnosticsService? _operationDiagnosticsService;
-    private bool _operationDiagnosticDialogOpen;
+    private readonly DestinationUiStateCoordinator _uiCoordinator;
+    private readonly ShellActivityViewModel _shellActivityViewModel = new();
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _activityStripTimer;
+    private readonly HashSet<DestinationChangeFlags> _destinationsWithContent = [];
+    private readonly DiscoverPageViewModel _discoverViewModel = new();
+    private readonly InstalledPageViewModel _installedViewModel = new();
+    private readonly UpdatesPageViewModel _updatesViewModel = new();
+    private readonly ActivityPageViewModel _activityViewModel = new();
+    private readonly SourcesPageViewModel _sourcesViewModel = new();
+    private readonly SettingsPageViewModel _settingsViewModel = new();
+    private long _navigationStartedAt;
+    private string _navigationDestination = "discover";
 
     public MainPage(
         ShellViewModel viewModel,
@@ -50,17 +62,38 @@ public sealed partial class MainPage : Page
         _lifetimeActivityGate = lifetimeActivityGate ?? new AppLifetimeActivityGate();
         _operationDiagnosticsService = operationDiagnosticsService;
         InitializeComponent();
+        _uiCoordinator = new DestinationUiStateCoordinator(
+            DispatcherQueue,
+            UpdateDestinationStates,
+            ApplyUiChanges);
+        _activityStripTimer = DispatcherQueue.CreateTimer();
+        _activityStripTimer.IsRepeating = false;
+        _activityStripTimer.Tick += (_, _) => UpdateShellChrome();
 
         ContentFrame.CacheSize = 8;
         ViewModel.PropertyChanged += OnViewModelPropertyChanged;
-        SubscribeToCollection(ViewModel.SearchResults);
-        SubscribeToCollection(ViewModel.InstalledPackages);
-        SubscribeToCollection(ViewModel.InstalledApps);
-        SubscribeToCollection(ViewModel.InstalledAppProviders);
-        SubscribeToCollection(ViewModel.AvailableUpdates);
-        SubscribeToCollection(ViewModel.SourceStatuses);
-        SubscribeToCollection(ViewModel.PendingOperations);
-        SubscribeToCollection(ViewModel.OperationHistory);
+        SubscribeToCollection(ViewModel.SearchResults, DestinationChangeFlags.Discover);
+        SubscribeToCollection(
+            ViewModel.InstalledPackages,
+            DestinationChangeFlags.Discover | DestinationChangeFlags.Installed);
+        SubscribeToCollection(
+            ViewModel.InstalledApps,
+            DestinationChangeFlags.Discover | DestinationChangeFlags.Installed);
+        SubscribeToCollection(ViewModel.InstalledAppProviders, DestinationChangeFlags.Installed);
+        SubscribeToCollection(
+            ViewModel.AvailableUpdates,
+            DestinationChangeFlags.Discover | DestinationChangeFlags.Updates | DestinationChangeFlags.Shell);
+        SubscribeToCollection(
+            ViewModel.SourceStatuses,
+            DestinationChangeFlags.Discover | DestinationChangeFlags.Settings);
+        SubscribeToCollection(
+            ViewModel.PendingOperations,
+            DestinationChangeFlags.Discover | DestinationChangeFlags.Updates |
+            DestinationChangeFlags.Activity | DestinationChangeFlags.Shell);
+        SubscribeToCollection(
+            ViewModel.OperationHistory,
+            DestinationChangeFlags.Discover | DestinationChangeFlags.Updates |
+            DestinationChangeFlags.Activity | DestinationChangeFlags.Shell);
 
         AddNavigationAccelerator(VirtualKey.Number1, "discover");
         AddNavigationAccelerator(VirtualKey.Number2, "installed");
@@ -70,6 +103,7 @@ public sealed partial class MainPage : Page
         AddNavigationAccelerator(VirtualKey.Number6, "settings");
         AddGlobalAccelerator(VirtualKey.R, () => OnRefreshRequested(this, EventArgs.Empty));
         AddGlobalAccelerator(VirtualKey.F, FocusDiscoverSearch);
+        UpdateDestinationStates(DestinationChangeFlags.All);
     }
 
     public ShellViewModel ViewModel { get; }
@@ -105,7 +139,7 @@ public sealed partial class MainPage : Page
         await ApplyActivationAsync(_pendingActivation ?? initialActivation ?? new AppActivationRequest());
         _pendingActivation = null;
         UpdateShellChrome();
-        SyncViewData();
+        _uiCoordinator.Invalidate(DestinationChangeFlags.All);
     }
 
     private async Task ApplyActivationAsync(AppActivationRequest request)
@@ -117,13 +151,13 @@ public sealed partial class MainPage : Page
             ViewModel.SearchText = request.SearchQuery;
             _discoverPage?.SetSearchQuery(request.SearchQuery);
             await ViewModel.SearchAsync();
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
         }
 
         if (request.CheckForUpdates)
         {
             await ViewModel.RefreshUpdatesAsync();
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
         }
     }
 
@@ -135,6 +169,21 @@ public sealed partial class MainPage : Page
         AppDestination.Settings => "settings",
         AppDestination.Sources => "sources",
         _ => "discover"
+    };
+
+    private DestinationChangeFlags GetDestinationFlag(object? content) => content switch
+    {
+        DiscoverPage => DestinationChangeFlags.Discover,
+        InstalledPage => DestinationChangeFlags.Installed,
+        UpdatesPage => DestinationChangeFlags.Updates,
+        ActivityPage => DestinationChangeFlags.Activity,
+        SourcesPage => DestinationChangeFlags.Sources,
+        SettingsPage => DestinationChangeFlags.Settings,
+        PackageDetailsPage => _uiCoordinator.ActiveDestination is DestinationChangeFlags.Discover
+            or DestinationChangeFlags.Installed
+                ? _uiCoordinator.ActiveDestination
+                : DestinationChangeFlags.Discover,
+        _ => DestinationChangeFlags.None
     };
 
     private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -158,6 +207,8 @@ public sealed partial class MainPage : Page
 
     private void NavigateTo(string tag)
     {
+        _navigationStartedAt = Stopwatch.GetTimestamp();
+        _navigationDestination = tag;
         var pageType = tag switch
         {
             "installed" => typeof(InstalledPage),
@@ -197,6 +248,11 @@ public sealed partial class MainPage : Page
 
     private void OnContentNavigated(object sender, NavigationEventArgs e)
     {
+        PackagePilotUiEventSource.Log.DestinationActivated(
+            _navigationDestination,
+            _navigationStartedAt == 0
+                ? 0
+                : Stopwatch.GetElapsedTime(_navigationStartedAt).TotalMilliseconds);
         ShellNavigation.IsBackEnabled = ContentFrame.CanGoBack;
         SynchronizeNavigationSelectionForContent(e.Content);
 
@@ -241,7 +297,9 @@ public sealed partial class MainPage : Page
                     page.CancelOperationRequested += OnCancelOperationRequested;
                     page.CancelQueuedRequested += OnCancelQueuedRequested;
                     page.ClearCompletedRequested += OnClearCompletedRequested;
-                    page.ViewDiagnosticRequested += OnViewDiagnosticRequested;
+                    page.ConfigureDiagnostics(
+                        _operationDiagnosticsService,
+                        ResolveDiagnosticOperation);
                 }
                 break;
             case SourcesPage page:
@@ -279,7 +337,11 @@ public sealed partial class MainPage : Page
         // still unwinding. Installed inventory can contain hundreds of rows; realizing
         // those templates reentrantly from this callback has caused a native E_POINTER
         // crash. Let navigation and Loaded finish, then apply the current snapshot.
-        ScheduleSyncViewData();
+        var destination = GetDestinationFlag(ContentFrame.Content);
+        if (destination != DestinationChangeFlags.None)
+        {
+            _uiCoordinator.Activate(destination);
+        }
     }
 
     private async void OnSearchRequested(object? sender, SearchRequestedEventArgs e)
@@ -322,7 +384,7 @@ public sealed partial class MainPage : Page
         }
 
         _discoverPage?.SetLoading(false);
-        SyncViewData();
+        _uiCoordinator.Invalidate(DestinationChangeFlags.Discover | DestinationChangeFlags.Shell);
         ShowSearchDiagnostics();
     }
 
@@ -404,7 +466,7 @@ public sealed partial class MainPage : Page
                 break;
         }
 
-        SyncViewData();
+        _uiCoordinator.Invalidate(DestinationChangeFlags.All);
     }
 
     private async Task LoadManagedSourcesAsync()
@@ -412,7 +474,7 @@ public sealed partial class MainPage : Page
         _sourcesPage?.SetLoading(true);
         await ViewModel.RefreshManagedSourcesAsync();
         _sourcesPage?.SetLoading(false);
-        SyncViewData();
+        _uiCoordinator.Invalidate(DestinationChangeFlags.Sources | DestinationChangeFlags.Settings);
     }
 
     private async void OnManagedSourcesRefreshRequested(object? sender, EventArgs e) =>
@@ -431,7 +493,7 @@ public sealed partial class MainPage : Page
                 result.Message,
                 result.IsSuccess ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
         }
-        SyncViewData();
+        _uiCoordinator.Invalidate(DestinationChangeFlags.Sources | DestinationChangeFlags.Settings);
     }
 
     private async void OnSourceAddRequested(object? sender, EventArgs e)
@@ -702,11 +764,20 @@ public sealed partial class MainPage : Page
             result.IsSuccess ? successTitle : "Source change failed",
             result.Message,
             result.IsSuccess ? InfoBarSeverity.Success : InfoBarSeverity.Warning);
-        SyncViewData();
+        _uiCoordinator.Invalidate(DestinationChangeFlags.All);
     }
 
     private async void OnPackageActionRequested(object? sender, PackageActionRequestedEventArgs e)
     {
+        if (e.Package.RequestedOperationKind is null
+            && e.Package.InstalledActionKind is null
+            && !string.IsNullOrWhiteSpace(e.Package.InstalledAppId))
+        {
+            NavigateTo("installed");
+            _installedPage?.SelectPackageById(e.Package.InstalledAppId);
+            return;
+        }
+
         if (e.Package.InstalledActionKind is not null)
         {
             await HandleInstalledAppActionAsync(e.Package);
@@ -751,7 +822,7 @@ public sealed partial class MainPage : Page
                 "Administrator retry no longer applies",
                 "The latest result for this exact package and source no longer requires an administrator retry. Refresh and review its current state before continuing.",
                 InfoBarSeverity.Informational);
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
             return;
         }
 
@@ -761,7 +832,7 @@ public sealed partial class MainPage : Page
                 "Already queued",
                 $"{package.Name} already has this operation queued or running. Follow it in Activity.",
                 InfoBarSeverity.Informational);
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
             return;
         }
 
@@ -802,7 +873,7 @@ public sealed partial class MainPage : Page
                 "Administrator retry state changed",
                 "This package changed while you were reviewing the request. Refresh and review its latest state before authorizing an administrator retry.",
                 InfoBarSeverity.Informational);
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
             return;
         }
 
@@ -823,7 +894,7 @@ public sealed partial class MainPage : Page
         catch (MutationRecoveryUnavailableException)
         {
             ShowMutationRecoveryUnavailable();
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
             return;
         }
         catch (DuplicatePackageOperationException)
@@ -832,7 +903,7 @@ public sealed partial class MainPage : Page
                 "Already queued",
                 $"{package.Name} already has this operation queued or running. Follow it in Activity.",
                 InfoBarSeverity.Informational);
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
             return;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
@@ -841,7 +912,7 @@ public sealed partial class MainPage : Page
                 "Could not queue package operation",
                 exception.Message,
                 InfoBarSeverity.Warning);
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
             return;
         }
 
@@ -858,7 +929,7 @@ public sealed partial class MainPage : Page
                 InfoBarSeverity.Informational);
         }
         UpdateShellChrome();
-        SyncViewData();
+        _uiCoordinator.Invalidate(DestinationChangeFlags.All);
     }
 
     private async Task HandleInstalledAppActionAsync(PackageListItem item)
@@ -959,7 +1030,7 @@ public sealed partial class MainPage : Page
         }
 
         UpdateShellChrome();
-        SyncViewData();
+        _uiCoordinator.Invalidate(DestinationChangeFlags.All);
     }
 
     private async Task<bool> ConfirmMsixRemovalAsync(string appName)
@@ -1042,7 +1113,7 @@ public sealed partial class MainPage : Page
                 "Could not queue updates",
                 exception.Message,
                 InfoBarSeverity.Warning);
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
             return;
         }
 
@@ -1068,7 +1139,7 @@ public sealed partial class MainPage : Page
                 InfoBarSeverity.Warning);
         }
         UpdateShellChrome();
-        SyncViewData();
+        _uiCoordinator.Invalidate(DestinationChangeFlags.All);
     }
 
     private void OnCancelOperationRequested(object? sender, OperationCancelRequestedEventArgs e)
@@ -1121,290 +1192,6 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private async void OnViewDiagnosticRequested(
-        object? sender,
-        OperationDiagnosticRequestedEventArgs e)
-    {
-        if (_operationDiagnosticDialogOpen || _operationDiagnosticsService is null)
-        {
-            return;
-        }
-
-        if (!TryFindDiagnosticOperation(e.OperationId, out _, out _))
-        {
-            ShowPageStatus(
-                "Log unavailable",
-                "This activity is no longer queued, running, or retained.",
-                InfoBarSeverity.Warning);
-            return;
-        }
-
-        _operationDiagnosticDialogOpen = true;
-        using var cancellation = new CancellationTokenSource();
-        using var refreshGate = new SemaphoreSlim(1, 1);
-        var progress = new ProgressRing
-        {
-            IsActive = true,
-            Width = 32,
-            Height = 32,
-            HorizontalAlignment = HorizontalAlignment.Center
-        };
-        var loadingText = new TextBlock
-        {
-            Text = "Loading operation diagnostics...",
-            TextAlignment = TextAlignment.Center
-        };
-        var loadingPanel = new StackPanel
-        {
-            Spacing = 12,
-            Padding = new Thickness(16)
-        };
-        loadingPanel.Children.Add(progress);
-        loadingPanel.Children.Add(loadingText);
-
-        var notice = new TextBlock
-        {
-            TextWrapping = TextWrapping.Wrap,
-            Visibility = Visibility.Collapsed
-        };
-        AutomationProperties.SetLiveSetting(notice, AutomationLiveSetting.Polite);
-        var refreshStatus = new TextBlock
-        {
-            Text = "Preparing diagnostics...",
-            TextWrapping = TextWrapping.Wrap,
-            VerticalAlignment = VerticalAlignment.Center,
-            FontSize = 12,
-            Opacity = 0.8
-        };
-        AutomationProperties.SetName(refreshStatus, "Diagnostic refresh status");
-        var refreshButton = new Button
-        {
-            Content = "Refresh now",
-            IsEnabled = false,
-            HorizontalAlignment = HorizontalAlignment.Right
-        };
-        AutomationProperties.SetName(refreshButton, "Refresh operation diagnostics now");
-        var refreshControls = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 12,
-            HorizontalAlignment = HorizontalAlignment.Right
-        };
-        refreshControls.Children.Add(refreshStatus);
-        refreshControls.Children.Add(refreshButton);
-        var rootSize = XamlRoot?.Size;
-        var maximumLogWidth = rootSize is { } size && size.Width > 0
-            ? Math.Max(0, Math.Min(760, size.Width - 64))
-            : 760;
-        var maximumLogHeight = rootSize is { } heightSize && heightSize.Height > 0
-            ? Math.Max(0, Math.Min(480, heightSize.Height - 180))
-            : 480;
-        var logText = new TextBox
-        {
-            IsReadOnly = true,
-            AcceptsReturn = true,
-            TextWrapping = TextWrapping.NoWrap,
-            FontFamily = new FontFamily("Consolas"),
-            MaxWidth = maximumLogWidth,
-            MaxHeight = maximumLogHeight,
-            Visibility = Visibility.Collapsed
-        };
-        AutomationProperties.SetName(logText, "Operation diagnostic details");
-        ScrollViewer.SetHorizontalScrollBarVisibility(logText, ScrollBarVisibility.Auto);
-        ScrollViewer.SetVerticalScrollBarVisibility(logText, ScrollBarVisibility.Auto);
-
-        var content = new StackPanel { Spacing = 12 };
-        content.Children.Add(loadingPanel);
-        content.Children.Add(refreshControls);
-        content.Children.Add(notice);
-        content.Children.Add(logText);
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "Operation diagnostics",
-            Content = content,
-            CloseButtonText = "Close",
-            DefaultButton = ContentDialogButton.Close
-        };
-
-        var refreshLoop = new OperationDiagnosticRefreshLoop();
-        Task? automaticRefreshTask = null;
-        Task? manualRefreshTask = null;
-
-        async Task<bool> RefreshDiagnosticAsync(CancellationToken cancellationToken)
-        {
-            await refreshGate.WaitAsync(cancellationToken);
-            try
-            {
-                refreshButton.IsEnabled = false;
-                if (!TryFindDiagnosticOperation(
-                        e.OperationId,
-                        out var completedOperation,
-                        out var liveOperation))
-                {
-                    loadingPanel.Visibility = Visibility.Collapsed;
-                    refreshStatus.Text = "Activity is no longer retained.";
-                    notice.Text = "The operation left Activity history while this viewer was open.";
-                    notice.Visibility = Visibility.Visible;
-                    return false;
-                }
-
-                var isLive = liveOperation is not null;
-                var document = completedOperation is not null
-                    ? await _operationDiagnosticsService.ReadAsync(
-                        completedOperation,
-                        cancellationToken)
-                    : await _operationDiagnosticsService.ReadLiveAsync(
-                        liveOperation!,
-                        cancellationToken);
-                cancellationToken.ThrowIfCancellationRequested();
-
-                dialog.Title = document.Title;
-                var noticeText = document.IsTruncated
-                    ? $"{document.Notice} Earlier content was omitted to keep the viewer responsive."
-                    : document.Notice;
-                if (!string.Equals(notice.Text, noticeText, StringComparison.Ordinal))
-                {
-                    notice.Text = noticeText;
-                }
-
-                notice.Visibility = Visibility.Visible;
-                var firstDisplay = logText.Visibility != Visibility.Visible;
-                if (!string.Equals(logText.Text, document.Text, StringComparison.Ordinal))
-                {
-                    var priorSelection = logText.SelectionStart;
-                    var updatedSelection = OperationDiagnosticRefreshLoop.GetUpdatedSelectionStart(
-                        firstDisplay,
-                        isLive,
-                        priorSelection,
-                        logText.SelectionLength,
-                        logText.Text.Length,
-                        document.Text.Length);
-                    logText.Text = document.Text;
-                    logText.SelectionStart = updatedSelection;
-                    logText.SelectionLength = 0;
-                }
-
-                logText.Header = document.ProviderLabel;
-                logText.Visibility = Visibility.Visible;
-                loadingPanel.Visibility = Visibility.Collapsed;
-                progress.IsActive = false;
-                refreshStatus.Text = isLive
-                    ? $"Live - refreshes every {OperationDiagnosticRefreshLoop.AutomaticRefreshInterval.TotalSeconds:0} seconds while this dialog is open"
-                    : "Completed - use Refresh now to re-read retained logs";
-                refreshButton.IsEnabled = true;
-                if (firstDisplay)
-                {
-                    _ = logText.Focus(FocusState.Programmatic);
-                }
-
-                return isLive;
-            }
-            finally
-            {
-                refreshGate.Release();
-            }
-        }
-
-        void ShowDiagnosticReadError(Exception exception)
-        {
-            progress.IsActive = false;
-            loadingPanel.Visibility = Visibility.Collapsed;
-            refreshStatus.Text = "Automatic refresh paused; use Refresh now to retry.";
-            notice.Text = $"The operation log could not be read (0x{exception.HResult:X8}).";
-            notice.Visibility = Visibility.Visible;
-            refreshButton.IsEnabled = !cancellation.IsCancellationRequested;
-        }
-
-        async Task RunAutomaticRefreshAsync()
-        {
-            try
-            {
-                var result = await refreshLoop.RunAsync(
-                    RefreshDiagnosticAsync,
-                    cancellation.Token);
-                if (result == OperationDiagnosticRefreshLoopResult.LimitReached
-                    && !cancellation.IsCancellationRequested)
-                {
-                    refreshStatus.Text = "Live auto-refresh paused after five minutes; use Refresh now to continue.";
-                }
-            }
-            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-            {
-                // Closing the dialog cancels the current bounded read or delay.
-            }
-            catch (Exception exception) when (IsRecoverable(exception))
-            {
-                ShowDiagnosticReadError(exception);
-            }
-        }
-
-        async Task RefreshManuallyAsync()
-        {
-            try
-            {
-                await RefreshDiagnosticAsync(cancellation.Token);
-            }
-            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-            {
-                // The dialog was closed during a manual read.
-            }
-            catch (Exception exception) when (IsRecoverable(exception))
-            {
-                ShowDiagnosticReadError(exception);
-            }
-        }
-
-        void LoadDiagnostic(object? _, ContentDialogOpenedEventArgs __) =>
-            automaticRefreshTask = RunAutomaticRefreshAsync();
-        void RefreshDiagnostic(object? _, RoutedEventArgs __)
-        {
-            if (manualRefreshTask is null || manualRefreshTask.IsCompleted)
-            {
-                manualRefreshTask = RefreshManuallyAsync();
-            }
-        }
-        void CancelDiagnostic(object? _, ContentDialogClosedEventArgs __) => cancellation.Cancel();
-        dialog.Opened += LoadDiagnostic;
-        dialog.Closed += CancelDiagnostic;
-        refreshButton.Click += RefreshDiagnostic;
-        try
-        {
-            await dialog.ShowAsync();
-        }
-        catch (Exception exception) when (IsRecoverable(exception))
-        {
-            ShowPageStatus(
-                "Log unavailable",
-                $"The operation log viewer could not be opened (0x{exception.HResult:X8}).",
-                InfoBarSeverity.Warning);
-        }
-        finally
-        {
-            cancellation.Cancel();
-            var pendingReads = new[] { automaticRefreshTask, manualRefreshTask }
-                .OfType<Task>()
-                .ToArray();
-            if (pendingReads.Length > 0)
-            {
-                try
-                {
-                    await Task.WhenAll(pendingReads);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Cancellation is the expected dialog-close path.
-                }
-            }
-
-            dialog.Opened -= LoadDiagnostic;
-            dialog.Closed -= CancelDiagnostic;
-            refreshButton.Click -= RefreshDiagnostic;
-            _operationDiagnosticDialogOpen = false;
-        }
-    }
-
     private bool TryFindDiagnosticOperation(
         Guid operationId,
         out OperationResult? completedOperation,
@@ -1425,6 +1212,11 @@ public sealed partial class MainPage : Page
         return liveOperation is not null;
     }
 
+    private OperationDiagnosticSelection? ResolveDiagnosticOperation(Guid operationId) =>
+        TryFindDiagnosticOperation(operationId, out var completed, out var live)
+            ? new OperationDiagnosticSelection(completed, live)
+            : null;
+
     private void OnSettingChanged(object? sender, SettingChangedEventArgs e)
     {
         if (e.Key == "theme" && e.Value is string theme)
@@ -1441,7 +1233,7 @@ public sealed partial class MainPage : Page
             && e.Value is BackgroundMonitoringState backgroundState)
         {
             ViewModel.SetBackgroundMonitoringState(backgroundState);
-            SyncViewData();
+            _uiCoordinator.Invalidate(DestinationChangeFlags.All);
         }
 
         AppSettingChanged?.Invoke(this, e);
@@ -1449,7 +1241,11 @@ public sealed partial class MainPage : Page
 
     private void OnOpenActivityClick(object sender, RoutedEventArgs e)
     {
+        _shellActivityViewModel.MarkReviewed(
+            ViewModel.OperationQueueSnapshot,
+            ViewModel.PendingMutationVerifications);
         NavigateTo("activity");
+        UpdateShellChrome();
     }
 
     private async Task<bool> ConfirmUninstallAsync(PackageSummary package)
@@ -1696,37 +1492,159 @@ public sealed partial class MainPage : Page
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        ScheduleSyncViewData();
+        var flags = GetPropertyChangeFlags(e.PropertyName);
+        _uiCoordinator.Invalidate(flags);
     }
 
-    private void SubscribeToCollection(INotifyCollectionChanged collection)
+    private void SubscribeToCollection(
+        INotifyCollectionChanged collection,
+        DestinationChangeFlags flags)
     {
-        collection.CollectionChanged += (_, _) => ScheduleSyncViewData();
+        collection.CollectionChanged += (_, _) => _uiCoordinator.Invalidate(flags);
     }
 
-    private void ScheduleSyncViewData()
+    private void UpdateDestinationStates(DestinationChangeFlags changes)
     {
-        if (_syncScheduled)
+        if ((changes & DestinationChangeFlags.Discover) != 0)
         {
-            return;
+            _discoverViewModel.Apply(
+                new DiscoverPageState(
+                    ViewModel.SearchResults.ToArray(),
+                    ViewModel.IsSearching,
+                    ViewModel.CanQueuePackageMutations),
+                changes);
         }
 
-        _syncScheduled = true;
-        if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-            {
-                _syncScheduled = false;
-                SyncViewData();
-            }))
+        if ((changes & DestinationChangeFlags.Installed) != 0)
         {
-            _syncScheduled = false;
+            _installedViewModel.Apply(
+                new InstalledPageState(
+                    ViewModel.InstalledApps.ToArray(),
+                    ViewModel.InstalledPackages.ToArray(),
+                    ViewModel.InstalledAppProviders.ToArray(),
+                    ViewModel.IsInstalledInventoryAuthoritative,
+                    ViewModel.CanQueuePackageMutations),
+                changes);
+        }
+
+        if ((changes & DestinationChangeFlags.Updates) != 0)
+        {
+            _updatesViewModel.Apply(
+                new UpdatesPageState(
+                    ViewModel.AvailableUpdates.ToArray(),
+                    ViewModel.PendingUpgradeVerifications.ToArray(),
+                    ViewModel.UpdatesCheckState,
+                    ViewModel.LastUpdateCheckAt,
+                    ViewModel.LastSuccessfulUpdateCheckAt,
+                    ViewModel.UpdateCheckError),
+                changes);
+        }
+
+        if ((changes & DestinationChangeFlags.Activity) != 0)
+        {
+            _activityViewModel.Apply(
+                new ActivityDestinationState(
+                    ViewModel.OperationQueueSnapshot,
+                    ViewModel.PendingMutationVerifications.ToArray()),
+                changes);
+        }
+
+        if ((changes & DestinationChangeFlags.Sources) != 0)
+        {
+            _sourcesViewModel.Apply(
+                new SourcesPageState(
+                    ViewModel.ManagedSources.ToArray(),
+                    ViewModel.SourceManagementCapabilities,
+                    ViewModel.IsManagingSources),
+                changes);
+        }
+
+        if ((changes & DestinationChangeFlags.Settings) != 0)
+        {
+            _settingsViewModel.Apply(
+                new SettingsPageState(
+                    ViewModel.WindowsIntegrationCapabilities,
+                    ViewModel.SourceStatuses.ToArray(),
+                    ViewModel.WindowsCapabilitySummary),
+                changes);
         }
     }
+
+    private DestinationChangeFlags GetPropertyChangeFlags(string? propertyName) => propertyName switch
+    {
+        nameof(ShellViewModel.SearchText)
+            or nameof(ShellViewModel.IsSearching)
+            or nameof(ShellViewModel.IsSearchTruncated)
+            or nameof(ShellViewModel.IsDetailsLoading)
+            => DestinationChangeFlags.Discover | DestinationChangeFlags.Shell,
+        nameof(ShellViewModel.UpdatesCheckState)
+            or nameof(ShellViewModel.IsCheckingForUpdates)
+            or nameof(ShellViewModel.LastUpdateCheckAt)
+            or nameof(ShellViewModel.LastSuccessfulUpdateCheckAt)
+            or nameof(ShellViewModel.UpdateCheckError)
+            => DestinationChangeFlags.Discover | DestinationChangeFlags.Updates |
+               DestinationChangeFlags.Shell,
+        nameof(ShellViewModel.SourceManagementCapabilities)
+            or nameof(ShellViewModel.IsManagingSources)
+            => DestinationChangeFlags.Sources | DestinationChangeFlags.Settings |
+               DestinationChangeFlags.Shell,
+        nameof(ShellViewModel.WindowsIntegrationCapabilities)
+            or nameof(ShellViewModel.WindowsCapabilitySummary)
+            => DestinationChangeFlags.Settings | DestinationChangeFlags.Shell,
+        nameof(ShellViewModel.CurrentOperation)
+            or nameof(ShellViewModel.HasActiveOperation)
+            or nameof(ShellViewModel.ActivitySummary)
+            or nameof(ShellViewModel.CanQueuePackageMutations)
+            or nameof(ShellViewModel.CanRetryPackageAsAdministrator)
+            or nameof(ShellViewModel.MutationVerificationPersistenceError)
+            => DestinationChangeFlags.Discover | DestinationChangeFlags.Installed |
+               DestinationChangeFlags.Updates | DestinationChangeFlags.Activity |
+               DestinationChangeFlags.Shell,
+        nameof(ShellViewModel.SelectedPackage)
+            or nameof(ShellViewModel.SelectedDetails)
+            or nameof(ShellViewModel.SelectedPackageHasAgreements)
+            => DestinationChangeFlags.Discover,
+        nameof(ShellViewModel.Capabilities)
+            or nameof(ShellViewModel.IsInstalledInventoryAuthoritative)
+            or nameof(ShellViewModel.IsReady)
+            or nameof(ShellViewModel.HealthTitle)
+            or nameof(ShellViewModel.HealthMessage)
+            or nameof(ShellViewModel.IsBusy)
+            or nameof(ShellViewModel.StatusMessage)
+            => DestinationChangeFlags.All,
+        _ => _uiCoordinator.ActiveDestination | DestinationChangeFlags.Shell
+    };
 
     private void UpdateShellChrome()
     {
-        StatusText.Text = ViewModel.StatusMessage;
-        ActivitySummaryText.Text = ViewModel.ActivitySummary;
-        ActivityProgress.IsActive = ViewModel.HasActiveOperation;
+        var activity = _shellActivityViewModel.Project(
+            ViewModel.OperationQueueSnapshot,
+            ViewModel.PendingMutationVerifications,
+            DateTimeOffset.UtcNow);
+        ActivityStrip.Visibility = activity.IsVisible ? Visibility.Visible : Visibility.Collapsed;
+        ActivitySummaryText.Text = activity.Summary;
+        StatusText.Text = activity.Detail;
+        ActivityProgress.Visibility = activity.ShowProgress ? Visibility.Visible : Visibility.Collapsed;
+        ActivityProgress.IsIndeterminate = activity.IsIndeterminate;
+        ActivityProgress.Value = activity.Progress;
+        (ActivityStateIcon.Glyph, ActivityStateIcon.Foreground) = activity.Severity switch
+        {
+            ShellActivitySeverity.Success =>
+                ("\uE73E", (Brush)Application.Current.Resources["PackagePilotSuccessBrush"]),
+            ShellActivitySeverity.Warning =>
+                ("\uE7BA", (Brush)Application.Current.Resources["PackagePilotWarningBrush"]),
+            ShellActivitySeverity.Error =>
+                ("\uEA39", (Brush)Application.Current.Resources["PackagePilotCriticalBrush"]),
+            _ => ("\uE895", (Brush)Application.Current.Resources["PackagePilotTextPrimaryBrush"])
+        };
+        _activityStripTimer.Stop();
+        if (activity.RefreshAt is { } refreshAt)
+        {
+            _activityStripTimer.Interval = refreshAt > DateTimeOffset.UtcNow
+                ? refreshAt - DateTimeOffset.UtcNow
+                : TimeSpan.FromMilliseconds(1);
+            _activityStripTimer.Start();
+        }
         var visibleUpdateCount = ViewModel.AvailableUpdates
             .Concat(ViewModel.PendingUpgradeVerifications)
             .Select(package => package.Key)
@@ -1746,32 +1664,35 @@ public sealed partial class MainPage : Page
             : ViewModel.HealthMessage;
     }
 
-    private void SyncViewData()
+    private void ApplyUiChanges(DestinationChangeFlags changes)
     {
-        if (_discoverPage is not null)
+        if ((changes & DestinationChangeFlags.Discover) != 0 && _discoverPage is not null)
         {
             var discoverState = CreateDiscoverStateIndex();
             _discoverPage.SetResults(ViewModel.SearchResults.Select(item =>
                 ToDiscoverViewItem(item, discoverState)));
-            _discoverPage.SetLoading(ViewModel.IsBusy);
+            _discoverPage.SetLoading(ViewModel.IsSearching);
             _discoverPage.SetMutationActionsAvailable(ViewModel.CanQueuePackageMutations);
+            MarkFirstContent(DestinationChangeFlags.Discover, ViewModel.SearchResults.Count);
         }
 
-        if (_installedPage is not null)
+        if ((changes & DestinationChangeFlags.Installed) != 0 && _installedPage is not null)
         {
             _installedPage.SetPackages(
                 ViewModel.InstalledAppProviders.Count > 0 || ViewModel.InstalledApps.Count > 0
                     ? ViewModel.InstalledApps.Select(ToViewItem)
                     : ViewModel.InstalledPackages.Select(item => ToViewItem(item, "Uninstall")));
             _installedPage.SetMutationActionsAvailable(ViewModel.CanQueuePackageMutations);
+            MarkFirstContent(DestinationChangeFlags.Installed, ViewModel.InstalledApps.Count);
         }
 
-        if (ContentFrame.Content is PackageDetailsPage detailsPage)
+        if ((changes & (DestinationChangeFlags.Discover | DestinationChangeFlags.Installed)) != 0
+            && ContentFrame.Content is PackageDetailsPage detailsPage)
         {
             detailsPage.SetMutationActionsAvailable(ViewModel.CanQueuePackageMutations);
         }
 
-        if (_updatesPage is not null)
+        if ((changes & DestinationChangeFlags.Updates) != 0 && _updatesPage is not null)
         {
             var queue = ViewModel.OperationQueueSnapshot;
             var visibleUpdates = ViewModel.AvailableUpdates
@@ -1792,9 +1713,10 @@ public sealed partial class MainPage : Page
                 ViewModel.UpdatesCheckState,
                 ViewModel.LastUpdateCheckAt,
                 ViewModel.UpdateCheckError);
+            MarkFirstContent(DestinationChangeFlags.Updates, ViewModel.AvailableUpdates.Count);
         }
 
-        if (_activityPage is not null)
+        if ((changes & DestinationChangeFlags.Activity) != 0 && _activityPage is not null)
         {
             var operations = new List<OperationListItem>();
             if (ViewModel.CurrentOperation is { } current)
@@ -1813,9 +1735,10 @@ public sealed partial class MainPage : Page
                 .Where(marker => !retainedOperationIds.Contains(marker.OperationId))
                 .Select(OperationRowProjector.FromVerificationMarker));
             _activityPage.SetOperations(operations);
+            MarkFirstContent(DestinationChangeFlags.Activity, operations.Count);
         }
 
-        if (_settingsPage is not null)
+        if ((changes & DestinationChangeFlags.Settings) != 0 && _settingsPage is not null)
         {
             _settingsPage.SetCapabilitySummary(ViewModel.WindowsCapabilitySummary);
             ReplaceAll(_settingsPage.Sources, ViewModel.SourceStatuses.Select(source => new SourceHealthItem
@@ -1828,7 +1751,7 @@ public sealed partial class MainPage : Page
         }
 
 
-        if (_sourcesPage is not null)
+        if ((changes & DestinationChangeFlags.Sources) != 0 && _sourcesPage is not null)
         {
             var capabilities = ViewModel.SourceManagementCapabilities;
             _sourcesPage.SetCapabilitySummary(capabilities.IsAvailable
@@ -1861,7 +1784,24 @@ public sealed partial class MainPage : Page
             }));
         }
 
-        UpdateShellChrome();
+        if ((changes & DestinationChangeFlags.Shell) != 0)
+        {
+            UpdateShellChrome();
+            if (ViewModel.CurrentOperation is { } current)
+            {
+                PackagePilotUiEventSource.Log.OperationProgressPresented(
+                    current.Operation.Id.ToString("D"),
+                    current.Progress.State.ToString());
+            }
+        }
+    }
+
+    private void MarkFirstContent(DestinationChangeFlags destination, int count)
+    {
+        if (_destinationsWithContent.Add(destination))
+        {
+            PackagePilotUiEventSource.Log.FirstContent(destination.ToString(), count);
+        }
     }
 
     private DiscoverPackageStateIndex CreateDiscoverStateIndex() =>
@@ -1869,7 +1809,8 @@ public sealed partial class MainPage : Page
             ViewModel.SearchResults,
             ViewModel.InstalledPackages,
             ViewModel.AvailableUpdates,
-            ViewModel.OperationQueueSnapshot);
+            ViewModel.OperationQueueSnapshot,
+            ViewModel.InstalledApps);
 
     private PackageListItem ToDiscoverViewItem(
         PackageSummary package,
@@ -1905,6 +1846,13 @@ public sealed partial class MainPage : Page
             InstalledVersion = package.InstalledVersion ?? string.Empty,
             AvailableVersion = package.AvailableVersion ?? string.Empty,
             Status = package.Status.ToString(),
+            StateGlyph = package.Status switch
+            {
+                PackageStatus.UpdateAvailable => "\uE896",
+                PackageStatus.Installed => "\uE73E",
+                _ => string.Empty
+            },
+            IsPositiveState = package.Status == PackageStatus.Installed,
             ActionLabel = action,
             IsActionEnabled = ViewModel.CanQueuePackageMutations,
             RequestedOperationKind = action switch
@@ -1934,7 +1882,8 @@ public sealed partial class MainPage : Page
 
     private PackageListItem ToViewItem(InstalledApp app)
     {
-        var action = app.PrimaryAction;
+        var inventoryIsAuthoritative = ViewModel.IsInstalledInventoryAuthoritative;
+        var action = inventoryIsAuthoritative ? app.PrimaryAction : null;
         var providers = app.Installations
             .Select(installation => installation.Provider switch
             {
@@ -1956,13 +1905,27 @@ public sealed partial class MainPage : Page
         {
             Name = app.Name,
             Publisher = app.Publisher,
+            IconUri = app.Icon is
+                {
+                    Kind: AppIconSourceKind.BoundedHttpsMetadata,
+                    Uri.Scheme: "https"
+                } icon
+                    ? icon.Uri
+                    : null,
+            IconReference = app.Icon,
             PackageId = app.Id,
             InstalledAppId = app.Id,
             Source = string.Join(", ", providers),
             InstalledVersion = app.VersionDisplay,
-            Status = app.HasMultipleVersions ? "Multiple versions" : "Installed",
-            ActionLabel = action?.Label ?? "Managed by Windows",
-            IsActionEnabled = action is not null
+            Status = inventoryIsAuthoritative
+                ? app.HasMultipleVersions ? "Multiple versions" : "Installed"
+                : "Cached — confirming",
+            StateGlyph = inventoryIsAuthoritative ? "\uE73E" : "\uE895",
+            IsPositiveState = inventoryIsAuthoritative,
+            ActionLabel = inventoryIsAuthoritative
+                ? action?.Label ?? "Managed by Windows"
+                : "Refreshing…",
+            IsActionEnabled = inventoryIsAuthoritative && action is not null
                 && (action.Kind is not (
                         InstalledAppActionKind.UninstallWithWinget
                         or InstalledAppActionKind.RemoveMsix)

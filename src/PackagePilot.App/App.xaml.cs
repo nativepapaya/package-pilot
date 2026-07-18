@@ -53,6 +53,7 @@ public partial class App : Application, IAppLifetimeController
     }
 
     public AppBehaviorSettings BehaviorSettings { get; private set; } = new();
+    internal MainWindow? CurrentWindow => _window;
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -251,6 +252,9 @@ public partial class App : Application, IAppLifetimeController
             updateCoordinator: updateCoordinator,
             updateScanWorker: updateScanWorker,
             installedAppInventory: installedAppInventory,
+            installedAppSnapshotStore: new JsonInstalledAppSnapshotStore(Path.Combine(
+                ApplicationData.Current.LocalFolder.Path,
+                "installed-app-snapshot.json")),
             sourceManagementService: wingetClient,
             notificationRegistrationSupported: _notificationRegistrationSupported,
             notificationRegistered: _notificationManager is not null,

@@ -43,6 +43,29 @@ internal static class OperationRowProjector
                 StringComparison.Ordinal);
     }
 
+    public static void CopyPresentation(OperationListItem target, OperationListItem source)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(source);
+        target.Status = source.Status;
+        target.Detail = source.Detail;
+        target.Timestamp = source.Timestamp;
+        target.Progress = source.Progress;
+        target.IsActive = source.IsActive;
+        target.IsHistory = source.IsHistory;
+        target.IsIndeterminate = source.IsIndeterminate;
+        target.ShowProgress = source.ShowProgress;
+        target.CanCancel = source.CanCancel;
+        target.ShowCancel = source.ShowCancel;
+        target.CanViewDiagnostic = source.CanViewDiagnostic;
+        target.IsLiveDiagnostic = source.IsLiveDiagnostic;
+        target.IsVerificationPending = source.IsVerificationPending;
+        target.VerificationPhase = source.VerificationPhase;
+        target.DiagnosticProviderLabel = source.DiagnosticProviderLabel;
+        target.DiagnosticAutomationName = source.DiagnosticAutomationName;
+        target.DiagnosticToolTip = source.DiagnosticToolTip;
+    }
+
     public static OperationListItem FromEntry(OperationQueueEntry entry)
     {
         ArgumentNullException.ThrowIfNull(entry);
@@ -133,7 +156,9 @@ internal static class OperationRowProjector
         return new OperationListItem
         {
             OperationId = result.OperationId,
-            PackageName = packageId,
+            PackageName = string.IsNullOrWhiteSpace(result.DisplayName)
+                ? packageId
+                : result.DisplayName,
             PackageId = packageId,
             Action = result.Kind.ToString(),
             Status = status,

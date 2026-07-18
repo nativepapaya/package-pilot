@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using PackagePilot.Core.Models;
 using PackagePilot.Core.Services;
+using PackagePilot.App.ViewModels;
 
 namespace PackagePilot.App.Views;
 
@@ -15,6 +16,7 @@ public sealed partial class UpdatesPage : Page
     private UpdateCheckState _checkState = UpdateCheckState.NotChecked;
     private DateTimeOffset? _lastCheckedAt;
     private string? _checkError;
+    private readonly KeyedCollectionReconciler<PackageListItemKey, PackageListItem> _reconciler = new();
 
     public UpdatesPage()
     {
@@ -104,18 +106,6 @@ public sealed partial class UpdatesPage : Page
             return;
         }
 
-        if (PackageListItemComparer.HaveSameRowsExceptOperationFeedback(
-                AvailableUpdates,
-                snapshot))
-        {
-            for (var index = 0; index < AvailableUpdates.Count; index++)
-            {
-                AvailableUpdates[index].ApplyOperationFeedback(snapshot[index]);
-            }
-            UpdateState();
-            return;
-        }
-
         var selectedPackages = UpdatesList.SelectedItems
             .OfType<PackageListItem>()
             .Where(item => item.WingetPackage is not null)
@@ -124,11 +114,11 @@ public sealed partial class UpdatesPage : Page
 
         _changingSelection = true;
         AvailableUpdates.CollectionChanged -= OnUpdatesChanged;
-        AvailableUpdates.Clear();
-        foreach (var update in snapshot)
-        {
-            AvailableUpdates.Add(update);
-        }
+        _reconciler.Reconcile(
+            AvailableUpdates,
+            snapshot,
+            static item => item.StableKey,
+            static (current, replacement) => current.ApplyPresentation(replacement));
         AvailableUpdates.CollectionChanged += OnUpdatesChanged;
         foreach (var update in AvailableUpdates.Where(item =>
                      UpdateRowProjector.IsBulkActionEligible(item)

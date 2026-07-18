@@ -8,7 +8,7 @@
 
     <Page.Resources>
         <DataTemplate x:Key="SourceTemplate" x:DataType="views:SourceManagementListItem">
-            <Border Margin="0,0,0,8" Style="{StaticResource PackagePilotCardStyle}">
+            <Border Style="{StaticResource PackagePilotRowCardStyle}">
                 <Grid RowSpacing="12">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -30,8 +30,23 @@
                     <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="8">
                         <Button Content="Refresh" IsEnabled="{x:Bind CanRefresh}" Tag="{x:Bind Id}" Click="OnRefreshSourceClick" />
                         <Button Content="{x:Bind ExplicitActionLabel}" IsEnabled="{x:Bind CanEditExplicit}" Tag="{x:Bind Id}" Click="OnToggleExplicitClick" />
-                        <Button Content="Repair" IsEnabled="{x:Bind CanReset}" Tag="{x:Bind Id}" Click="OnResetClick" />
-                        <Button Content="Remove" IsEnabled="{x:Bind CanRemove}" Tag="{x:Bind Id}" Click="OnRemoveClick" />
+                        <Button AutomationProperties.Name="More source actions" Content="More">
+                            <Button.Flyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem
+                                        Click="OnResetClick"
+                                        IsEnabled="{x:Bind CanReset}"
+                                        Tag="{x:Bind Id}"
+                                        Text="Repair this source" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem
+                                        Click="OnRemoveClick"
+                                        IsEnabled="{x:Bind CanRemove}"
+                                        Tag="{x:Bind Id}"
+                                        Text="Remove source" />
+                                </MenuFlyout>
+                            </Button.Flyout>
+                        </Button>
                     </StackPanel>
                     <TextBlock
                         Grid.Row="2"
@@ -75,9 +90,15 @@
                 AutomationProperties.Name="Configured package sources"
                 ItemTemplate="{StaticResource SourceTemplate}"
                 ItemsSource="{x:Bind Sources}"
-                SelectionMode="None" />
+                SelectionMode="None">
+                <ListView.ItemContainerStyle>
+                    <Style BasedOn="{StaticResource PackagePilotListItemStyle}" TargetType="ListViewItem" />
+                </ListView.ItemContainerStyle>
+            </ListView>
             <StackPanel x:Name="EmptyState" MaxWidth="440" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
-                <FontIcon HorizontalAlignment="Center" FontSize="32" Glyph="&#xE774;" />
+                <Border Width="64" Height="64" HorizontalAlignment="Center" Background="{ThemeResource AccentFillColorSecondaryBrush}" CornerRadius="18">
+                    <FontIcon HorizontalAlignment="Center" FontSize="28" Glyph="&#xE774;" />
+                </Border>
                 <TextBlock HorizontalAlignment="Center" Style="{StaticResource PackagePilotSectionTitleStyle}" Text="No sources loaded" />
                 <TextBlock Style="{StaticResource PackagePilotSubtitleStyle}" Text="Refresh to read the sources configured for WinGet." TextAlignment="Center" />
             </StackPanel>

@@ -65,6 +65,13 @@ public sealed class WingetInstalledAppProvider : IInstalledAppProvider
                 DisplayName = package.Name,
                 Publisher = package.Publisher,
                 Version = package.InstalledVersion ?? string.Empty,
+                Icon = package.IconUri is { Scheme: "https" }
+                    ? new AppIconReference
+                    {
+                        Kind = AppIconSourceKind.BoundedHttpsMetadata,
+                        Uri = package.IconUri
+                    }
+                    : null,
                 Aliases = aliases,
                 WingetPackage = package.Key
             };

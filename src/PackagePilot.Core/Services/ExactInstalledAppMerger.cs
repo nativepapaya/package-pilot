@@ -78,6 +78,8 @@ public sealed class ExactInstalledAppMerger : IInstalledAppMerger
             Id = preferred.Id,
             Name = name,
             Publisher = publisher,
+            Icon = installations.Select(installation => installation.Icon)
+                .FirstOrDefault(icon => icon is not null),
             Installations = installations,
             Aliases = NormalizeAliases(installations.SelectMany(installation => installation.Aliases)),
             Actions = CreateActions(installations)

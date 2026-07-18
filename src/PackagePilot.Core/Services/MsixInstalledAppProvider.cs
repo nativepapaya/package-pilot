@@ -35,6 +35,7 @@ public sealed class MsixInstalledAppProvider : IInstalledAppProvider
                 Version = package.Version,
                 Scope = InstallerScope.User,
                 Architecture = package.Architecture,
+                Icon = package.Icon,
                 Aliases = string.IsNullOrWhiteSpace(package.PackageFamilyName)
                     ? Array.Empty<InstalledAppAlias>()
                     :

@@ -55,6 +55,78 @@ public sealed class DiscoverRowProjectorTests
     }
 
     [Fact]
+    public void ExactInstalledAggregate_OffersViewInstalledWithoutMutation()
+    {
+        var search = Package("Contoso.App", "source-a");
+        var installed = Package(
+            "Contoso.App",
+            "source-a",
+            status: PackageStatus.Installed,
+            installed: "1.0");
+        var installedApp = new InstalledApp
+        {
+            Id = "installed-app-1",
+            Name = "Contoso App",
+            Installations =
+            [
+                new Installation
+                {
+                    Provider = InstalledAppProviderKind.Winget,
+                    WingetPackage = search.Key
+                }
+            ]
+        };
+        var index = DiscoverRowProjector.CreateIndex(
+            [search],
+            [installed],
+            [],
+            new OperationQueueSnapshot(),
+            [installedApp]);
+
+        var row = DiscoverRowProjector.Apply(Row(search), search, index);
+
+        Assert.Equal("View installed", row.ActionLabel);
+        Assert.True(row.IsActionEnabled);
+        Assert.Null(row.RequestedOperationKind);
+        Assert.Equal(installedApp.Id, row.InstalledAppId);
+    }
+
+    [Fact]
+    public void InstalledAggregateFromDifferentSource_DoesNotOfferViewInstalled()
+    {
+        var search = Package("Contoso.App", "source-b");
+        var local = Package(
+            "Contoso.App",
+            "source-b",
+            status: PackageStatus.Installed,
+            installed: "1.0");
+        var installedApp = new InstalledApp
+        {
+            Id = "installed-app-1",
+            Installations =
+            [
+                new Installation
+                {
+                    Provider = InstalledAppProviderKind.Winget,
+                    WingetPackage = new PackageKey("Contoso.App", "source-a")
+                }
+            ]
+        };
+        var index = DiscoverRowProjector.CreateIndex(
+            [search],
+            [local],
+            [],
+            new OperationQueueSnapshot(),
+            [installedApp]);
+
+        var row = DiscoverRowProjector.Apply(Row(search), search, index);
+
+        Assert.Equal("Installed", row.ActionLabel);
+        Assert.False(row.IsActionEnabled);
+        Assert.Null(row.InstalledAppId);
+    }
+
+    [Fact]
     public void SameNameAndIdFromDifferentAttributedSource_DoesNotJoin()
     {
         var search = Package("Contoso.App", "source-b", name: "Contoso App");

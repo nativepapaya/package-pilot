@@ -20,6 +20,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     private readonly IMutationVerificationStore _mutationVerificationStore;
     private readonly MutationOperationAdmissionService _mutationAdmissionService;
     private readonly IInstalledAppInventory? _installedAppInventory;
+    private readonly IInstalledAppSnapshotStore? _installedAppSnapshotStore;
     private readonly ISourceManagementService? _sourceManagementService;
     private readonly IAppLifetimeActivityGate _lifetimeActivityGate;
     private readonly DispatcherQueue _dispatcher;
@@ -41,6 +42,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     private string _searchText = string.Empty;
     private string _statusMessage = "Preparing Package Pilot…";
     private bool _isBusy;
+    private bool _isSearching;
     private bool _isSearchTruncated;
     private bool _isDetailsLoading;
     private bool _hasAcceptedSourceAgreements;
@@ -58,6 +60,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     private bool _operationHistoryInitialized;
     private bool _mutationVerificationLoadFailed;
     private bool _mutationVerificationStoreInitialized;
+    private bool _isInstalledInventoryAuthoritative;
     private string? _mutationVerificationPersistenceError;
     private bool _disposed;
 
@@ -68,6 +71,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         IUpdateCoordinator? updateCoordinator = null,
         UpdateScanWorker? updateScanWorker = null,
         IInstalledAppInventory? installedAppInventory = null,
+        IInstalledAppSnapshotStore? installedAppSnapshotStore = null,
         ISourceManagementService? sourceManagementService = null,
         bool notificationRegistrationSupported = false,
         bool notificationRegistered = false,
@@ -84,6 +88,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         _operationQueue = operationQueue;
         _dispatcher = dispatcher;
         _installedAppInventory = installedAppInventory;
+        _installedAppSnapshotStore = installedAppSnapshotStore;
         _sourceManagementService = sourceManagementService;
         _lifetimeActivityGate = lifetimeActivityGate ?? new AppLifetimeActivityGate();
         _getUpdateMonitoringCadence = getUpdateMonitoringCadence
@@ -138,6 +143,12 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     public ObservableCollection<PackageSourceStatus> SourceStatuses { get; } = [];
     public ObservableCollection<OperationQueueEntry> PendingOperations { get; } = [];
     public ObservableCollection<OperationResult> OperationHistory { get; } = [];
+
+    public bool IsInstalledInventoryAuthoritative
+    {
+        get => _isInstalledInventoryAuthoritative;
+        private set => SetProperty(ref _isInstalledInventoryAuthoritative, value);
+    }
 
     public IAsyncRelayCommand InitializeCommand { get; }
     public IAsyncRelayCommand SearchCommand { get; }
@@ -198,6 +209,12 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
     {
         get => _isSearchTruncated;
         private set => SetProperty(ref _isSearchTruncated, value);
+    }
+
+    public bool IsSearching
+    {
+        get => _isSearching;
+        private set => SetProperty(ref _isSearching, value);
     }
 
     public bool IsDetailsLoading
@@ -405,6 +422,15 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                     _updateSnapshot,
                     _getUpdateMonitoringCadence()));
 
+            if (_installedAppSnapshotStore is not null
+                && await _installedAppSnapshotStore.LoadAsync(
+                    _lifetimeCancellation.Token).ConfigureAwait(true) is { } cachedInstalled)
+            {
+                ApplyInstalledApps(CreateInstalledLoadResult(
+                    cachedInstalled,
+                    isAuthoritative: false));
+            }
+
             await _operationQueue.Initialization.ConfigureAwait(true);
             var initialQueueSnapshot = _operationQueue.Snapshot;
             foreach (var result in initialQueueSnapshot.History)
@@ -514,6 +540,8 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
 
         if (searchText.Length < 2)
         {
+            IsSearching = false;
+            IsBusy = false;
             SearchResults.Clear();
             IsSearchTruncated = false;
             StatusMessage = searchText.Length == 0 ? "Search WinGet to discover packages." : "Type at least two characters.";
@@ -524,6 +552,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         {
             await Task.Delay(300, cancellationToken).ConfigureAwait(true);
             IsBusy = true;
+            IsSearching = true;
             StatusMessage = $"Searching for “{searchText}”…";
 
             var result = await _wingetClient.SearchAsync(
@@ -557,6 +586,7 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         {
             if (!cancellationToken.IsCancellationRequested)
             {
+                IsSearching = false;
                 IsBusy = false;
             }
         }
@@ -1150,7 +1180,8 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                         [],
                         [],
                         [],
-                        IsWingetInventoryHealthy: false);
+                        IsWingetInventoryHealthy: false,
+                        IsAuthoritative: false);
                     UpdateCheckError =
                         $"Installed-version verification was unavailable: {exception.Message}";
                 }
@@ -1524,10 +1555,18 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                 packages,
                 [],
                 [],
-                IsWingetInventoryHealthy: true);
+                IsWingetInventoryHealthy: true,
+                IsAuthoritative: true);
         }
 
         var snapshot = await _installedAppInventory.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        return CreateInstalledLoadResult(snapshot, isAuthoritative: true);
+    }
+
+    private static InstalledLoadResult CreateInstalledLoadResult(
+        InstalledAppSnapshot snapshot,
+        bool isAuthoritative)
+    {
         var wingetPackages = snapshot.Apps
             .SelectMany(app => app.Installations
                 .Where(installation => installation.WingetPackage is not null)
@@ -1550,7 +1589,8 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             wingetPackages,
             snapshot.Apps,
             snapshot.Providers,
-            wingetInventoryHealthy);
+            wingetInventoryHealthy,
+            isAuthoritative);
     }
 
     private void ApplyInstalledApps(InstalledLoadResult result)
@@ -1558,6 +1598,33 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         ReplaceAll(InstalledPackages, result.WingetPackages);
         ReplaceAll(InstalledApps, result.Apps);
         ReplaceAll(InstalledAppProviders, result.Providers);
+        IsInstalledInventoryAuthoritative = result.IsAuthoritative;
+        if (result.IsAuthoritative && _installedAppSnapshotStore is not null)
+        {
+            _ = PersistInstalledSnapshotAsync(result);
+        }
+    }
+
+    private async Task PersistInstalledSnapshotAsync(InstalledLoadResult result)
+    {
+        try
+        {
+            await _installedAppSnapshotStore!.SaveAsync(
+                new InstalledAppSnapshot
+                {
+                    CapturedAt = DateTimeOffset.UtcNow,
+                    Apps = result.Apps,
+                    Providers = result.Providers
+                },
+                _lifetimeCancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_lifetimeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Display caching is an optimization and never gates live inventory or mutations.
+        }
     }
 
     private void LoadSourceAgreementConsents()
@@ -1613,7 +1680,8 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
         IReadOnlyList<PackageSummary> WingetPackages,
         IReadOnlyList<InstalledApp> Apps,
         IReadOnlyList<InstalledAppProviderStatus> Providers,
-        bool IsWingetInventoryHealthy);
+        bool IsWingetInventoryHealthy,
+        bool IsAuthoritative);
 }
 
 public sealed record PackageMutationRequest(

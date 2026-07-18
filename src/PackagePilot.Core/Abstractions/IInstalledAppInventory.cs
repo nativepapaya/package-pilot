@@ -45,6 +45,7 @@ public sealed record MsixPackageRecord
     public string Name { get; init; } = string.Empty;
     public string Publisher { get; init; } = string.Empty;
     public string Version { get; init; } = string.Empty;
+    public AppIconReference? Icon { get; init; }
     public PackageArchitecture Architecture { get; init; } = PackageArchitecture.Unknown;
     public bool IsStoreApp { get; init; }
     public bool IsSystem { get; init; }

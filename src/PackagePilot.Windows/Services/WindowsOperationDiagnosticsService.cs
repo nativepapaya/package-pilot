@@ -94,6 +94,7 @@ public sealed class WindowsOperationDiagnosticsService : IOperationDiagnosticsSe
         var liveResult = new OperationResult
         {
             OperationId = packageOperation.Id,
+            DisplayName = packageOperation.DisplayName,
             Package = packageOperation.Package,
             Target = packageOperation.EffectiveTarget,
             Kind = packageOperation.Kind,

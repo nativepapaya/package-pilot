@@ -6,15 +6,9 @@
     <ResourceDictionary.ThemeDictionaries>
         <ResourceDictionary x:Key="Default">
             <SolidColorBrush x:Key="PackagePilotPageBrush" Color="Transparent" />
-            <SolidColorBrush x:Key="PackagePilotSurfaceBrush" Color="#CC202127" />
-            <SolidColorBrush x:Key="PackagePilotSurfaceSecondaryBrush" Color="#B32A2B32" />
-            <SolidColorBrush x:Key="PackagePilotSurfaceTertiaryBrush" Color="#8035363E" />
-            <SolidColorBrush x:Key="PackagePilotStrokeBrush" Color="#27FFFFFF" />
-            <SolidColorBrush x:Key="PackagePilotStrokeStrongBrush" Color="#42FFFFFF" />
             <SolidColorBrush x:Key="PackagePilotTextPrimaryBrush" Color="#FFFFFFFF" />
             <SolidColorBrush x:Key="PackagePilotTextSecondaryBrush" Color="#B8FFFFFF" />
             <SolidColorBrush x:Key="PackagePilotTextTertiaryBrush" Color="#8FFFFFFF" />
-            <SolidColorBrush x:Key="PackagePilotAccentSoftBrush" Color="{ThemeResource SystemAccentColor}" Opacity="0.18" />
             <SolidColorBrush x:Key="PackagePilotSuccessBrush" Color="#FF6CCB5F" />
             <SolidColorBrush x:Key="PackagePilotSuccessSoftBrush" Color="#296CCB5F" />
             <SolidColorBrush x:Key="PackagePilotWarningBrush" Color="#FFFFC34A" />
@@ -24,15 +18,9 @@
 
         <ResourceDictionary x:Key="Light">
             <SolidColorBrush x:Key="PackagePilotPageBrush" Color="Transparent" />
-            <SolidColorBrush x:Key="PackagePilotSurfaceBrush" Color="#E6FFFFFF" />
-            <SolidColorBrush x:Key="PackagePilotSurfaceSecondaryBrush" Color="#DDF5F6F8" />
-            <SolidColorBrush x:Key="PackagePilotSurfaceTertiaryBrush" Color="#DDE9EAF0" />
-            <SolidColorBrush x:Key="PackagePilotStrokeBrush" Color="#18000000" />
-            <SolidColorBrush x:Key="PackagePilotStrokeStrongBrush" Color="#2B000000" />
             <SolidColorBrush x:Key="PackagePilotTextPrimaryBrush" Color="#E4000000" />
             <SolidColorBrush x:Key="PackagePilotTextSecondaryBrush" Color="#A3000000" />
             <SolidColorBrush x:Key="PackagePilotTextTertiaryBrush" Color="#A3000000" />
-            <SolidColorBrush x:Key="PackagePilotAccentSoftBrush" Color="{ThemeResource SystemAccentColor}" Opacity="0.14" />
             <SolidColorBrush x:Key="PackagePilotSuccessBrush" Color="#FF187B31" />
             <SolidColorBrush x:Key="PackagePilotSuccessSoftBrush" Color="#19187B31" />
             <SolidColorBrush x:Key="PackagePilotWarningBrush" Color="#FF8A5B00" />
@@ -42,15 +30,9 @@
 
         <ResourceDictionary x:Key="HighContrast">
             <SolidColorBrush x:Key="PackagePilotPageBrush" Color="{ThemeResource SystemColorWindowColor}" />
-            <SolidColorBrush x:Key="PackagePilotSurfaceBrush" Color="{ThemeResource SystemColorWindowColor}" />
-            <SolidColorBrush x:Key="PackagePilotSurfaceSecondaryBrush" Color="{ThemeResource SystemColorWindowColor}" />
-            <SolidColorBrush x:Key="PackagePilotSurfaceTertiaryBrush" Color="{ThemeResource SystemColorWindowColor}" />
-            <SolidColorBrush x:Key="PackagePilotStrokeBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
-            <SolidColorBrush x:Key="PackagePilotStrokeStrongBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
             <SolidColorBrush x:Key="PackagePilotTextPrimaryBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
             <SolidColorBrush x:Key="PackagePilotTextSecondaryBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
             <SolidColorBrush x:Key="PackagePilotTextTertiaryBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
-            <SolidColorBrush x:Key="PackagePilotAccentSoftBrush" Color="{ThemeResource SystemColorHighlightColor}" />
             <SolidColorBrush x:Key="PackagePilotSuccessBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
             <SolidColorBrush x:Key="PackagePilotSuccessSoftBrush" Color="{ThemeResource SystemColorWindowColor}" />
             <SolidColorBrush x:Key="PackagePilotWarningBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
@@ -66,7 +48,7 @@
         <Setter Property="FontFamily" Value="{StaticResource PackagePilotDisplayFont}" />
         <Setter Property="FontSize" Value="30" />
         <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Foreground" Value="{ThemeResource PackagePilotTextPrimaryBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
         <Setter Property="TextWrapping" Value="WrapWholeWords" />
     </Style>
 
@@ -74,51 +56,49 @@
         <Setter Property="FontFamily" Value="{StaticResource PackagePilotDisplayFont}" />
         <Setter Property="FontSize" Value="18" />
         <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Foreground" Value="{ThemeResource PackagePilotTextPrimaryBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorPrimaryBrush}" />
     </Style>
 
     <Style x:Key="PackagePilotSubtitleStyle" TargetType="TextBlock">
         <Setter Property="FontFamily" Value="{StaticResource PackagePilotContentFont}" />
         <Setter Property="FontSize" Value="14" />
-        <Setter Property="Foreground" Value="{ThemeResource PackagePilotTextSecondaryBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
         <Setter Property="TextWrapping" Value="WrapWholeWords" />
     </Style>
 
     <Style x:Key="PackagePilotCaptionStyle" TargetType="TextBlock">
         <Setter Property="FontFamily" Value="{StaticResource PackagePilotContentFont}" />
         <Setter Property="FontSize" Value="12" />
-        <Setter Property="Foreground" Value="{ThemeResource PackagePilotTextTertiaryBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource TextFillColorTertiaryBrush}" />
         <Setter Property="TextWrapping" Value="WrapWholeWords" />
     </Style>
 
     <Style x:Key="PackagePilotCardStyle" TargetType="Border">
-        <Setter Property="Background" Value="{ThemeResource PackagePilotSurfaceBrush}" />
-        <Setter Property="BorderBrush" Value="{ThemeResource PackagePilotStrokeBrush}" />
+        <Setter Property="Background" Value="{ThemeResource CardBackgroundFillColorDefaultBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="CornerRadius" Value="12" />
         <Setter Property="Padding" Value="20" />
     </Style>
 
     <Style x:Key="PackagePilotSubtleCardStyle" TargetType="Border">
-        <Setter Property="Background" Value="{ThemeResource PackagePilotSurfaceSecondaryBrush}" />
-        <Setter Property="BorderBrush" Value="{ThemeResource PackagePilotStrokeBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Background" Value="{ThemeResource LayerFillColorAltBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
         <Setter Property="CornerRadius" Value="10" />
         <Setter Property="Padding" Value="16" />
     </Style>
 
     <Style x:Key="PackagePilotRowCardStyle" TargetType="Border">
-        <Setter Property="Background" Value="{ThemeResource PackagePilotSurfaceBrush}" />
-        <Setter Property="BorderBrush" Value="{ThemeResource PackagePilotStrokeBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="CornerRadius" Value="10" />
-        <Setter Property="Padding" Value="12,10" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="{ThemeResource DividerStrokeColorDefaultBrush}" />
+        <Setter Property="BorderThickness" Value="0,0,0,1" />
+        <Setter Property="CornerRadius" Value="0" />
+        <Setter Property="Padding" Value="12,9" />
     </Style>
 
     <Style x:Key="PackagePilotPillStyle" TargetType="Border">
-        <Setter Property="Background" Value="{ThemeResource PackagePilotSurfaceTertiaryBrush}" />
-        <Setter Property="BorderBrush" Value="{ThemeResource PackagePilotStrokeBrush}" />
-        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+        <Setter Property="BorderThickness" Value="0" />
         <Setter Property="CornerRadius" Value="12" />
         <Setter Property="Padding" Value="9,3" />
     </Style>
@@ -126,7 +106,7 @@
     <Style x:Key="PackagePilotIconTileStyle" TargetType="Border">
         <Setter Property="Width" Value="44" />
         <Setter Property="Height" Value="44" />
-        <Setter Property="Background" Value="{ThemeResource PackagePilotAccentSoftBrush}" />
+        <Setter Property="Background" Value="{ThemeResource AccentFillColorSecondaryBrush}" />
         <Setter Property="CornerRadius" Value="10" />
     </Style>
 
@@ -136,6 +116,15 @@
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="IsItemClickEnabled" Value="True" />
         <Setter Property="SelectionMode" Value="Single" />
+        <Setter Property="IsTabStop" Value="True" />
+    </Style>
+
+    <Style x:Key="PackagePilotListItemStyle" TargetType="ListViewItem">
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Margin" Value="0" />
+        <Setter Property="MinHeight" Value="68" />
+        <Setter Property="CornerRadius" Value="8" />
     </Style>
 
     <Style x:Key="PackagePilotIconButtonStyle" TargetType="Button">

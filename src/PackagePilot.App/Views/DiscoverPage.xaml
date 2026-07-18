@@ -9,16 +9,16 @@
     <Page.Resources>
         <DataTemplate x:Key="PackageTemplate" x:DataType="views:PackageListItem">
             <views:PackageRow
-                Margin="0,0,0,8"
                 ActionInvoked="OnPackageActionInvoked"
                 ActionLabel="{x:Bind ActionLabel, Mode=OneWay}"
-                IconGlyph="{x:Bind IconGlyph}"
-                IconUri="{x:Bind IconUri}"
+                IconGlyph="{x:Bind IconGlyph, Mode=OneWay}"
+                IconReference="{x:Bind IconReference, Mode=OneWay}"
+                IconUri="{x:Bind IconUri, Mode=OneWay}"
                 IsActionEnabled="{x:Bind IsActionEnabled, Mode=OneWay}"
                 IsPositiveState="{x:Bind IsPositiveState, Mode=OneWay}"
                 PackageId="{x:Bind PackageId}"
-                PackageName="{x:Bind Name}"
-                Publisher="{x:Bind Publisher}"
+                PackageName="{x:Bind Name, Mode=OneWay}"
+                Publisher="{x:Bind Publisher, Mode=OneWay}"
                 Source="{x:Bind Source}"
                 StateGlyph="{x:Bind StateGlyph, Mode=OneWay}"
                 Status="{x:Bind Status, Mode=OneWay}"
@@ -71,6 +71,7 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
@@ -100,17 +101,17 @@
                             <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="Up to 100 results" />
                         </Border>
                     </StackPanel>
-                    <ProgressRing
-                        x:Name="LoadingRing"
-                        Grid.Column="1"
-                        Width="24"
-                        Height="24"
-                        AutomationProperties.Name="Searching packages"
-                        IsActive="False"
-                        Visibility="Collapsed" />
                 </Grid>
 
-                <Grid Grid.Row="2">
+                <ProgressBar
+                    x:Name="LoadingBar"
+                    Grid.Row="2"
+                    Height="3"
+                    AutomationProperties.Name="Searching packages"
+                    IsIndeterminate="True"
+                    Visibility="Collapsed" />
+
+                <Grid Grid.Row="3">
                     <ListView
                         x:Name="ResultsList"
                         Style="{StaticResource PackagePilotListViewStyle}"
@@ -120,11 +121,7 @@
                         SelectionChanged="OnPackageSelectionChanged"
                         Visibility="Collapsed">
                         <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem">
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                <Setter Property="Padding" Value="0" />
-                                <Setter Property="Margin" Value="0" />
-                            </Style>
+                            <Style BasedOn="{StaticResource PackagePilotListItemStyle}" TargetType="ListViewItem" />
                         </ListView.ItemContainerStyle>
                     </ListView>
 
@@ -139,7 +136,7 @@
                             Width="64"
                             Height="64"
                             HorizontalAlignment="Center"
-                            Background="{ThemeResource PackagePilotAccentSoftBrush}"
+                            Background="{ThemeResource AccentFillColorSecondaryBrush}"
                             CornerRadius="18">
                             <FontIcon
                                 FontFamily="Segoe Fluent Icons"
@@ -161,7 +158,7 @@
 
                 <TextBlock
                     x:Name="ResultCountText"
-                    Grid.Row="3"
+                    Grid.Row="4"
                     Style="{StaticResource PackagePilotCaptionStyle}"
                     AutomationProperties.LiveSetting="Polite"
                     Text="No results loaded" />
