@@ -108,7 +108,8 @@ jobs:
               Get-ChildItem -LiteralPath $packageOutput -Recurse -File -Filter 'PackagePilot.App_*.msix'
           )
           $runtimePackages = @(
-              Get-ChildItem -LiteralPath $packageOutput -Recurse -File -Filter 'Microsoft.WindowsAppRuntime.2*.msix'
+              Get-ChildItem -LiteralPath $packageOutput -Recurse -File -Filter 'Microsoft.WindowsAppRuntime.2*.msix' |
+                  Where-Object FullName -Match '[\\/]Dependencies[\\/]x64[\\/]'
           )
           if ($mainPackages.Count -ne 1 -or $runtimePackages.Count -ne 1) {
               throw "Expected one app and one runtime package; found $($mainPackages.Count) app and $($runtimePackages.Count) runtime packages."
