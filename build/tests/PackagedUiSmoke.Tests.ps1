@@ -52,6 +52,9 @@ public static class PackagedSmokeNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetForegroundWindow(IntPtr window);
 
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmFlush();
+
     public static int ActivateApplication(string appUserModelId, out uint processId)
     {
         IApplicationActivationManager manager =
@@ -132,6 +135,36 @@ function Select-NavigationDestination {
     }
 
     throw "The '$Name' destination is visible but cannot be selected through UI Automation."
+}
+
+function Wait-DestinationPresented {
+    param(
+        [Parameter(Mandatory)]
+        [System.Windows.Automation.AutomationElement]$Root,
+
+        [Parameter(Mandatory)]
+        [string]$Destination,
+
+        [Parameter(Mandatory)]
+        [string]$MarkerName
+    )
+
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        $MarkerName)
+    $deadline = [DateTimeOffset]::Now.AddSeconds(10)
+    do {
+        $marker = $Root.FindFirst(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            $condition)
+        if ($null -ne $marker -and -not $marker.Current.IsOffscreen) {
+            return
+        }
+
+        Start-Sleep -Milliseconds 100
+    } while ([DateTimeOffset]::Now -lt $deadline)
+
+    throw "The '$Destination' destination did not present its '$MarkerName' content within 10 seconds."
 }
 
 function Save-WindowScreenshot {
@@ -231,10 +264,22 @@ try {
         throw 'UI Automation could not bind to the packaged Package Pilot window.'
     }
 
-    $destinations = @('Discover', 'Installed', 'Updates', 'Activity', 'Sources', 'Settings')
-    foreach ($destination in $destinations) {
+    $destinations = [ordered]@{
+        Discover = 'Search packages'
+        Installed = 'Filter installed packages'
+        Updates = 'Check for updates'
+        Activity = 'Package activity'
+        Sources = 'Configured package sources'
+        Settings = 'App theme'
+    }
+    foreach ($destination in $destinations.Keys) {
         Select-NavigationDestination -Root $automationRoot -Name $destination
-        Start-Sleep -Milliseconds 750
+        Wait-DestinationPresented `
+            -Root $automationRoot `
+            -Destination $destination `
+            -MarkerName $destinations[$destination]
+        Start-Sleep -Milliseconds 500
+        [void][PackagedSmokeNative]::DwmFlush()
 
         $process.Refresh()
         if ($process.HasExited -or -not $process.Responding) {
@@ -247,7 +292,7 @@ try {
     }
 
     $expectedScreenshots = @(
-        $destinations | ForEach-Object {
+        $destinations.Keys | ForEach-Object {
             Join-Path $resolvedScreenshots ($_.ToLowerInvariant() + '.png')
         }
     )
@@ -259,7 +304,7 @@ try {
     }
 
     Write-Output (
-        "Packaged UI smoke passed for {0} ({1}); all six destinations were selectable." -f
+        "Packaged UI smoke passed for {0} ({1}); all six destinations presented verified content." -f
         $installedPackage.PackageFullName,
         $process.Id)
 }
