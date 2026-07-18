@@ -69,3 +69,62 @@ jobs:
       - name: Test manual release security on Windows PowerShell 5.1
         shell: powershell
         run: ./build/tests/ManualReleaseSecurity.Tests.ps1
+
+      - name: Smoke test signed packaged UI
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'package-pilot-ui-smoke'
+          $packageOutput = Join-Path $smokeRoot 'packages'
+          $screenshotOutput = Join-Path $smokeRoot 'screenshots'
+          $certificatePath = Join-Path $smokeRoot 'PackagePilot.Smoke.cer'
+          [IO.Directory]::CreateDirectory($smokeRoot) | Out-Null
+
+          ./build/Set-PackageVersion.ps1 -Version '1.0.60000.1'
+          $certificate = ./build/New-DevelopmentCertificate.ps1 `
+              -CertificatePath $certificatePath |
+              Out-String |
+              ConvertFrom-Json
+          $packageOutputWithSeparator = $packageOutput + [IO.Path]::DirectorySeparatorChar
+
+          dotnet publish src/PackagePilot.App/PackagePilot.App.csproj `
+              --configuration Release `
+              --runtime win-x64 `
+              --self-contained false `
+              -p:Platform=x64 `
+              -p:GenerateAppxPackageOnBuild=true `
+              -p:AppxPackageSigningEnabled=true `
+              -p:PackageCertificateThumbprint=$($certificate.Thumbprint) `
+              -p:AppxBundle=Never `
+              -p:AppxSymbolPackageEnabled=false `
+              -p:UapAppxPackageBuildMode=SideloadOnly `
+              -p:WindowsAppSDKSelfContained=false `
+              -p:AppxPackageDir=$packageOutputWithSeparator
+          if ($LASTEXITCODE -ne 0) {
+              throw "Signed smoke-package publish failed with exit code $LASTEXITCODE."
+          }
+
+          $mainPackages = @(
+              Get-ChildItem -LiteralPath $packageOutput -Recurse -File -Filter 'PackagePilot.App_*.msix'
+          )
+          $runtimePackages = @(
+              Get-ChildItem -LiteralPath $packageOutput -Recurse -File -Filter 'Microsoft.WindowsAppRuntime.2*.msix'
+          )
+          if ($mainPackages.Count -ne 1 -or $runtimePackages.Count -ne 1) {
+              throw "Expected one app and one runtime package; found $($mainPackages.Count) app and $($runtimePackages.Count) runtime packages."
+          }
+
+          ./build/tests/PackagedUiSmoke.Tests.ps1 `
+              -PackagePath $mainPackages[0].FullName `
+              -DependencyPackagePath $runtimePackages[0].FullName `
+              -CertificateThumbprint $certificate.Thumbprint `
+              -ScreenshotDirectory $screenshotOutput
+
+      - name: Upload packaged UI smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packaged-ui-smoke-${{ github.run_id }}
+          path: ${{ runner.temp }}\package-pilot-ui-smoke\screenshots\*.png
+          if-no-files-found: warn
+          retention-days: 7
