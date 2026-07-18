@@ -51,6 +51,13 @@ public static class PackagedSmokeNative
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetForegroundWindow(IntPtr window);
+
+    public static int ActivateApplication(string appUserModelId, out uint processId)
+    {
+        IApplicationActivationManager manager =
+            (IApplicationActivationManager)new ApplicationActivationManager();
+        return manager.ActivateApplication(appUserModelId, string.Empty, 0, out processId);
+    }
 }
 
 [ComImport]
@@ -185,12 +192,9 @@ try {
     }
 
     $appUserModelId = "$($installedPackage.PackageFamilyName)!App"
-    $activationManager = [IApplicationActivationManager][ApplicationActivationManager]::new()
     [uint32]$processId = 0
-    $activationResult = $activationManager.ActivateApplication(
+    $activationResult = [PackagedSmokeNative]::ActivateApplication(
         $appUserModelId,
-        '',
-        0,
         [ref]$processId)
     if ($activationResult -ne 0 -or $processId -eq 0) {
         throw ('Package activation failed with HRESULT 0x{0:X8} and process ID {1}.' -f
