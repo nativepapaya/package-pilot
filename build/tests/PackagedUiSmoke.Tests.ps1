@@ -52,6 +52,9 @@ public static class PackagedSmokeNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetForegroundWindow(IntPtr window);
 
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
+
     [DllImport("dwmapi.dll")]
     public static extern int DwmFlush();
 
@@ -60,6 +63,14 @@ public static class PackagedSmokeNative
         IApplicationActivationManager manager =
             (IApplicationActivationManager)new ApplicationActivationManager();
         return manager.ActivateApplication(appUserModelId, string.Empty, 0, out processId);
+    }
+
+    public static void PressEnter()
+    {
+        const byte Enter = 0x0D;
+        const uint KeyUp = 0x0002;
+        keybd_event(Enter, 0, 0, UIntPtr.Zero);
+        keybd_event(Enter, 0, KeyUp, UIntPtr.Zero);
     }
 }
 
@@ -165,6 +176,70 @@ function Wait-DestinationPresented {
     } while ([DateTimeOffset]::Now -lt $deadline)
 
     throw "The '$Destination' destination did not present its '$MarkerName' content within 10 seconds."
+}
+
+function Submit-DiscoverSearch {
+    param(
+        [Parameter(Mandatory)]
+        [System.Windows.Automation.AutomationElement]$Root,
+
+        [Parameter(Mandatory)]
+        [string]$Query
+    )
+
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        'Search packages')
+    $search = $Root.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        $condition)
+    if ($null -eq $search) {
+        throw 'The packaged Discover search control is not available to UI Automation.'
+    }
+
+    $pattern = $null
+    if (-not $search.TryGetCurrentPattern(
+        [System.Windows.Automation.ValuePattern]::Pattern,
+        [ref]$pattern)) {
+        throw 'The packaged Discover search control does not support UI Automation values.'
+    }
+
+    $search.SetFocus()
+    ([System.Windows.Automation.ValuePattern]$pattern).SetValue($Query)
+    Start-Sleep -Milliseconds 100
+    [PackagedSmokeNative]::PressEnter()
+}
+
+function Wait-DiscoverInstalledAction {
+    param(
+        [Parameter(Mandatory)]
+        [System.Windows.Automation.AutomationElement]$Root
+    )
+
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Button)
+    $deadline = [DateTimeOffset]::Now.AddSeconds(30)
+    do {
+        $buttons = $Root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            $condition)
+        foreach ($button in $buttons) {
+            $name = $button.Current.Name
+            $isInstalledAction =
+                $name.StartsWith('View installed ', [StringComparison]::OrdinalIgnoreCase) -or
+                $name.StartsWith('Update ', [StringComparison]::OrdinalIgnoreCase)
+            $isEnabled = $button.Current.IsEnabled
+            $isVisible = -not $button.Current.IsOffscreen
+            if ($isInstalledAction -and $isEnabled -and $isVisible) {
+                return
+            }
+        }
+
+        Start-Sleep -Milliseconds 200
+    } while ([DateTimeOffset]::Now -lt $deadline)
+
+    throw "Discover did not recognize the runner's preinstalled 7zip.7zip package within 30 seconds."
 }
 
 function Save-WindowScreenshot {
@@ -284,6 +359,10 @@ try {
             -Root $automationRoot `
             -Destination $destination `
             -MarkerName $destinations[$destination]
+        if ($destination -eq 'Discover') {
+            Submit-DiscoverSearch -Root $automationRoot -Query '7zip.7zip'
+            Wait-DiscoverInstalledAction -Root $automationRoot
+        }
         Start-Sleep -Milliseconds 500
         [void][PackagedSmokeNative]::DwmFlush()
 

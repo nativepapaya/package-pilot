@@ -358,6 +358,42 @@ public sealed class MutationVerificationTracker
     }
 
     /// <summary>
+    /// Completes successful install and uninstall verification only after a healthy WinGet
+    /// inventory proves the requested state. A stale post-install inventory therefore keeps
+    /// the exact package locked instead of exposing another Install action.
+    /// </summary>
+    public bool ReconcileInstalledVerification(
+        IEnumerable<MutationVerificationTarget> targets,
+        IEnumerable<PackageSummary> currentInstalled,
+        bool isInstalledInventoryHealthy)
+    {
+        ArgumentNullException.ThrowIfNull(targets);
+        ArgumentNullException.ThrowIfNull(currentInstalled);
+        if (!isInstalledInventoryHealthy)
+        {
+            return false;
+        }
+
+        var installedKeys = currentInstalled
+            .Where(package => !package.Key.IsEmpty)
+            .Select(package => package.Key)
+            .ToArray();
+        var confirmed = targets.Where(target =>
+        {
+            var isInstalled = installedKeys.Any(installed =>
+                WingetPackageIdentity.MatchesInstalledPackage(target.Package, installed));
+            return target.Kind switch
+            {
+                PackageOperationKind.Install => isInstalled,
+                PackageOperationKind.Uninstall => !isInstalled,
+                _ => false
+            };
+        });
+
+        return CompleteVerification(confirmed);
+    }
+
+    /// <summary>
     /// Reconciles successful WinGet upgrades against fresh update and installed snapshots. A
     /// provider success is not proof that Windows activated the new package: MSIX can be staged
     /// while an in-use app keeps the previous version registered. Only an exact installed-version
