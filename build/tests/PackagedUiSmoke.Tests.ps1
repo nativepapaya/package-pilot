@@ -197,14 +197,24 @@ function Submit-DiscoverSearch {
         throw 'The packaged Discover search control is not available to UI Automation.'
     }
 
-    $pattern = $null
-    if (-not $search.TryGetCurrentPattern(
-        [System.Windows.Automation.ValuePattern]::Pattern,
-        [ref]$pattern)) {
-        throw 'The packaged Discover search control does not support UI Automation values.'
+    $editCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Edit)
+    $edit = $search.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        $editCondition)
+    if ($null -eq $edit) {
+        throw 'The packaged Discover search edit control is not available to UI Automation.'
     }
 
-    $search.SetFocus()
+    $pattern = $null
+    if (-not $edit.TryGetCurrentPattern(
+        [System.Windows.Automation.ValuePattern]::Pattern,
+        [ref]$pattern)) {
+        throw 'The packaged Discover search edit control does not support UI Automation values.'
+    }
+
+    $edit.SetFocus()
     ([System.Windows.Automation.ValuePattern]$pattern).SetValue($Query)
     Start-Sleep -Milliseconds 100
     [PackagedSmokeNative]::PressEnter()
