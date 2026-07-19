@@ -19,6 +19,7 @@
                 PackageId="{x:Bind PackageId}"
                 PackageName="{x:Bind Name, Mode=OneWay}"
                 Publisher="{x:Bind Publisher, Mode=OneWay}"
+                ShowState="{x:Bind ShowInstalledRowState, Mode=OneWay}"
                 Source="{x:Bind Source}"
                 StateGlyph="{x:Bind StateGlyph, Mode=OneWay}"
                 Status="{x:Bind Status}"
@@ -72,7 +73,7 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <Grid ColumnSpacing="10">
+                <Grid VerticalAlignment="Center" ColumnSpacing="8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
@@ -81,6 +82,9 @@
                     </Grid.ColumnDefinitions>
                     <AutoSuggestBox
                         x:Name="InstalledSearchBox"
+                        MaxWidth="360"
+                        HorizontalAlignment="Stretch"
+                        VerticalAlignment="Center"
                         AutomationProperties.Name="Filter installed packages"
                         PlaceholderText="Filter installed apps"
                         QueryIcon="Find">
@@ -88,23 +92,59 @@
                             <KeyboardAccelerator Key="F" Modifiers="Control" Invoked="OnFocusSearchInvoked" />
                         </AutoSuggestBox.KeyboardAccelerators>
                     </AutoSuggestBox>
-                    <ComboBox
-                        x:Name="ProviderFilterBox"
+                    <DropDownButton
+                        x:Name="ProviderFilterButton"
                         Grid.Column="1"
-                        MinWidth="130"
+                        MinWidth="148"
+                        VerticalAlignment="Center"
                         AutomationProperties.Name="Filter installed packages by provider"
-                        Header="Provider">
-                        <ComboBoxItem Content="All providers" Tag="all" />
-                        <ComboBoxItem Content="WinGet" Tag="winget" />
-                        <ComboBoxItem Content="Windows" Tag="windows" />
-                        <ComboBoxItem Content="Registry" Tag="registry" />
-                    </ComboBox>
+                        ToolTipService.ToolTip="Provider and visibility filters">
+                        <DropDownButton.Content>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon FontFamily="Segoe Fluent Icons" FontSize="14" Glyph="&#xE71C;" />
+                                <TextBlock x:Name="ProviderFilterText" Text="All providers" />
+                            </StackPanel>
+                        </DropDownButton.Content>
+                        <DropDownButton.Flyout>
+                            <MenuFlyout Placement="BottomEdgeAlignedLeft">
+                                <ToggleMenuFlyoutItem
+                                    x:Name="AllProvidersFilterItem"
+                                    Click="OnProviderFilterClick"
+                                    IsChecked="True"
+                                    Tag="all"
+                                    Text="All providers" />
+                                <ToggleMenuFlyoutItem
+                                    x:Name="WingetProviderFilterItem"
+                                    Click="OnProviderFilterClick"
+                                    Tag="winget"
+                                    Text="WinGet" />
+                                <ToggleMenuFlyoutItem
+                                    x:Name="WindowsProviderFilterItem"
+                                    Click="OnProviderFilterClick"
+                                    Tag="windows"
+                                    Text="Windows and Store" />
+                                <ToggleMenuFlyoutItem
+                                    x:Name="RegistryProviderFilterItem"
+                                    Click="OnProviderFilterClick"
+                                    Tag="registry"
+                                    Text="Legacy registry" />
+                                <MenuFlyoutSeparator />
+                                <ToggleMenuFlyoutItem
+                                    x:Name="ShowWindowsManagedToggle"
+                                    AutomationProperties.Name="Include Windows-managed apps"
+                                    Click="OnShowWindowsManagedClick"
+                                    Text="Include Windows-managed apps"
+                                    ToolTipService.ToolTip="Include apps that Package Pilot can only hand off to Windows or Microsoft Store." />
+                            </MenuFlyout>
+                        </DropDownButton.Flyout>
+                    </DropDownButton>
                     <ComboBox
                         x:Name="TypeFilterBox"
                         Grid.Column="2"
                         MinWidth="125"
+                        VerticalAlignment="Center"
                         AutomationProperties.Name="Filter installed packages by type"
-                        Header="Type">
+                        ToolTipService.ToolTip="Package type">
                         <ComboBoxItem Content="All types" Tag="all" />
                         <ComboBoxItem Content="Store apps" Tag="store" />
                         <ComboBoxItem Content="MSIX" Tag="msix" />
@@ -114,8 +154,9 @@
                         x:Name="SortBox"
                         Grid.Column="3"
                         MinWidth="130"
+                        VerticalAlignment="Center"
                         AutomationProperties.Name="Sort installed packages"
-                        Header="Sort by">
+                        ToolTipService.ToolTip="Sort by">
                         <ComboBoxItem Content="Name" Tag="name" />
                         <ComboBoxItem Content="Publisher" Tag="publisher" />
                         <ComboBoxItem Content="Version" Tag="version" />
@@ -163,28 +204,14 @@
                     </StackPanel>
                 </Grid>
 
-                <Grid Grid.Row="2" ColumnSpacing="10">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock
-                        x:Name="PackageCountText"
-                        VerticalAlignment="Center"
-                        Style="{StaticResource PackagePilotCaptionStyle}"
-                        AutomationProperties.LiveSetting="Polite"
-                        TextTrimming="CharacterEllipsis"
-                        Text="No packages loaded" />
-                    <ToggleButton
-                        x:Name="ShowWindowsManagedToggle"
-                        Grid.Column="1"
-                        VerticalAlignment="Center"
-                        AutomationProperties.Name="Show Windows-managed apps"
-                        Click="OnShowWindowsManagedClick"
-                        Content="Show Windows-managed apps"
-                        ToolTipService.ToolTip="Include apps that Package Pilot can only hand off to Windows or Microsoft Store."
-                        Visibility="Collapsed" />
-                </Grid>
+                <TextBlock
+                    x:Name="PackageCountText"
+                    Grid.Row="2"
+                    VerticalAlignment="Center"
+                    Style="{StaticResource PackagePilotCaptionStyle}"
+                    AutomationProperties.LiveSetting="Polite"
+                    TextTrimming="CharacterEllipsis"
+                    Text="No packages loaded" />
             </Grid>
 
             <views:PackageDetailsPane

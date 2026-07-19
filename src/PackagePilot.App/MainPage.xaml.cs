@@ -1645,12 +1645,15 @@ public sealed partial class MainPage : Page
                 : TimeSpan.FromMilliseconds(1);
             _activityStripTimer.Start();
         }
-        var visibleUpdateCount = ViewModel.AvailableUpdates
-            .Concat(ViewModel.PendingUpgradeVerifications)
-            .Select(package => package.Key)
-            .Distinct()
-            .Count();
-        UpdatesBadge.Value = visibleUpdateCount > 0 ? visibleUpdateCount : -1;
+        var updateBadge = UpdateNavigationBadgeProjector.Create(
+            ViewModel.AvailableUpdates,
+            ViewModel.PendingUpgradeVerifications,
+            ViewModel.OperationQueueSnapshot);
+        UpdatesBadge.Value = updateBadge.Count;
+        UpdatesBadge.Visibility = updateBadge.IsVisible
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        AutomationProperties.SetName(UpdatesBadge, updateBadge.AutomationName);
 
         var mutationRecoveryUnavailable =
             ViewModel.IsReady && !ViewModel.CanQueuePackageMutations;

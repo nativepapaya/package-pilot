@@ -10,6 +10,7 @@ namespace PackagePilot.App.Views;
 public sealed partial class InstalledPage : Page
 {
     private PackageListItem? _selectedPackage;
+    private string _providerFilter = "all";
     private bool _isViewReady;
 
     public InstalledPage()
@@ -20,11 +21,9 @@ public sealed partial class InstalledPage : Page
         // SelectionChanged while InitializeComponent is still connecting fields that
         // appear later in XAML, so all filter/sort events are wired only after it returns.
         SortBox.SelectedIndex = 0;
-        ProviderFilterBox.SelectedIndex = 0;
         TypeFilterBox.SelectedIndex = 0;
         InstalledSearchBox.TextChanged += OnFilterTextChanged;
         SortBox.SelectionChanged += OnSortChanged;
-        ProviderFilterBox.SelectionChanged += OnSortChanged;
         TypeFilterBox.SelectionChanged += OnSortChanged;
         _isViewReady = true;
         SizeChanged += OnSizeChanged;
@@ -65,6 +64,30 @@ public sealed partial class InstalledPage : Page
     private void OnShowWindowsManagedClick(object sender, RoutedEventArgs e) => UpdateDisplayedPackages();
     private void OnRefreshClick(object sender, RoutedEventArgs e) => RefreshRequested?.Invoke(this, EventArgs.Empty);
 
+    private void OnProviderFilterClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleMenuFlyoutItem selected
+            || selected.Tag is not string provider)
+        {
+            return;
+        }
+
+        _providerFilter = provider;
+        foreach (var item in new[]
+                 {
+                     AllProvidersFilterItem,
+                     WingetProviderFilterItem,
+                     WindowsProviderFilterItem,
+                     RegistryProviderFilterItem
+                 })
+        {
+            item.IsChecked = ReferenceEquals(item, selected);
+        }
+
+        ProviderFilterText.Text = selected.Text;
+        UpdateDisplayedPackages();
+    }
+
     private void OnFocusSearchInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         InstalledSearchBox.Focus(FocusState.Programmatic);
@@ -86,8 +109,7 @@ public sealed partial class InstalledPage : Page
             package.Publisher.Contains(query, StringComparison.OrdinalIgnoreCase) ||
             package.PackageId.Contains(query, StringComparison.OrdinalIgnoreCase));
 
-        var provider = (ProviderFilterBox.SelectedItem as ComboBoxItem)?.Tag as string;
-        packages = provider switch
+        packages = _providerFilter switch
         {
             "winget" => packages.Where(package =>
                 package.Source.Contains("WinGet", StringComparison.OrdinalIgnoreCase)),
@@ -137,15 +159,15 @@ public sealed partial class InstalledPage : Page
         InstalledList.Visibility = hasPackages ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Visibility = hasPackages ? Visibility.Collapsed : Visibility.Visible;
         var totalWindowsManagedCount = InstalledPackageVisibility.CountWindowsManaged(Packages);
-        ShowWindowsManagedToggle.Visibility = totalWindowsManagedCount > 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        ShowWindowsManagedToggle.Content = showWindowsManaged
-            ? "Hide Windows-managed"
-            : $"Show Windows-managed ({totalWindowsManagedCount})";
+        ShowWindowsManagedToggle.IsEnabled = totalWindowsManagedCount > 0;
+        ShowWindowsManagedToggle.Text = totalWindowsManagedCount > 0
+            ? $"Include Windows-managed apps ({totalWindowsManagedCount})"
+            : "Include Windows-managed apps";
         AutomationProperties.SetName(
             ShowWindowsManagedToggle,
-            showWindowsManaged ? "Hide Windows-managed apps" : "Show Windows-managed apps");
+            showWindowsManaged
+                ? "Windows-managed apps are included"
+                : "Include Windows-managed apps");
 
         if (!hasPackages && !showWindowsManaged && matchingWindowsManagedCount > 0)
         {

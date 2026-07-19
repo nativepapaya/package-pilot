@@ -36,7 +36,7 @@
                     <FontIcon Glyph="&#xE895;" />
                 </NavigationViewItem.Icon>
                 <NavigationViewItem.InfoBadge>
-                    <InfoBadge x:Name="UpdatesBadge" Value="-1" />
+                    <InfoBadge x:Name="UpdatesBadge" Value="0" Visibility="Collapsed" />
                 </NavigationViewItem.InfoBadge>
             </NavigationViewItem>
             <NavigationViewItem Content="Activity" Tag="activity">

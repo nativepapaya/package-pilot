@@ -54,8 +54,19 @@ public sealed class PackageListItem : INotifyPropertyChanged
     public string Status
     {
         get => _status;
-        set => SetProperty(ref _status, value);
+        set
+        {
+            if (SetProperty(ref _status, value))
+            {
+                PropertyChanged?.Invoke(
+                    this,
+                    new PropertyChangedEventArgs(nameof(ShowInstalledRowState)));
+            }
+        }
     }
+
+    public bool ShowInstalledRowState =>
+        !string.Equals(Status, "Installed", StringComparison.OrdinalIgnoreCase);
 
     public string ActionLabel
     {
