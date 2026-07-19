@@ -165,6 +165,83 @@ public sealed class DiscoverRowProjectorTests
         Assert.Equal("Available", ambiguousB.Status);
     }
 
+    [Fact]
+    public void PredefinedInstalledCatalogId_ShowsInstalledForUnambiguousSearchResult()
+    {
+        var search = Package("Contoso.App", "source-a", available: "2.0");
+        var installed = Package(
+            "Contoso.App",
+            "*PredefinedInstalledSource",
+            status: PackageStatus.Installed,
+            installed: "1.4");
+
+        var row = Apply(search, [search], installed: [installed]);
+
+        Assert.Equal("Installed", row.Status);
+        Assert.Equal("Installed", row.ActionLabel);
+        Assert.False(row.IsActionEnabled);
+        Assert.Null(row.RequestedOperationKind);
+        Assert.Equal("1.4", row.InstalledVersion);
+    }
+
+    [Fact]
+    public void PredefinedInstalledAggregate_OffersViewInstalledForUnambiguousSearchResult()
+    {
+        var search = Package("Contoso.App", "source-a");
+        var installed = Package(
+            "Contoso.App",
+            "*PredefinedInstalledSource",
+            status: PackageStatus.Installed,
+            installed: "1.0");
+        var installedApp = new InstalledApp
+        {
+            Id = "installed-app-1",
+            Name = "Contoso App",
+            Installations =
+            [
+                new Installation
+                {
+                    Provider = InstalledAppProviderKind.Winget,
+                    WingetPackage = installed.Key
+                }
+            ]
+        };
+        var index = DiscoverRowProjector.CreateIndex(
+            [search],
+            [installed],
+            [],
+            new OperationQueueSnapshot(),
+            [installedApp]);
+
+        var row = DiscoverRowProjector.Apply(Row(search), search, index);
+
+        Assert.Equal("Installed", row.Status);
+        Assert.Equal("View installed", row.ActionLabel);
+        Assert.True(row.IsActionEnabled);
+        Assert.Null(row.RequestedOperationKind);
+        Assert.Equal(installedApp.Id, row.InstalledAppId);
+    }
+
+    [Fact]
+    public void PredefinedInstalledCatalogId_DoesNotGuessAcrossDuplicateSearchSources()
+    {
+        var sourceA = Package("Contoso.App", "source-a");
+        var sourceB = Package("Contoso.App", "source-b");
+        var installed = Package(
+            "Contoso.App",
+            "*PredefinedInstalledSource",
+            status: PackageStatus.Installed,
+            installed: "1.0");
+
+        var rowA = Apply(sourceA, [sourceA, sourceB], installed: [installed]);
+        var rowB = Apply(sourceB, [sourceA, sourceB], installed: [installed]);
+
+        Assert.Equal("Available", rowA.Status);
+        Assert.Equal("Install", rowA.ActionLabel);
+        Assert.Equal("Available", rowB.Status);
+        Assert.Equal("Install", rowB.ActionLabel);
+    }
+
     [Theory]
     [InlineData(PackageOperationState.Queued, "Queued", "Update queued - waiting to start")]
     [InlineData(PackageOperationState.Resolving, "Preparing", "Preparing update...")]

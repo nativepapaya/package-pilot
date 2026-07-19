@@ -263,6 +263,7 @@ internal sealed class DiscoverPackageStateIndex
     private readonly IReadOnlyDictionary<string, OperationQueueEntry> _unattributedActiveById;
     private readonly IReadOnlyDictionary<PackageKey, OperationResult> _administratorRequiredByKey;
     private readonly IReadOnlyDictionary<PackageKey, string> _installedAppIdsByKey;
+    private readonly IReadOnlyDictionary<string, string> _unattributedInstalledAppIdsById;
     private readonly IReadOnlySet<string> _unambiguousSearchIds;
 
     private DiscoverPackageStateIndex(
@@ -274,6 +275,7 @@ internal sealed class DiscoverPackageStateIndex
         IReadOnlyDictionary<string, OperationQueueEntry> unattributedActiveById,
         IReadOnlyDictionary<PackageKey, OperationResult> administratorRequiredByKey,
         IReadOnlyDictionary<PackageKey, string> installedAppIdsByKey,
+        IReadOnlyDictionary<string, string> unattributedInstalledAppIdsById,
         IReadOnlySet<string> unambiguousSearchIds)
     {
         _installedByKey = installedByKey;
@@ -284,6 +286,7 @@ internal sealed class DiscoverPackageStateIndex
         _unattributedActiveById = unattributedActiveById;
         _administratorRequiredByKey = administratorRequiredByKey;
         _installedAppIdsByKey = installedAppIdsByKey;
+        _unattributedInstalledAppIdsById = unattributedInstalledAppIdsById;
         _unambiguousSearchIds = unambiguousSearchIds;
     }
 
@@ -299,8 +302,18 @@ internal sealed class DiscoverPackageStateIndex
     public OperationResult? FindAdministratorRequired(PackageKey package) =>
         _administratorRequiredByKey.TryGetValue(package, out var result) ? result : null;
 
-    public string? FindInstalledAppId(PackageKey package) =>
-        _installedAppIdsByKey.TryGetValue(package, out var appId) ? appId : null;
+    public string? FindInstalledAppId(PackageKey package)
+    {
+        if (_installedAppIdsByKey.TryGetValue(package, out var exact))
+        {
+            return exact;
+        }
+
+        return _unambiguousSearchIds.Contains(package.Id)
+            && _unattributedInstalledAppIdsById.TryGetValue(package.Id, out var unattributed)
+                ? unattributed
+                : null;
+    }
 
     public static DiscoverPackageStateIndex Create(
         IEnumerable<PackageSummary> searchResults,
@@ -332,7 +345,8 @@ internal sealed class DiscoverPackageStateIndex
             .Concat(queue.Pending);
         var (activeByKey, unattributedActiveById) = IndexOperations(activeEntries);
         var administratorRequiredByKey = IndexAdministratorRequired(queue.History);
-        var installedAppIdsByKey = IndexInstalledApps(installedApps);
+        var (installedAppIdsByKey, unattributedInstalledAppIdsById) =
+            IndexInstalledApps(installedApps);
 
         return new DiscoverPackageStateIndex(
             installedByKey,
@@ -343,37 +357,60 @@ internal sealed class DiscoverPackageStateIndex
             unattributedActiveById,
             administratorRequiredByKey,
             installedAppIdsByKey,
+            unattributedInstalledAppIdsById,
             unambiguousSearchIds);
     }
 
-    private static IReadOnlyDictionary<PackageKey, string> IndexInstalledApps(
+    private static (
+        IReadOnlyDictionary<PackageKey, string> ByKey,
+        IReadOnlyDictionary<string, string> UnattributedById) IndexInstalledApps(
         IEnumerable<InstalledApp> installedApps)
     {
         var results = new Dictionary<PackageKey, string>(KeyComparer);
-        var ambiguous = new HashSet<PackageKey>(KeyComparer);
+        var unattributed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var ambiguousKeys = new HashSet<PackageKey>(KeyComparer);
+        var ambiguousIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var app in installedApps)
         {
             foreach (var package in app.Installations
                          .Select(installation => installation.WingetPackage)
                          .OfType<PackageKey>()
-                         .Where(package => !package.IsEmpty && !IsUnattributedSource(package.SourceId)))
+                         .Where(package => !package.IsEmpty))
             {
+                if (WingetPackageIdentity.IsUnattributedInstalledSource(package.SourceId))
+                {
+                    if (unattributed.TryGetValue(package.Id, out var existingAppId)
+                        && !string.Equals(existingAppId, app.Id, StringComparison.Ordinal))
+                    {
+                        ambiguousIds.Add(package.Id);
+                        unattributed.Remove(package.Id);
+                        continue;
+                    }
+
+                    if (!ambiguousIds.Contains(package.Id))
+                    {
+                        unattributed[package.Id] = app.Id;
+                    }
+
+                    continue;
+                }
+
                 if (results.TryGetValue(package, out var existing)
                     && !string.Equals(existing, app.Id, StringComparison.Ordinal))
                 {
-                    ambiguous.Add(package);
+                    ambiguousKeys.Add(package);
                     results.Remove(package);
                     continue;
                 }
 
-                if (!ambiguous.Contains(package))
+                if (!ambiguousKeys.Contains(package))
                 {
                     results[package] = app.Id;
                 }
             }
         }
 
-        return results;
+        return (results, unattributed);
     }
 
     private T? Find<T>(
@@ -402,7 +439,7 @@ internal sealed class DiscoverPackageStateIndex
         var unattributedById = new Dictionary<string, PackageSummary>(StringComparer.OrdinalIgnoreCase);
         foreach (var package in packages.Where(package => !package.Key.IsEmpty))
         {
-            if (IsUnattributedSource(package.Key.SourceId))
+            if (WingetPackageIdentity.IsUnattributedInstalledSource(package.Key.SourceId))
             {
                 unattributedById.TryAdd(package.Key.Id, package);
             }
@@ -424,7 +461,7 @@ internal sealed class DiscoverPackageStateIndex
         {
             if (result.EffectiveTarget is not WingetTarget target
                 || target.Package.IsEmpty
-                || IsUnattributedSource(target.Package.SourceId)
+                || WingetPackageIdentity.IsUnattributedInstalledSource(target.Package.SourceId)
                 || !latestSeen.Add(target.Package))
             {
                 continue;
@@ -459,7 +496,7 @@ internal sealed class DiscoverPackageStateIndex
                 continue;
             }
 
-            if (IsUnattributedSource(target.Package.SourceId))
+            if (WingetPackageIdentity.IsUnattributedInstalledSource(target.Package.SourceId))
             {
                 unattributedById.TryAdd(target.Package.Id, entry);
             }
@@ -471,11 +508,6 @@ internal sealed class DiscoverPackageStateIndex
 
         return (byKey, unattributedById);
     }
-
-    private static bool IsUnattributedSource(string sourceId) =>
-        string.IsNullOrWhiteSpace(sourceId)
-        || string.Equals(sourceId, "installed", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(sourceId, "unknown", StringComparison.OrdinalIgnoreCase);
 
     private sealed class PackageKeyComparer : IEqualityComparer<PackageKey>
     {

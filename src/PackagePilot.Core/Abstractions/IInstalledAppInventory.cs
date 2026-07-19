@@ -32,6 +32,16 @@ public interface IWingetInstalledAliasResolver
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Reads source-attributed installed WinGet packages and their exact deployment aliases in one
+/// composite-catalog pass.
+/// </summary>
+public interface IWingetInstalledSnapshotReader
+{
+    Task<WingetInstalledPackageSnapshot> GetInstalledSnapshotAsync(
+        CancellationToken cancellationToken = default);
+}
+
 public interface IMsixPackageReader
 {
     Task<IReadOnlyList<MsixPackageRecord>> ReadCurrentUserPackagesAsync(

@@ -76,17 +76,30 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <AutoSuggestBox
-                    x:Name="PackageSearchBox"
-                    AutomationProperties.Name="Search packages"
-                    PlaceholderText="Search apps, publishers, or package IDs"
-                    QueryIcon="Find"
-                    QuerySubmitted="OnQuerySubmitted"
-                    TextChanged="OnSearchTextChanged">
-                    <AutoSuggestBox.KeyboardAccelerators>
-                        <KeyboardAccelerator Key="F" Modifiers="Control" Invoked="OnFocusSearchInvoked" />
-                    </AutoSuggestBox.KeyboardAccelerators>
-                </AutoSuggestBox>
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <AutoSuggestBox
+                        x:Name="PackageSearchBox"
+                        AutomationProperties.Name="Search packages"
+                        PlaceholderText="Search apps, publishers, or package IDs"
+                        QuerySubmitted="OnQuerySubmitted"
+                        TextChanged="OnSearchTextChanged">
+                        <AutoSuggestBox.KeyboardAccelerators>
+                            <KeyboardAccelerator Key="F" Modifiers="Control" Invoked="OnFocusSearchInvoked" />
+                        </AutoSuggestBox.KeyboardAccelerators>
+                    </AutoSuggestBox>
+                    <Button
+                        Grid.Column="1"
+                        Style="{StaticResource PackagePilotIconButtonStyle}"
+                        AutomationProperties.Name="Search packages now"
+                        Click="OnSearchClick"
+                        ToolTipService.ToolTip="Search">
+                        <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE721;" />
+                    </Button>
+                </Grid>
 
                 <Grid Grid.Row="1" ColumnSpacing="12">
                     <Grid.ColumnDefinitions>

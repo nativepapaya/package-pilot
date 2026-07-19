@@ -1320,6 +1320,8 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
                     ? "WinGet reported completion, but Windows still reports the previous version. If the app was open, close and reopen it, then check again."
                 : _mutationVerificationTracker.HasUpgradeTargetsEligibleForVerification
                     ? "The operation finished, but installed-version verification is still pending."
+                : _mutationVerificationTracker.HasTargetsEligibleForVerification
+                    ? "The operation finished, but installed package verification is still pending."
                 : updateCheck?.State == UpdateCheckState.Current
                     ? "Installed packages and updates were refreshed."
                     : "The operation finished, but update verification is still pending.";
@@ -1457,7 +1459,13 @@ public sealed class ShellViewModel : ObservableObject, IDisposable
             return;
         }
 
-        CompleteMutationVerification(targets);
+        if (_mutationVerificationTracker.ReconcileInstalledVerification(
+                targets,
+                installed.WingetPackages,
+                installed.IsWingetInventoryHealthy))
+        {
+            OnMutationVerificationStateChanged();
+        }
     }
 
     private void LoadPendingMutationVerifications()

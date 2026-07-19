@@ -100,6 +100,8 @@ public sealed partial class DiscoverPage : Page
         RaiseSearchRequested();
     }
 
+    private void OnSearchClick(object sender, RoutedEventArgs e) => RaiseSearchRequested();
+
     private void RaiseSearchRequested() => SearchRequested?.Invoke(this, new SearchRequestedEventArgs(PackageSearchBox.Text.Trim()));
 
     private void OnFocusSearchInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)

@@ -415,6 +415,99 @@ public sealed class MutationVerificationTrackerTests
     }
 
     [Fact]
+    public void SuccessfulInstall_RemainsLockedUntilHealthyInventoryContainsPackage()
+    {
+        var tracker = new MutationVerificationTracker(BootA);
+        var package = Update("Contoso.Install", "source-a");
+        var operation = Operation(package, RecordedAt, PackageOperationKind.Install);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+
+        Assert.False(tracker.ReconcileInstalledVerification(
+            [target],
+            [],
+            isInstalledInventoryHealthy: true));
+        Assert.True(tracker.Contains(package.Key));
+
+        var installed = package with
+        {
+            Key = new PackageKey(
+                package.Key.Id,
+                WingetPackageIdentity.PredefinedInstalledSourceId),
+            Status = PackageStatus.Installed
+        };
+        Assert.True(tracker.ReconcileInstalledVerification(
+            [target],
+            [installed],
+            isInstalledInventoryHealthy: true));
+        Assert.False(tracker.Contains(package.Key));
+    }
+
+    [Fact]
+    public void SuccessfulInstall_RemainsLockedWhenInstalledInventoryIsUnhealthy()
+    {
+        var tracker = new MutationVerificationTracker(BootA);
+        var package = Update("Contoso.Install", "source-a");
+        var operation = Operation(package, RecordedAt, PackageOperationKind.Install);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+        var installed = package with
+        {
+            Key = new PackageKey(
+                package.Key.Id,
+                WingetPackageIdentity.PredefinedInstalledSourceId),
+            Status = PackageStatus.Installed
+        };
+
+        Assert.False(tracker.ReconcileInstalledVerification(
+            [target],
+            [installed],
+            isInstalledInventoryHealthy: false));
+        Assert.True(tracker.Contains(package.Key));
+    }
+
+    [Fact]
+    public void SuccessfulUninstall_RemainsLockedUntilHealthyInventoryOmitsPackage()
+    {
+        var tracker = new MutationVerificationTracker(BootA);
+        var package = Update("Contoso.Uninstall", "source-a");
+        var operation = Operation(package, RecordedAt, PackageOperationKind.Uninstall);
+        tracker.MarkEnqueued(operation, package);
+        tracker.RecordResult(Result(
+            operation,
+            PackageOperationState.Completed,
+            RecordedAt.AddMinutes(1)));
+        var target = Assert.Single(tracker.CaptureVerificationTargetsForCurrentBoot());
+        var stillInstalled = package with
+        {
+            Key = new PackageKey(
+                package.Key.Id,
+                WingetPackageIdentity.PredefinedInstalledSourceId),
+            Status = PackageStatus.Installed
+        };
+
+        Assert.False(tracker.ReconcileInstalledVerification(
+            [target],
+            [stillInstalled],
+            isInstalledInventoryHealthy: true));
+        Assert.True(tracker.Contains(package.Key));
+
+        Assert.True(tracker.ReconcileInstalledVerification(
+            [target],
+            [],
+            isInstalledInventoryHealthy: true));
+        Assert.False(tracker.Contains(package.Key));
+    }
+
+    [Fact]
     public void OutcomeUnknown_RemainsVisibleAndLockedForTheAdmissionBoot()
     {
         var tracker = new MutationVerificationTracker(BootA);
