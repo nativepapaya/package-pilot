@@ -14,6 +14,13 @@ public sealed record InstalledAppSnapshot
     public bool IsPartial => Providers.Any(provider => provider.Health != InventoryProviderHealth.Healthy);
 }
 
+public sealed record WingetInstalledPackageSnapshot
+{
+    public IReadOnlyList<PackageSummary> Packages { get; init; } = Array.Empty<PackageSummary>();
+    public IReadOnlyDictionary<PackageKey, IReadOnlyList<InstalledAppAlias>> ExactAliases { get; init; } =
+        new Dictionary<PackageKey, IReadOnlyList<InstalledAppAlias>>();
+}
+
 public sealed record InstalledApp
 {
     public string Id { get; init; } = string.Empty;

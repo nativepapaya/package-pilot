@@ -3,6 +3,7 @@ using System.Security.Principal;
 using Microsoft.Management.Deployment;
 using PackagePilot.Core.Abstractions;
 using PackagePilot.Core.Models;
+using PackagePilot.Core.Services;
 using Windows.Foundation;
 using Windows.Foundation.Metadata;
 using Windows.System;
@@ -16,7 +17,7 @@ namespace PackagePilot.Windows.Services;
 /// <summary>
 /// Out-of-process adapter for the Windows Package Manager deployment API.
 /// </summary>
-public sealed class WingetClient : IWingetClient, ISourceManagementService
+public sealed class WingetClient : IWingetClient, ISourceManagementService, IWingetInstalledSnapshotReader
 {
     private const string ContractName =
         "Microsoft.Management.Deployment.WindowsPackageManagerContract";
@@ -642,19 +643,71 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
     }
 
     public async Task<IReadOnlyList<PackageSummary>> GetInstalledPackagesAsync(
+        CancellationToken cancellationToken = default) =>
+        (await GetInstalledSnapshotAsync(cancellationToken)).Packages;
+
+    public async Task<WingetInstalledPackageSnapshot> GetInstalledSnapshotAsync(
         CancellationToken cancellationToken = default)
     {
         await EnsureSupportedAsync(cancellationToken);
 
-        var reference = GetManager().GetLocalPackageCatalog(LocalPackageCatalog.InstalledPackages);
-        var identity = GetSourceIdentity(reference, "Installed", "installed");
+        var manager = GetManager();
+        var localReference = manager.GetLocalPackageCatalog(LocalPackageCatalog.InstalledPackages);
+        var localIdentity = GetSourceIdentity(localReference, "Installed", "installed");
+        var remoteReferences = EnumerateWinRt(manager.GetPackageCatalogs()).ToArray();
+        if (remoteReferences.Length == 0)
+        {
+            throw new WingetClientException(new WingetError
+            {
+                Kind = WingetErrorKind.ComFailure,
+                Code = "NoPackageSources",
+                Message = "WinGet did not return any package sources, so installed package identities could not be resolved."
+            });
+        }
+
+        var options = new CreateCompositePackageCatalogOptions
+        {
+            CompositeSearchBehavior = CompositeSearchBehavior.LocalCatalogs,
+            InstalledScope = PackageInstallScope.Any
+        };
+        foreach (var remoteReference in remoteReferences)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            options.Catalogs.Add(remoteReference);
+        }
+
+        var reference = manager.CreateCompositePackageCatalog(options);
         var catalog = await ConnectOrThrowAsync(reference, cancellationToken);
         var result = await FindAsync(catalog, CreateFindAllOptions(), cancellationToken);
 
-        return EnumerateWinRt(result.Matches)
-            .Select(match => ToSummary(match.CatalogPackage, identity, PackageStatus.Installed))
-            .OrderBy(package => package.Name, StringComparer.CurrentCultureIgnoreCase)
+        var entries = EnumerateWinRt(result.Matches)
+            .Select(match =>
+            {
+                var package = match.CatalogPackage;
+                var summary = ToSummary(
+                    package,
+                    localIdentity,
+                    PackageStatus.Installed,
+                    preferAvailableSource: true);
+                return (Summary: summary, Aliases: GetInstalledAliases(package.InstalledVersion));
+            })
+            .OrderBy(entry => entry.Summary.Name, StringComparer.CurrentCultureIgnoreCase)
             .ToArray();
+
+        return new WingetInstalledPackageSnapshot
+        {
+            Packages = entries.Select(entry => entry.Summary).ToArray(),
+            ExactAliases = entries
+                .GroupBy(entry => entry.Summary.Key)
+                .ToDictionary(
+                    group => group.Key,
+                    group => (IReadOnlyList<InstalledAppAlias>)group
+                        .SelectMany(entry => entry.Aliases)
+                        .DistinctBy(
+                            alias => $"{(int)alias.Kind}\0{alias.Value}",
+                            StringComparer.OrdinalIgnoreCase)
+                        .ToArray())
+        };
     }
 
     public Task<IReadOnlyList<PackageSummary>> GetAvailableUpdatesAsync(
@@ -890,7 +943,8 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
         }
 
         var manager = GetManager();
-        if (kind == PackageOperationKind.Uninstall)
+        if (kind == PackageOperationKind.Uninstall
+            && WingetPackageIdentity.IsUnattributedInstalledSource(key.SourceId))
         {
             var localReference = manager.GetLocalPackageCatalog(LocalPackageCatalog.InstalledPackages);
             var localSource = GetSourceIdentity(localReference, "Installed", "installed");
@@ -908,11 +962,13 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
             var source = GetSourceIdentity(sourceReference);
 
             PackageCatalogReference reference = sourceReference;
-            if (kind == PackageOperationKind.Upgrade)
+            if (kind is PackageOperationKind.Upgrade or PackageOperationKind.Uninstall)
             {
                 var compositeOptions = new CreateCompositePackageCatalogOptions
                 {
-                    CompositeSearchBehavior = CompositeSearchBehavior.RemotePackagesFromAllCatalogs,
+                    CompositeSearchBehavior = kind == PackageOperationKind.Uninstall
+                        ? CompositeSearchBehavior.LocalCatalogs
+                        : CompositeSearchBehavior.RemotePackagesFromAllCatalogs,
                     InstalledScope = PackageInstallScope.Any
                 };
                 compositeOptions.Catalogs.Add(sourceReference);
@@ -1034,12 +1090,13 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
     private static PackageSummary ToSummary(
         CatalogPackage package,
         SourceIdentity fallbackSource,
-        PackageStatus? forcedStatus = null)
+        PackageStatus? forcedStatus = null,
+        bool preferAvailableSource = false)
     {
         var available = package.DefaultInstallVersion;
         var installed = package.InstalledVersion;
         var metadata = TryGetMetadata(available) ?? TryGetMetadata(installed);
-        var source = string.IsNullOrWhiteSpace(fallbackSource.Id)
+        var source = preferAvailableSource || string.IsNullOrWhiteSpace(fallbackSource.Id)
             ? TryGetVersionSource(available) ?? fallbackSource
             : fallbackSource;
         var installer = TryGetInstaller(available, new InstallOptions());
@@ -1064,6 +1121,40 @@ public sealed class WingetClient : IWingetClient, ISourceManagementService
             Status = status,
             ElevationRequirement = ToCoreElevation(installer?.ElevationRequirement)
         };
+    }
+
+    private static IReadOnlyList<InstalledAppAlias> GetInstalledAliases(
+        PackageVersionInfo? installedVersion)
+    {
+        if (installedVersion is null)
+        {
+            return Array.Empty<InstalledAppAlias>();
+        }
+
+        var aliases = new List<InstalledAppAlias>();
+        AddInstalledAliases(
+            aliases,
+            installedVersion.PackageFamilyNames,
+            InstalledAppAliasKind.PackageFamilyName);
+        AddInstalledAliases(
+            aliases,
+            installedVersion.ProductCodes,
+            InstalledAppAliasKind.ProductCode);
+        return aliases;
+    }
+
+    private static void AddInstalledAliases(
+        ICollection<InstalledAppAlias> aliases,
+        IReadOnlyList<string> values,
+        InstalledAppAliasKind kind)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                aliases.Add(new InstalledAppAlias(kind, value));
+            }
+        }
     }
 
     private static PackageDetails ToDetails(

@@ -24,24 +24,34 @@ public sealed class WingetInstalledAppProvider : IInstalledAppProvider
     public async Task<InstalledAppProviderResult> ReadAsync(
         CancellationToken cancellationToken = default)
     {
-        var packages = await _client.GetInstalledPackagesAsync(cancellationToken);
+        IReadOnlyList<PackageSummary> packages;
         IReadOnlyDictionary<PackageKey, IReadOnlyList<InstalledAppAlias>> exactAliases =
             new Dictionary<PackageKey, IReadOnlyList<InstalledAppAlias>>();
         string? warning = null;
 
-        if (_aliasResolver is not null)
+        if (_client is IWingetInstalledSnapshotReader snapshotReader)
         {
-            try
+            var snapshot = await snapshotReader.GetInstalledSnapshotAsync(cancellationToken);
+            packages = snapshot.Packages;
+            exactAliases = snapshot.ExactAliases;
+        }
+        else
+        {
+            packages = await _client.GetInstalledPackagesAsync(cancellationToken);
+            if (_aliasResolver is not null)
             {
-                exactAliases = await _aliasResolver.ResolveAliasesAsync(packages, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception exception)
-            {
-                warning = $"WinGet identifiers could not be enriched: {exception.Message}";
+                try
+                {
+                    exactAliases = await _aliasResolver.ResolveAliasesAsync(packages, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    warning = $"WinGet identifiers could not be enriched: {exception.Message}";
+                }
             }
         }
 
