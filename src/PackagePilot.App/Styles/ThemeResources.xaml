@@ -106,7 +106,9 @@
     <Style x:Key="PackagePilotIconTileStyle" TargetType="Border">
         <Setter Property="Width" Value="44" />
         <Setter Property="Height" Value="44" />
-        <Setter Property="Background" Value="{ThemeResource AccentFillColorSecondaryBrush}" />
+        <Setter Property="Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource CardStrokeColorDefaultBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
         <Setter Property="CornerRadius" Value="10" />
     </Style>
 

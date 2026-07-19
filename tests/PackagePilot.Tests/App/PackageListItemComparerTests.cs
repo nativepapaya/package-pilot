@@ -106,6 +106,17 @@ public sealed class PackageListItemComparerTests
         Assert.False(PackageListItemComparer.HaveSameRows([current], [replacement]));
     }
 
+    [Fact]
+    public void HaveSameRows_DetectsManageabilityChanges()
+    {
+        var current = CreateItem();
+        var replacement = CreateItem();
+        replacement.IsManageabilityKnown = true;
+        replacement.IsManageableByPackagePilot = true;
+
+        Assert.False(PackageListItemComparer.HaveSameRows([current], [replacement]));
+    }
+
     private static PackageListItem CreateItem() => new()
     {
         Name = "Package",

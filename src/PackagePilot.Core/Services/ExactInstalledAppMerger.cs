@@ -78,8 +78,13 @@ public sealed class ExactInstalledAppMerger : IInstalledAppMerger
             Id = preferred.Id,
             Name = name,
             Publisher = publisher,
+            // Prefer an installed resource over remote catalog artwork. Local package assets
+            // are current for the exact installation, render without network work, and remain
+            // available when the catalog source is offline.
             Icon = installations.Select(installation => installation.Icon)
-                .FirstOrDefault(icon => icon is not null),
+                .Where(icon => icon is not null)
+                .OrderBy(icon => IconRank(icon!.Kind))
+                .FirstOrDefault(),
             Installations = installations,
             Aliases = NormalizeAliases(installations.SelectMany(installation => installation.Aliases)),
             Actions = CreateActions(installations)
@@ -233,6 +238,15 @@ public sealed class ExactInstalledAppMerger : IInstalledAppMerger
         InstalledAppProviderKind.Msix => 1,
         InstalledAppProviderKind.Registry => 2,
         _ => 3
+    };
+
+    private static int IconRank(AppIconSourceKind kind) => kind switch
+    {
+        AppIconSourceKind.MsixPackageAsset => 0,
+        AppIconSourceKind.ValidatedLocalResource => 1,
+        AppIconSourceKind.ValidatedExecutableResource => 2,
+        AppIconSourceKind.BoundedHttpsMetadata => 3,
+        _ => 4
     };
 
     private readonly record struct AliasKey(InstalledAppAliasKind Kind, string Value);

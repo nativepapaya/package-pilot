@@ -32,6 +32,7 @@ public sealed class RegistryInstalledAppProvider : IInstalledAppProvider
                 DisplayName = entry.DisplayName,
                 Publisher = entry.Publisher,
                 Version = entry.Version,
+                Icon = entry.Icon,
                 Scope = entry.Scope,
                 Architecture = entry.Architecture,
                 Aliases =

@@ -31,10 +31,12 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\PackagePilot.App\Views\ViewData.cs" Link="App\ViewData.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\Views\InstalledPackageVisibility.cs" Link="App\InstalledPackageVisibility.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\ActivityStateProjector.cs" Link="App\ActivityStateProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\DiscoverRowProjector.cs" Link="App\DiscoverRowProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\OperationRowProjector.cs" Link="App\OperationRowProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\UpdateRowProjector.cs" Link="App\UpdateRowProjector.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\Views\UpdateNavigationBadgeProjector.cs" Link="App\UpdateNavigationBadgeProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\OperationDiagnosticRefreshLoop.cs" Link="App\OperationDiagnosticRefreshLoop.cs" />
     <Compile Include="..\..\src\PackagePilot.App\ViewModels\DestinationUiStateCoordinator.cs" Link="App\DestinationUiStateCoordinator.cs" />
     <Compile Include="..\..\src\PackagePilot.App\ViewModels\KeyedCollectionReconciler.cs" Link="App\KeyedCollectionReconciler.cs" />

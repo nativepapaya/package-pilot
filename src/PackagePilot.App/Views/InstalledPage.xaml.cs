@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using System.Diagnostics;
@@ -9,6 +10,7 @@ namespace PackagePilot.App.Views;
 public sealed partial class InstalledPage : Page
 {
     private PackageListItem? _selectedPackage;
+    private string _providerFilter = "all";
     private bool _isViewReady;
 
     public InstalledPage()
@@ -19,11 +21,9 @@ public sealed partial class InstalledPage : Page
         // SelectionChanged while InitializeComponent is still connecting fields that
         // appear later in XAML, so all filter/sort events are wired only after it returns.
         SortBox.SelectedIndex = 0;
-        ProviderFilterBox.SelectedIndex = 0;
         TypeFilterBox.SelectedIndex = 0;
         InstalledSearchBox.TextChanged += OnFilterTextChanged;
         SortBox.SelectionChanged += OnSortChanged;
-        ProviderFilterBox.SelectionChanged += OnSortChanged;
         TypeFilterBox.SelectionChanged += OnSortChanged;
         _isViewReady = true;
         SizeChanged += OnSizeChanged;
@@ -61,7 +61,32 @@ public sealed partial class InstalledPage : Page
 
     private void OnFilterTextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args) => UpdateDisplayedPackages();
     private void OnSortChanged(object sender, SelectionChangedEventArgs e) => UpdateDisplayedPackages();
+    private void OnShowWindowsManagedClick(object sender, RoutedEventArgs e) => UpdateDisplayedPackages();
     private void OnRefreshClick(object sender, RoutedEventArgs e) => RefreshRequested?.Invoke(this, EventArgs.Empty);
+
+    private void OnProviderFilterClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleMenuFlyoutItem selected
+            || selected.Tag is not string provider)
+        {
+            return;
+        }
+
+        _providerFilter = provider;
+        foreach (var item in new[]
+                 {
+                     AllProvidersFilterItem,
+                     WingetProviderFilterItem,
+                     WindowsProviderFilterItem,
+                     RegistryProviderFilterItem
+                 })
+        {
+            item.IsChecked = ReferenceEquals(item, selected);
+        }
+
+        ProviderFilterText.Text = selected.Text;
+        UpdateDisplayedPackages();
+    }
 
     private void OnFocusSearchInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
@@ -84,8 +109,7 @@ public sealed partial class InstalledPage : Page
             package.Publisher.Contains(query, StringComparison.OrdinalIgnoreCase) ||
             package.PackageId.Contains(query, StringComparison.OrdinalIgnoreCase));
 
-        var provider = (ProviderFilterBox.SelectedItem as ComboBoxItem)?.Tag as string;
-        packages = provider switch
+        packages = _providerFilter switch
         {
             "winget" => packages.Where(package =>
                 package.Source.Contains("WinGet", StringComparison.OrdinalIgnoreCase)),
@@ -110,6 +134,13 @@ public sealed partial class InstalledPage : Page
             _ => packages
         };
 
+        var packagesBeforeManagementFilter = packages.ToArray();
+        var matchingWindowsManagedCount = InstalledPackageVisibility.CountWindowsManaged(
+            packagesBeforeManagementFilter);
+        var showWindowsManaged = ShowWindowsManagedToggle.IsChecked == true;
+        packages = packagesBeforeManagementFilter.Where(package =>
+            InstalledPackageVisibility.ShouldShow(package, showWindowsManaged));
+
         var sort = (SortBox.SelectedItem as ComboBoxItem)?.Tag as string;
         packages = sort switch
         {
@@ -127,12 +158,33 @@ public sealed partial class InstalledPage : Page
         var hasPackages = DisplayedPackages.Count > 0;
         InstalledList.Visibility = hasPackages ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Visibility = hasPackages ? Visibility.Collapsed : Visibility.Visible;
-        PackageCountText.Text = DisplayedPackages.Count switch
+        var totalWindowsManagedCount = InstalledPackageVisibility.CountWindowsManaged(Packages);
+        ShowWindowsManagedToggle.IsEnabled = totalWindowsManagedCount > 0;
+        ShowWindowsManagedToggle.Text = totalWindowsManagedCount > 0
+            ? $"Include Windows-managed apps ({totalWindowsManagedCount})"
+            : "Include Windows-managed apps";
+        AutomationProperties.SetName(
+            ShowWindowsManagedToggle,
+            showWindowsManaged
+                ? "Windows-managed apps are included"
+                : "Include Windows-managed apps");
+
+        if (!hasPackages && !showWindowsManaged && matchingWindowsManagedCount > 0)
         {
-            0 => "No packages shown",
-            1 => "1 installed package",
-            _ => $"{DisplayedPackages.Count} installed packages"
-        };
+            EmptyStateTitle.Text = "Windows-managed apps are hidden";
+            EmptyStateDescription.Text = matchingWindowsManagedCount == 1
+                ? "One matching app can only be managed through Windows or Microsoft Store. Show Windows-managed apps to review it."
+                : $"{matchingWindowsManagedCount} matching apps can only be managed through Windows or Microsoft Store. Show Windows-managed apps to review them.";
+        }
+        else
+        {
+            EmptyStateTitle.Text = "No matching apps";
+            EmptyStateDescription.Text = "Refresh to scan installed software, or clear the filter to see all detected packages.";
+        }
+
+        PackageCountText.Text = (!showWindowsManaged && matchingWindowsManagedCount > 0)
+            ? $"{FormatInstalledCount(DisplayedPackages.Count, manageableOnly: true)} · {matchingWindowsManagedCount} Windows-managed hidden"
+            : FormatInstalledCount(DisplayedPackages.Count, manageableOnly: !showWindowsManaged);
         PackagePilotUiEventSource.Log.FilterCompleted(
             "Installed",
             DisplayedPackages.Count,
@@ -178,6 +230,10 @@ public sealed partial class InstalledPage : Page
         }
 
         InstalledSearchBox.Text = string.Empty;
+        if (package.IsManageabilityKnown && !package.IsManageableByPackagePilot)
+        {
+            ShowWindowsManagedToggle.IsChecked = true;
+        }
         UpdateDisplayedPackages();
         InstalledList.SelectedItem = package;
         InstalledList.ScrollIntoView(package, ScrollIntoViewAlignment.Leading);
@@ -225,4 +281,11 @@ public sealed partial class InstalledPage : Page
         DetailsColumn.Width = showInline ? new GridLength(380) : new GridLength(0);
         DetailsPane.Visibility = showInline ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    private static string FormatInstalledCount(int count, bool manageableOnly) => count switch
+    {
+        0 => manageableOnly ? "No manageable apps shown" : "No installed apps shown",
+        1 => manageableOnly ? "1 manageable app" : "1 installed app",
+        _ => manageableOnly ? $"{count} manageable apps" : $"{count} installed apps"
+    };
 }

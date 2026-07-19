@@ -8,8 +8,9 @@ using PackagePilot.Core.Models;
 namespace PackagePilot.Windows.Services;
 
 /// <summary>
-/// Reads only display metadata from the standard Add/Remove Programs locations. Uninstall command
-/// values are intentionally neither read nor exposed.
+/// Reads only display metadata from the standard Add/Remove Programs locations. DisplayIcon is
+/// validated as a local resource reference; uninstall command values are intentionally neither
+/// read nor exposed.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class WindowsRegistryUninstallReader : IRegistryUninstallReader
@@ -93,6 +94,11 @@ public sealed class WindowsRegistryUninstallReader : IRegistryUninstallReader
                 DisplayName = displayName,
                 Publisher = ReadString(appKey, "Publisher"),
                 Version = ReadString(appKey, "DisplayVersion"),
+                Icon = WindowsDisplayIconReferenceParser.TryCreate(
+                    ReadString(appKey, "DisplayIcon"),
+                    out var icon)
+                        ? icon
+                        : null,
                 Scope = location.Scope,
                 Architecture = location.View == RegistryView.Registry32
                     ? PackageArchitecture.X86

@@ -32,6 +32,11 @@ public sealed partial class PackageRow : UserControl
         typeof(bool),
         typeof(PackageRow),
         new PropertyMetadata(false, OnStateVisualPropertyChanged));
+    public static readonly DependencyProperty ShowStateProperty = DependencyProperty.Register(
+        nameof(ShowState),
+        typeof(bool),
+        typeof(PackageRow),
+        new PropertyMetadata(true, OnStateVisualPropertyChanged));
     public static readonly DependencyProperty ActionLabelProperty = DependencyProperty.Register(
         nameof(ActionLabel),
         typeof(string),
@@ -61,6 +66,7 @@ public sealed partial class PackageRow : UserControl
     public string Status { get => (string)GetValue(StatusProperty); set => SetValue(StatusProperty, value); }
     public string StateGlyph { get => (string)GetValue(StateGlyphProperty); set => SetValue(StateGlyphProperty, value); }
     public bool IsPositiveState { get => (bool)GetValue(IsPositiveStateProperty); set => SetValue(IsPositiveStateProperty, value); }
+    public bool ShowState { get => (bool)GetValue(ShowStateProperty); set => SetValue(ShowStateProperty, value); }
     public string ActionLabel { get => (string)GetValue(ActionLabelProperty); set => SetValue(ActionLabelProperty, value); }
     public string IconGlyph { get => (string)GetValue(IconGlyphProperty); set => SetValue(IconGlyphProperty, value); }
     public Uri? IconUri { get => (Uri?)GetValue(IconUriProperty); set => SetValue(IconUriProperty, value); }
@@ -111,9 +117,11 @@ public sealed partial class PackageRow : UserControl
             return;
         }
 
-        var hasState = !string.IsNullOrWhiteSpace(StateGlyph);
+        var hasState = ShowState && !string.IsNullOrWhiteSpace(StateGlyph);
         StateBadge.Visibility = hasState ? Visibility.Visible : Visibility.Collapsed;
-        PlainStatusText.Visibility = hasState ? Visibility.Collapsed : Visibility.Visible;
+        PlainStatusText.Visibility = ShowState && !hasState
+            ? Visibility.Visible
+            : Visibility.Collapsed;
         _ = VisualStateManager.GoToState(
             this,
             IsPositiveState ? "PositiveState" : "NeutralState",

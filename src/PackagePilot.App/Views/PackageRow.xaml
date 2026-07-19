@@ -23,6 +23,7 @@
             <Border Style="{StaticResource PackagePilotIconTileStyle}">
                 <views:PackageIcon
                     FallbackGlyph="{x:Bind IconGlyph, Mode=OneWay}"
+                    FallbackText="{x:Bind PackageName, Mode=OneWay}"
                     IconReference="{x:Bind IconReference, Mode=OneWay}"
                     IconUri="{x:Bind IconUri, Mode=OneWay}" />
             </Border>

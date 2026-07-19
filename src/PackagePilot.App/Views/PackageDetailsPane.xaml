@@ -39,6 +39,8 @@
                 <Border Width="52" Height="52" Style="{StaticResource PackagePilotIconTileStyle}">
                     <views:PackageIcon
                         FallbackGlyph="{x:Bind IconGlyph, Mode=OneWay}"
+                        FallbackText="{x:Bind PackageName, Mode=OneWay}"
+                        IconReference="{x:Bind IconReference, Mode=OneWay}"
                         IconUri="{x:Bind IconUri, Mode=OneWay}" />
                 </Border>
                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
