@@ -350,7 +350,10 @@ public sealed class LifecycleSafetyAcceptanceTests
             "RefreshBackgroundMonitoringStatusAsync(showAlerts: false)");
         Assert.Contains("\"backgroundMonitoringState\"", cadence, StringComparison.Ordinal);
         Assert.Contains("ViewModel.SetBackgroundMonitoringState(backgroundState);", settingChanged, StringComparison.Ordinal);
-        Assert.Contains("SyncViewData();", settingChanged, StringComparison.Ordinal);
+        Assert.Contains(
+            "_uiCoordinator.Invalidate(DestinationChangeFlags.All);",
+            settingChanged,
+            StringComparison.Ordinal);
     }
 
     [Fact]

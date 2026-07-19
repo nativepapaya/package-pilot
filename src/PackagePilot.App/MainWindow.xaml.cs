@@ -1,5 +1,6 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using PackagePilot.App.Services;
@@ -16,6 +17,8 @@ public sealed partial class MainWindow : Window
     private WindowsTaskbarProgressService? _taskbarProgress;
     private bool _isVisible;
     private bool _isActive;
+    private readonly long _createdAt = Stopwatch.GetTimestamp();
+    private int _firstFrameRecorded;
 
     public MainWindow(
         ShellViewModel viewModel,
@@ -39,6 +42,7 @@ public sealed partial class MainWindow : Window
             lifetimeActivityGate,
             operationDiagnosticsService);
         RootFrame.Content = MainPage;
+        RootFrame.Loaded += OnRootFrameLoaded;
 
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
         _viewModel.PendingOperations.CollectionChanged += OnPendingOperationsChanged;
@@ -53,6 +57,18 @@ public sealed partial class MainWindow : Window
     internal bool IsVisibleAndActive => _isVisible && _isActive;
     internal event EventHandler<CancelEventArgs>? ClosingRequested;
     internal event EventHandler? ActivityChanged;
+
+    private void OnRootFrameLoaded(object sender, RoutedEventArgs e)
+    {
+        if (Interlocked.Exchange(ref _firstFrameRecorded, 1) != 0)
+        {
+            return;
+        }
+
+        RootFrame.Loaded -= OnRootFrameLoaded;
+        PackagePilotUiEventSource.Log.FirstFrame(
+            Stopwatch.GetElapsedTime(_createdAt).TotalMilliseconds);
+    }
 
     internal bool ShowAndActivate()
     {

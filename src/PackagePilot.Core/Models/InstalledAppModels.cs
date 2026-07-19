@@ -19,6 +19,7 @@ public sealed record InstalledApp
     public string Id { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public string Publisher { get; init; } = string.Empty;
+    public AppIconReference? Icon { get; init; }
     public IReadOnlyList<Installation> Installations { get; init; } = Array.Empty<Installation>();
     public IReadOnlyList<InstalledAppAlias> Aliases { get; init; } = Array.Empty<InstalledAppAlias>();
     public IReadOnlyList<InstalledAppActionDescriptor> Actions { get; init; } =
@@ -50,6 +51,7 @@ public sealed record Installation
     public string Version { get; init; } = string.Empty;
     public InstallerScope Scope { get; init; } = InstallerScope.Unknown;
     public PackageArchitecture Architecture { get; init; } = PackageArchitecture.Unknown;
+    public AppIconReference? Icon { get; init; }
     public IReadOnlyList<InstalledAppAlias> Aliases { get; init; } = Array.Empty<InstalledAppAlias>();
 
     public PackageKey? WingetPackage { get; init; }
@@ -71,6 +73,21 @@ public sealed record Installation
         && !IsOptionalPackage
         && !IsCurrentApp
         && !string.IsNullOrWhiteSpace(PackageFullName);
+}
+
+public sealed record AppIconReference
+{
+    public AppIconSourceKind Kind { get; init; }
+    public Uri? Uri { get; init; }
+    public string? ResourcePath { get; init; }
+    public int? ResourceIndex { get; init; }
+}
+
+public enum AppIconSourceKind
+{
+    BoundedHttpsMetadata,
+    MsixPackageAsset,
+    ValidatedLocalResource
 }
 
 public sealed record InstalledAppAlias(InstalledAppAliasKind Kind, string Value);

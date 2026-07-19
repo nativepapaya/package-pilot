@@ -26,6 +26,8 @@ public sealed class PackageIconCache
     private readonly HttpClient _httpClient;
     private readonly SemaphoreSlim _downloadGate = new(4, 4);
     private readonly ConcurrentDictionary<string, Lazy<Task<StorageFile?>>> _inflight = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, StorageFile> _positiveCache = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _negativeCache = new(StringComparer.Ordinal);
 
     public PackageIconCache()
         : this(CreateHttpClient())
@@ -54,6 +56,16 @@ public sealed class PackageIconCache
 
         var normalizedUri = NormalizeUri(sourceUri!);
         var cacheKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalizedUri)));
+        if (_positiveCache.TryGetValue(cacheKey, out var knownFile))
+        {
+            return knownFile;
+        }
+
+        if (_negativeCache.ContainsKey(cacheKey))
+        {
+            return null;
+        }
+
         var lazy = _inflight.GetOrAdd(
             cacheKey,
             _ => new Lazy<Task<StorageFile?>>(
@@ -67,7 +79,17 @@ public sealed class PackageIconCache
     {
         try
         {
-            return await GetOrCreateCoreAsync(cacheKey, sourceUri).ConfigureAwait(false);
+            var file = await GetOrCreateCoreAsync(cacheKey, sourceUri).ConfigureAwait(false);
+            if (file is null)
+            {
+                _negativeCache.TryAdd(cacheKey, 0);
+            }
+            else
+            {
+                _positiveCache[cacheKey] = file;
+            }
+
+            return file;
         }
         finally
         {

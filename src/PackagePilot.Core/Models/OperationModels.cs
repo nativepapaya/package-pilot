@@ -85,6 +85,7 @@ public sealed record OperationProgress
 public sealed record OperationResult
 {
     public Guid OperationId { get; init; }
+    public string DisplayName { get; init; } = string.Empty;
     public PackageKey Package { get; init; } = PackageKey.Empty;
     public OperationTarget? Target { get; init; }
     public PackageOperationKind Kind { get; init; }

@@ -323,33 +323,30 @@ public sealed class WindowsPackagingAcceptanceTests
             appDirectory,
             "Views",
             "ActivityPage.xaml.cs"));
+        string operationDetails = File.ReadAllText(Path.Combine(
+            appDirectory,
+            "ViewModels",
+            "OperationDetailsViewModel.cs"));
         string mainPage = File.ReadAllText(Path.Combine(appDirectory, "MainPage.xaml.cs"));
 
         Assert.Contains(
-            "x:Load=\"{x:Bind CanViewDiagnostic}\"",
+            "x:Load=\"{x:Bind CanViewDiagnostic, Mode=OneWay}\"",
             activityXaml,
             StringComparison.Ordinal);
         Assert.Contains(
-            "AutomationProperties.Name=\"{x:Bind DiagnosticAutomationName}\"",
+            "AutomationProperties.Name=\"{x:Bind DiagnosticAutomationName, Mode=OneWay}\"",
             activityXaml,
             StringComparison.Ordinal);
         Assert.Contains(
-            "ToolTipService.ToolTip=\"{x:Bind DiagnosticToolTip}\"",
+            "ToolTipService.ToolTip=\"{x:Bind DiagnosticToolTip, Mode=OneWay}\"",
             activityXaml,
             StringComparison.Ordinal);
         Assert.Contains("OnViewDiagnosticClick", activityCode, StringComparison.Ordinal);
-
-        int clickHandler = mainPage.IndexOf(
-            "private async void OnViewDiagnosticRequested",
-            StringComparison.Ordinal);
-        int diagnosticRead = mainPage.IndexOf(
-            "_operationDiagnosticsService.ReadAsync(",
-            clickHandler,
-            StringComparison.Ordinal);
-        Assert.True(clickHandler >= 0, "MainPage must handle an explicit Activity diagnostic request.");
-        Assert.True(
-            diagnosticRead > clickHandler,
-            "Provider diagnostics must only be read from the explicit Activity click handler.");
+        Assert.Contains("_detailsViewModel.SelectAsync(operation.OperationId)", activityCode, StringComparison.Ordinal);
+        Assert.Contains("_service.ReadAsync(selection.Completed", operationDetails, StringComparison.Ordinal);
+        Assert.Contains("_service.ReadLiveAsync(selection.Live!", operationDetails, StringComparison.Ordinal);
+        Assert.Contains("Close();", operationDetails, StringComparison.Ordinal);
+        Assert.DoesNotContain("_operationDiagnosticsService.ReadAsync(", mainPage, StringComparison.Ordinal);
         Assert.Contains(
             "if (!ViewModel.ClearHistory()",
             mainPage,

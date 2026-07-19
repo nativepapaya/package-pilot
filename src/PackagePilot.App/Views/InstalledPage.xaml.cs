@@ -1,6 +1,8 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using System.Diagnostics;
+using PackagePilot.App.Services;
 
 namespace PackagePilot.App.Views;
 
@@ -17,8 +19,12 @@ public sealed partial class InstalledPage : Page
         // SelectionChanged while InitializeComponent is still connecting fields that
         // appear later in XAML, so all filter/sort events are wired only after it returns.
         SortBox.SelectedIndex = 0;
+        ProviderFilterBox.SelectedIndex = 0;
+        TypeFilterBox.SelectedIndex = 0;
         InstalledSearchBox.TextChanged += OnFilterTextChanged;
         SortBox.SelectionChanged += OnSortChanged;
+        ProviderFilterBox.SelectionChanged += OnSortChanged;
+        TypeFilterBox.SelectionChanged += OnSortChanged;
         _isViewReady = true;
         SizeChanged += OnSizeChanged;
         UpdateDisplayedPackages();
@@ -65,6 +71,7 @@ public sealed partial class InstalledPage : Page
 
     private void UpdateDisplayedPackages()
     {
+        var startedAt = Stopwatch.GetTimestamp();
         if (!_isViewReady)
         {
             return;
@@ -76,6 +83,32 @@ public sealed partial class InstalledPage : Page
             package.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
             package.Publisher.Contains(query, StringComparison.OrdinalIgnoreCase) ||
             package.PackageId.Contains(query, StringComparison.OrdinalIgnoreCase));
+
+        var provider = (ProviderFilterBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        packages = provider switch
+        {
+            "winget" => packages.Where(package =>
+                package.Source.Contains("WinGet", StringComparison.OrdinalIgnoreCase)),
+            "windows" => packages.Where(package =>
+                package.Source.Contains("Microsoft Store", StringComparison.OrdinalIgnoreCase)
+                || package.Source.Contains("MSIX", StringComparison.OrdinalIgnoreCase)),
+            "registry" => packages.Where(package =>
+                package.Source.Contains("registry", StringComparison.OrdinalIgnoreCase)),
+            _ => packages
+        };
+
+        var type = (TypeFilterBox.SelectedItem as ComboBoxItem)?.Tag as string;
+        packages = type switch
+        {
+            "store" => packages.Where(package =>
+                package.Source.Contains("Microsoft Store", StringComparison.OrdinalIgnoreCase)),
+            "msix" => packages.Where(package =>
+                package.Source.Split(',', StringSplitOptions.TrimEntries)
+                    .Contains("MSIX", StringComparer.OrdinalIgnoreCase)),
+            "legacy" => packages.Where(package =>
+                package.Source.Contains("registry", StringComparison.OrdinalIgnoreCase)),
+            _ => packages
+        };
 
         var sort = (SortBox.SelectedItem as ComboBoxItem)?.Tag as string;
         packages = sort switch
@@ -100,6 +133,10 @@ public sealed partial class InstalledPage : Page
             1 => "1 installed package",
             _ => $"{DisplayedPackages.Count} installed packages"
         };
+        PackagePilotUiEventSource.Log.FilterCompleted(
+            "Installed",
+            DisplayedPackages.Count,
+            Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
     }
 
     private void OnPackageSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -125,6 +162,26 @@ public sealed partial class InstalledPage : Page
             Frame.Navigate(typeof(PackageDetailsPage), package);
             InstalledList.SelectedItem = null;
         }
+    }
+
+    public void SelectPackageById(string installedAppId)
+    {
+        var package = Packages.FirstOrDefault(candidate =>
+            string.Equals(candidate.InstalledAppId, installedAppId, StringComparison.Ordinal));
+        if (package is null)
+        {
+            ShowStatus(
+                "Installed app unavailable",
+                "Refresh Installed and try again.",
+                InfoBarSeverity.Warning);
+            return;
+        }
+
+        InstalledSearchBox.Text = string.Empty;
+        UpdateDisplayedPackages();
+        InstalledList.SelectedItem = package;
+        InstalledList.ScrollIntoView(package, ScrollIntoViewAlignment.Leading);
+        ShowPackageDetails(package);
     }
 
     private async void OnPackageActionInvoked(object? sender, EventArgs e)

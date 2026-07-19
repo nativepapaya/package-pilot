@@ -36,6 +36,12 @@
     <Compile Include="..\..\src\PackagePilot.App\Views\OperationRowProjector.cs" Link="App\OperationRowProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\UpdateRowProjector.cs" Link="App\UpdateRowProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\OperationDiagnosticRefreshLoop.cs" Link="App\OperationDiagnosticRefreshLoop.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\ViewModels\DestinationUiStateCoordinator.cs" Link="App\DestinationUiStateCoordinator.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\ViewModels\KeyedCollectionReconciler.cs" Link="App\KeyedCollectionReconciler.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\ViewModels\ShellActivityViewModel.cs" Link="App\ShellActivityViewModel.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\ViewModels\OperationDetailsViewModel.cs" Link="App\OperationDetailsViewModel.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\ViewModels\DestinationPageViewModels.cs" Link="App\DestinationPageViewModels.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\Services\AppIconReferencePolicy.cs" Link="App\AppIconReferencePolicy.cs" />
   </ItemGroup>
 
 </Project>

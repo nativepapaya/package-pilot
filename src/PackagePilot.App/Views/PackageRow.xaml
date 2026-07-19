@@ -6,9 +6,9 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:views="using:PackagePilot.App.Views"
-    d:DesignHeight="64"
+    d:DesignHeight="72"
     d:DesignWidth="860"
-    MinHeight="64"
+    MinHeight="68"
     mc:Ignorable="d">
 
     <Border Style="{StaticResource PackagePilotRowCardStyle}">
@@ -23,34 +23,61 @@
             <Border Style="{StaticResource PackagePilotIconTileStyle}">
                 <views:PackageIcon
                     FallbackGlyph="{x:Bind IconGlyph, Mode=OneWay}"
+                    IconReference="{x:Bind IconReference, Mode=OneWay}"
                     IconUri="{x:Bind IconUri, Mode=OneWay}" />
             </Border>
 
-            <StackPanel
+            <Grid
                 Grid.Column="1"
                 VerticalAlignment="Center"
-                Spacing="2">
-                <TextBlock
-                    FontFamily="{StaticResource PackagePilotContentFont}"
-                    FontSize="14"
-                    FontWeight="SemiBold"
-                    Foreground="{ThemeResource PackagePilotTextPrimaryBrush}"
-                    Text="{x:Bind PackageName, Mode=OneWay}"
-                    TextTrimming="CharacterEllipsis" />
-                <StackPanel Orientation="Horizontal" Spacing="6">
-                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Publisher, Mode=OneWay}" />
-                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="•" />
-                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind PackageId, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+                RowSpacing="4">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <StackPanel Orientation="Horizontal" Spacing="8">
                     <TextBlock
-                        x:Name="SourceSeparator"
-                        Style="{StaticResource PackagePilotCaptionStyle}"
-                        Text="•" />
-                    <TextBlock
-                        x:Name="SourceText"
-                        Style="{StaticResource PackagePilotCaptionStyle}"
-                        Text="{x:Bind Source, Mode=OneWay}" />
+                        FontFamily="{StaticResource PackagePilotContentFont}"
+                        FontSize="14"
+                        FontWeight="SemiBold"
+                        Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                        Text="{x:Bind PackageName, Mode=OneWay}"
+                        TextTrimming="CharacterEllipsis"
+                        ToolTipService.ToolTip="{x:Bind PackageId, Mode=OneWay}" />
+                    <Border
+                        x:Name="StateBadge"
+                        Padding="7,2"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        CornerRadius="10"
+                        Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal" Spacing="4">
+                            <FontIcon
+                                x:Name="StateBadgeIcon"
+                                FontFamily="Segoe Fluent Icons"
+                                FontSize="10"
+                                Glyph="{x:Bind StateGlyph, Mode=OneWay}" />
+                            <TextBlock
+                                x:Name="StateBadgeText"
+                                FontSize="11"
+                                Text="{x:Bind Status, Mode=OneWay}" />
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
-            </StackPanel>
+                <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="7">
+                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Publisher, Mode=OneWay}" />
+                    <Border
+                        x:Name="SourceBadge"
+                        Padding="6,1"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        CornerRadius="8">
+                        <TextBlock
+                            x:Name="SourceText"
+                            Style="{StaticResource PackagePilotCaptionStyle}"
+                            Text="{x:Bind Source, Mode=OneWay}"
+                            TextTrimming="CharacterEllipsis" />
+                    </Border>
+                </StackPanel>
+            </Grid>
 
             <StackPanel
                 x:Name="MetadataPanel"
@@ -61,35 +88,14 @@
                 <TextBlock
                     HorizontalAlignment="Right"
                     FontSize="12"
-                    Foreground="{ThemeResource PackagePilotTextPrimaryBrush}"
+                    Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                     Text="{x:Bind Version, Mode=OneWay}" />
                 <TextBlock
                     x:Name="PlainStatusText"
                     HorizontalAlignment="Right"
                     FontSize="12"
-                    Foreground="{ThemeResource PackagePilotTextSecondaryBrush}"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Text="{x:Bind Status, Mode=OneWay}" />
-                <Border
-                    x:Name="StateBadge"
-                    HorizontalAlignment="Right"
-                    Padding="7,2"
-                    Background="{ThemeResource PackagePilotSurfaceTertiaryBrush}"
-                    BorderBrush="{ThemeResource PackagePilotStrokeBrush}"
-                    BorderThickness="1"
-                    CornerRadius="10"
-                    Visibility="Collapsed">
-                    <StackPanel Orientation="Horizontal" Spacing="4">
-                        <FontIcon
-                            x:Name="StateBadgeIcon"
-                            FontFamily="Segoe Fluent Icons"
-                            FontSize="10"
-                            Glyph="{x:Bind StateGlyph, Mode=OneWay}" />
-                        <TextBlock
-                            x:Name="StateBadgeText"
-                            FontSize="11"
-                            Text="{x:Bind Status, Mode=OneWay}" />
-                    </StackPanel>
-                </Border>
             </StackPanel>
 
             <Button
@@ -110,8 +116,7 @@
                         </VisualState.StateTriggers>
                         <VisualState.Setters>
                             <Setter Target="MetadataPanel.Visibility" Value="Collapsed" />
-                            <Setter Target="SourceSeparator.Visibility" Value="Collapsed" />
-                            <Setter Target="SourceText.Visibility" Value="Collapsed" />
+                            <Setter Target="SourceBadge.Visibility" Value="Collapsed" />
                         </VisualState.Setters>
                     </VisualState>
                     <VisualState x:Name="Comfortable">
@@ -120,8 +125,7 @@
                         </VisualState.StateTriggers>
                         <VisualState.Setters>
                             <Setter Target="MetadataPanel.Visibility" Value="Visible" />
-                            <Setter Target="SourceSeparator.Visibility" Value="Visible" />
-                            <Setter Target="SourceText.Visibility" Value="Visible" />
+                            <Setter Target="SourceBadge.Visibility" Value="Visible" />
                         </VisualState.Setters>
                     </VisualState>
                 </VisualStateGroup>

@@ -19,8 +19,7 @@
                         <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE774;" />
                     </Border>
                     <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
-                        <TextBlock FontWeight="SemiBold" Text="{x:Bind Name}" />
-                        <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Identifier}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock FontWeight="SemiBold" Text="{x:Bind Name}" ToolTipService.ToolTip="{x:Bind Identifier}" />
                         <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Detail}" TextWrapping="Wrap" />
                     </StackPanel>
                     <Border Grid.Column="2" VerticalAlignment="Center" Style="{StaticResource PackagePilotPillStyle}">
@@ -68,7 +67,7 @@
                                     <ComboBoxItem Content="Dark" Tag="dark" />
                                 </ComboBox>
                             </Grid>
-                            <Rectangle Height="1" Fill="{ThemeResource PackagePilotStrokeBrush}" />
+                            <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
                             <ToggleSwitch
                                 x:Name="ReduceMotionToggle"
                                 AutomationProperties.Name="Reduce motion"
@@ -91,7 +90,7 @@
                                 OffContent="Close exits Package Pilot"
                                 OnContent="Close hides; Minimize stays on the taskbar"
                                 Toggled="OnNotificationAreaToggled" />
-                            <Rectangle Height="1" Fill="{ThemeResource PackagePilotStrokeBrush}" />
+                            <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
                             <ToggleSwitch
                                 x:Name="StartWithWindowsToggle"
                                 AutomationProperties.Name="Start Package Pilot with Windows"
@@ -147,7 +146,7 @@
                                     <ComboBoxItem Content="All users" Tag="machine" />
                                 </ComboBox>
                             </Grid>
-                            <Rectangle Height="1" Fill="{ThemeResource PackagePilotStrokeBrush}" />
+                            <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
                             <Grid ColumnSpacing="20">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
@@ -189,10 +188,7 @@
                         ItemsSource="{x:Bind Sources}"
                         SelectionMode="None">
                         <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem">
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                <Setter Property="Padding" Value="0" />
-                            </Style>
+                            <Style BasedOn="{StaticResource PackagePilotListItemStyle}" TargetType="ListViewItem" />
                         </ListView.ItemContainerStyle>
                     </ListView>
                 </StackPanel>

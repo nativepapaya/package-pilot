@@ -9,6 +9,11 @@ namespace PackagePilot.App.Views;
 public sealed class PackageListItem : INotifyPropertyChanged
 {
     private string _status = string.Empty;
+    private string _name = string.Empty;
+    private string _publisher = string.Empty;
+    private string _iconGlyph = "\uE896";
+    private Uri? _iconUri;
+    private AppIconReference? _iconReference;
     private string _actionLabel = "Install";
     private string _installedVersion = string.Empty;
     private string _availableVersion = string.Empty;
@@ -20,8 +25,8 @@ public sealed class PackageListItem : INotifyPropertyChanged
     private bool _isPositiveState;
     private bool _requiresAdministratorRetry;
 
-    public string Name { get; set; } = string.Empty;
-    public string Publisher { get; set; } = string.Empty;
+    public string Name { get => _name; set => SetProperty(ref _name, value); }
+    public string Publisher { get => _publisher; set => SetProperty(ref _publisher, value); }
     public string PackageId { get; set; } = string.Empty;
     public string Source { get; set; } = string.Empty;
     public string InstalledVersion
@@ -57,8 +62,13 @@ public sealed class PackageListItem : INotifyPropertyChanged
         get => _actionLabel;
         set => SetProperty(ref _actionLabel, value);
     }
-    public string IconGlyph { get; set; } = "\uE896";
-    public Uri? IconUri { get; set; }
+    public string IconGlyph { get => _iconGlyph; set => SetProperty(ref _iconGlyph, value); }
+    public Uri? IconUri { get => _iconUri; set => SetProperty(ref _iconUri, value); }
+    public AppIconReference? IconReference
+    {
+        get => _iconReference;
+        set => SetProperty(ref _iconReference, value);
+    }
     public string Description { get; set; } = "Package details are not available from this source.";
     public string License { get; set; } = "Not provided";
     public string Tags { get; set; } = "Not provided";
@@ -153,6 +163,27 @@ public sealed class PackageListItem : INotifyPropertyChanged
         RequestedOperationKind = source.RequestedOperationKind;
     }
 
+    internal void ApplyPresentation(PackageListItem source)
+    {
+        Name = source.Name;
+        Publisher = source.Publisher;
+        IconGlyph = source.IconGlyph;
+        IconUri = source.IconUri;
+        IconReference = source.IconReference;
+        ApplyDiscoverState(source);
+        InstalledAppId = source.InstalledAppId;
+        InstalledActionKind = source.InstalledActionKind;
+        WingetPackage = source.WingetPackage;
+        PackageFullName = source.PackageFullName;
+        ActionDestination = source.ActionDestination;
+        RequiresElevation = source.RequiresElevation;
+    }
+
+    internal PackageListItemKey StableKey => new(
+        PackageId,
+        Source,
+        InstalledAppId ?? string.Empty);
+
     private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
     {
         if (EqualityComparer<T>.Default.Equals(field, value))
@@ -165,6 +196,11 @@ public sealed class PackageListItem : INotifyPropertyChanged
         return true;
     }
 }
+
+internal readonly record struct PackageListItemKey(
+    string PackageId,
+    string Source,
+    string InstalledAppId);
 
 internal static class PackageListItemComparer
 {
@@ -216,6 +252,7 @@ internal static class PackageListItemComparer
                 || !string.Equals(left.InstalledAppId, right.InstalledAppId, StringComparison.Ordinal)
                 || !string.Equals(left.PackageFullName, right.PackageFullName, StringComparison.Ordinal)
                 || left.ActionDestination != right.ActionDestination
+                || left.IconReference != right.IconReference
                 || left.IconUri != right.IconUri)
             {
                 return false;
@@ -226,29 +263,64 @@ internal static class PackageListItemComparer
     }
 }
 
-public sealed class OperationListItem
+public sealed class OperationListItem : INotifyPropertyChanged
 {
+    private string _status = string.Empty;
+    private string _detail = string.Empty;
+    private string _timestamp = string.Empty;
+    private double _progress;
+    private bool _isActive;
+    private bool _isHistory;
+    private bool _isIndeterminate;
+    private bool _showProgress;
+    private bool _canCancel;
+    private bool _showCancel;
+    private bool _canViewDiagnostic;
+    private bool _isLiveDiagnostic;
+    private bool _isVerificationPending;
+    private MutationVerificationPhase? _verificationPhase;
+    private string _diagnosticProviderLabel = string.Empty;
+    private string _diagnosticAutomationName = string.Empty;
+    private string _diagnosticToolTip = string.Empty;
+
     public Guid OperationId { get; set; }
     public string PackageName { get; set; } = string.Empty;
     public string PackageId { get; set; } = string.Empty;
     public string Action { get; set; } = string.Empty;
-    public string Status { get; set; } = string.Empty;
-    public string Detail { get; set; } = string.Empty;
-    public string Timestamp { get; set; } = string.Empty;
-    public double Progress { get; set; }
-    public bool IsActive { get; set; }
-    public bool IsHistory { get; set; }
-    public bool IsIndeterminate { get; set; }
-    public bool ShowProgress { get; set; }
-    public bool CanCancel { get; set; }
-    public bool ShowCancel { get; set; }
-    public bool CanViewDiagnostic { get; set; }
-    public bool IsLiveDiagnostic { get; set; }
-    public bool IsVerificationPending { get; set; }
-    public MutationVerificationPhase? VerificationPhase { get; set; }
-    public string DiagnosticProviderLabel { get; set; } = string.Empty;
-    public string DiagnosticAutomationName { get; set; } = string.Empty;
-    public string DiagnosticToolTip { get; set; } = string.Empty;
+    public string Status { get => _status; set => SetProperty(ref _status, value); }
+    public string Detail { get => _detail; set => SetProperty(ref _detail, value); }
+    public string Timestamp { get => _timestamp; set => SetProperty(ref _timestamp, value); }
+    public double Progress { get => _progress; set => SetProperty(ref _progress, value); }
+    public bool IsActive { get => _isActive; set => SetProperty(ref _isActive, value); }
+    public bool IsHistory { get => _isHistory; set => SetProperty(ref _isHistory, value); }
+    public bool IsIndeterminate { get => _isIndeterminate; set => SetProperty(ref _isIndeterminate, value); }
+    public bool ShowProgress { get => _showProgress; set => SetProperty(ref _showProgress, value); }
+    public bool CanCancel { get => _canCancel; set => SetProperty(ref _canCancel, value); }
+    public bool ShowCancel { get => _showCancel; set => SetProperty(ref _showCancel, value); }
+    public bool CanViewDiagnostic { get => _canViewDiagnostic; set => SetProperty(ref _canViewDiagnostic, value); }
+    public bool IsLiveDiagnostic { get => _isLiveDiagnostic; set => SetProperty(ref _isLiveDiagnostic, value); }
+    public bool IsVerificationPending { get => _isVerificationPending; set => SetProperty(ref _isVerificationPending, value); }
+    public MutationVerificationPhase? VerificationPhase { get => _verificationPhase; set => SetProperty(ref _verificationPhase, value); }
+    public string DiagnosticProviderLabel { get => _diagnosticProviderLabel; set => SetProperty(ref _diagnosticProviderLabel, value); }
+    public string DiagnosticAutomationName { get => _diagnosticAutomationName; set => SetProperty(ref _diagnosticAutomationName, value); }
+    public string DiagnosticToolTip { get => _diagnosticToolTip; set => SetProperty(ref _diagnosticToolTip, value); }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private bool SetProperty<T>(
+        ref T field,
+        T value,
+        [CallerMemberName] string? propertyName = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return false;
+        }
+
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        return true;
+    }
 }
 
 public sealed class SourceHealthItem

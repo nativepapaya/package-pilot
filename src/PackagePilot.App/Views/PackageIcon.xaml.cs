@@ -1,7 +1,10 @@
+using System.Collections.Concurrent;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
 using PackagePilot.App.Services;
+using PackagePilot.Core.Models;
+using Windows.Storage;
 
 namespace PackagePilot.App.Views;
 
@@ -18,6 +21,16 @@ public sealed partial class PackageIcon : UserControl
         typeof(string),
         typeof(PackageIcon),
         new PropertyMetadata("\uE896"));
+    public static readonly DependencyProperty IconReferenceProperty = DependencyProperty.Register(
+        nameof(IconReference),
+        typeof(AppIconReference),
+        typeof(PackageIcon),
+        new PropertyMetadata(null, OnIconReferenceChanged));
+
+    private static readonly ConcurrentDictionary<string, StorageFile> LocalPositiveCache =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, byte> LocalNegativeCache =
+        new(StringComparer.OrdinalIgnoreCase);
 
     private CancellationTokenSource? _loadCancellation;
     private bool _isLoaded;
@@ -37,20 +50,34 @@ public sealed partial class PackageIcon : UserControl
         set => SetValue(FallbackGlyphProperty, value);
     }
 
+    public AppIconReference? IconReference
+    {
+        get => (AppIconReference?)GetValue(IconReferenceProperty);
+        set => SetValue(IconReferenceProperty, value);
+    }
+
     private static void OnIconUriChanged(DependencyObject sender, DependencyPropertyChangedEventArgs args)
     {
         if (sender is PackageIcon icon && icon._isLoaded)
         {
-            icon.StartLoad(args.NewValue as Uri);
+            icon.StartLoad(args.NewValue as Uri, icon.IconReference);
+        }
+    }
+
+    private static void OnIconReferenceChanged(DependencyObject sender, DependencyPropertyChangedEventArgs args)
+    {
+        if (sender is PackageIcon icon && icon._isLoaded)
+        {
+            icon.StartLoad(icon.IconUri, args.NewValue as AppIconReference);
         }
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         _isLoaded = true;
-        if (IconUri is not null)
+        if (IconUri is not null || IconReference is not null)
         {
-            StartLoad(IconUri);
+            StartLoad(IconUri, IconReference);
         }
     }
 
@@ -61,11 +88,11 @@ public sealed partial class PackageIcon : UserControl
         CancelPendingLoad();
     }
 
-    private void StartLoad(Uri? sourceUri)
+    private void StartLoad(Uri? sourceUri, AppIconReference? iconReference)
     {
         CancelPendingLoad();
         var generation = ++_loadGeneration;
-        if (sourceUri is null)
+        if (sourceUri is null && iconReference is null)
         {
             TryShowFallback(generation);
             return;
@@ -75,20 +102,26 @@ public sealed partial class PackageIcon : UserControl
         var token = cancellation.Token;
         _loadCancellation = cancellation;
         TryShowFallback(generation);
-        _ = LoadAsync(sourceUri, cancellation, token, generation);
+        _ = LoadAsync(sourceUri, iconReference, cancellation, token, generation);
     }
 
     private async Task LoadAsync(
-        Uri sourceUri,
+        Uri? sourceUri,
+        AppIconReference? iconReference,
         CancellationTokenSource cancellation,
         CancellationToken token,
         long generation)
     {
         try
         {
-            var cachedFile = await PackageIconCache.Shared.GetCachedIconFileAsync(
-                sourceUri,
-                token);
+            var cachedFile = iconReference is
+                {
+                    Kind: AppIconSourceKind.MsixPackageAsset or AppIconSourceKind.ValidatedLocalResource
+                }
+                ? await GetValidatedLocalFileAsync(iconReference, token)
+                : await PackageIconCache.Shared.GetCachedIconFileAsync(
+                    iconReference?.Uri ?? sourceUri,
+                    token);
             token.ThrowIfCancellationRequested();
             if (!IsCurrent(cancellation, generation) || cachedFile is null)
             {
@@ -143,6 +176,54 @@ public sealed partial class PackageIcon : UserControl
             }
 
             cancellation.Dispose();
+        }
+    }
+
+    private static async Task<StorageFile?> GetValidatedLocalFileAsync(
+        AppIconReference reference,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(reference.ResourcePath))
+        {
+            return null;
+        }
+
+        var key = reference.ResourcePath;
+        if (LocalPositiveCache.TryGetValue(key, out var known))
+        {
+            return known;
+        }
+
+        if (LocalNegativeCache.ContainsKey(key))
+        {
+            return null;
+        }
+
+        try
+        {
+            var file = await StorageFile.GetFileFromPathAsync(key).AsTask(cancellationToken);
+            var properties = await file.GetBasicPropertiesAsync().AsTask(cancellationToken);
+            if (!AppIconReferencePolicy.TryNormalizeLocalPath(
+                    key,
+                    checked((long)properties.Size),
+                    out var normalized)
+                || !string.Equals(normalized, key, StringComparison.OrdinalIgnoreCase))
+            {
+                LocalNegativeCache.TryAdd(key, 0);
+                return null;
+            }
+
+            LocalPositiveCache[key] = file;
+            return file;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            LocalNegativeCache.TryAdd(key, 0);
+            return null;
         }
     }
 

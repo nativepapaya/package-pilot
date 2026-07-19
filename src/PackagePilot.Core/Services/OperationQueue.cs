@@ -877,6 +877,7 @@ public sealed class OperationQueue : IOperationQueue
         return result with
         {
             OperationId = operation.Id,
+            DisplayName = operation.DisplayName,
             Package = operation.Package,
             Target = operation.EffectiveTarget,
             Kind = operation.Kind,

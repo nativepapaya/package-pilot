@@ -21,7 +21,8 @@ internal static class DiscoverRowProjector
         IEnumerable<PackageSummary> searchResults,
         IEnumerable<PackageSummary> installedPackages,
         IEnumerable<PackageSummary> availableUpdates,
-        OperationQueueSnapshot queue)
+        OperationQueueSnapshot queue,
+        IEnumerable<InstalledApp>? installedApps = null)
     {
         ArgumentNullException.ThrowIfNull(searchResults);
         ArgumentNullException.ThrowIfNull(installedPackages);
@@ -32,7 +33,8 @@ internal static class DiscoverRowProjector
             searchResults,
             installedPackages,
             availableUpdates,
-            queue);
+            queue,
+            installedApps ?? Array.Empty<InstalledApp>());
     }
 
     public static PackageListItem Apply(
@@ -52,6 +54,7 @@ internal static class DiscoverRowProjector
 
         var update = index.FindUpdate(searchResult.Key);
         var installed = index.FindInstalled(searchResult.Key);
+        var installedAppId = index.FindInstalledAppId(searchResult.Key);
         var hasUpdate = searchResult.Status == PackageStatus.UpdateAvailable || update is not null;
         var isInstalled = hasUpdate
             || searchResult.Status == PackageStatus.Installed
@@ -82,11 +85,12 @@ internal static class DiscoverRowProjector
         }
         else if (isInstalled)
         {
+            item.InstalledAppId = installedAppId;
             SetBaseline(
                 item,
                 status: "Installed",
-                action: "Installed",
-                isEnabled: false,
+                action: installedAppId is null ? "Installed" : "View installed",
+                isEnabled: installedAppId is not null,
                 requestedKind: null,
                 glyph: InstalledGlyph,
                 isPositive: true);
@@ -258,6 +262,7 @@ internal sealed class DiscoverPackageStateIndex
     private readonly IReadOnlyDictionary<PackageKey, OperationQueueEntry> _activeByKey;
     private readonly IReadOnlyDictionary<string, OperationQueueEntry> _unattributedActiveById;
     private readonly IReadOnlyDictionary<PackageKey, OperationResult> _administratorRequiredByKey;
+    private readonly IReadOnlyDictionary<PackageKey, string> _installedAppIdsByKey;
     private readonly IReadOnlySet<string> _unambiguousSearchIds;
 
     private DiscoverPackageStateIndex(
@@ -268,6 +273,7 @@ internal sealed class DiscoverPackageStateIndex
         IReadOnlyDictionary<PackageKey, OperationQueueEntry> activeByKey,
         IReadOnlyDictionary<string, OperationQueueEntry> unattributedActiveById,
         IReadOnlyDictionary<PackageKey, OperationResult> administratorRequiredByKey,
+        IReadOnlyDictionary<PackageKey, string> installedAppIdsByKey,
         IReadOnlySet<string> unambiguousSearchIds)
     {
         _installedByKey = installedByKey;
@@ -277,6 +283,7 @@ internal sealed class DiscoverPackageStateIndex
         _activeByKey = activeByKey;
         _unattributedActiveById = unattributedActiveById;
         _administratorRequiredByKey = administratorRequiredByKey;
+        _installedAppIdsByKey = installedAppIdsByKey;
         _unambiguousSearchIds = unambiguousSearchIds;
     }
 
@@ -292,11 +299,15 @@ internal sealed class DiscoverPackageStateIndex
     public OperationResult? FindAdministratorRequired(PackageKey package) =>
         _administratorRequiredByKey.TryGetValue(package, out var result) ? result : null;
 
+    public string? FindInstalledAppId(PackageKey package) =>
+        _installedAppIdsByKey.TryGetValue(package, out var appId) ? appId : null;
+
     public static DiscoverPackageStateIndex Create(
         IEnumerable<PackageSummary> searchResults,
         IEnumerable<PackageSummary> installedPackages,
         IEnumerable<PackageSummary> availableUpdates,
-        OperationQueueSnapshot queue)
+        OperationQueueSnapshot queue,
+        IEnumerable<InstalledApp> installedApps)
     {
         var sourceCounts = searchResults
             .Where(package => !package.Key.IsEmpty)
@@ -321,6 +332,7 @@ internal sealed class DiscoverPackageStateIndex
             .Concat(queue.Pending);
         var (activeByKey, unattributedActiveById) = IndexOperations(activeEntries);
         var administratorRequiredByKey = IndexAdministratorRequired(queue.History);
+        var installedAppIdsByKey = IndexInstalledApps(installedApps);
 
         return new DiscoverPackageStateIndex(
             installedByKey,
@@ -330,7 +342,38 @@ internal sealed class DiscoverPackageStateIndex
             activeByKey,
             unattributedActiveById,
             administratorRequiredByKey,
+            installedAppIdsByKey,
             unambiguousSearchIds);
+    }
+
+    private static IReadOnlyDictionary<PackageKey, string> IndexInstalledApps(
+        IEnumerable<InstalledApp> installedApps)
+    {
+        var results = new Dictionary<PackageKey, string>(KeyComparer);
+        var ambiguous = new HashSet<PackageKey>(KeyComparer);
+        foreach (var app in installedApps)
+        {
+            foreach (var package in app.Installations
+                         .Select(installation => installation.WingetPackage)
+                         .OfType<PackageKey>()
+                         .Where(package => !package.IsEmpty && !IsUnattributedSource(package.SourceId)))
+            {
+                if (results.TryGetValue(package, out var existing)
+                    && !string.Equals(existing, app.Id, StringComparison.Ordinal))
+                {
+                    ambiguous.Add(package);
+                    results.Remove(package);
+                    continue;
+                }
+
+                if (!ambiguous.Contains(package))
+                {
+                    results[package] = app.Id;
+                }
+            }
+        }
+
+        return results;
     }
 
     private T? Find<T>(

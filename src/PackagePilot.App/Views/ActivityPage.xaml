@@ -8,8 +8,8 @@
 
     <Page.Resources>
         <DataTemplate x:Key="OperationTemplate" x:DataType="views:OperationListItem">
-            <Border Margin="0,0,0,8" Style="{StaticResource PackagePilotRowCardStyle}">
-                <Grid ColumnSpacing="12" RowSpacing="8">
+            <Border Style="{StaticResource PackagePilotRowCardStyle}">
+                <Grid ColumnSpacing="12" RowSpacing="7">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
@@ -23,71 +23,79 @@
                     <Border Style="{StaticResource PackagePilotIconTileStyle}">
                         <FontIcon FontFamily="Segoe Fluent Icons" FontSize="20" Glyph="&#xE895;" />
                     </Border>
-                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
                         <TextBlock FontWeight="SemiBold" Text="{x:Bind PackageName}" TextTrimming="CharacterEllipsis" />
                         <StackPanel Orientation="Horizontal" Spacing="6">
                             <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Action}" />
                             <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="•" />
-                            <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Status}" />
+                            <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Status, Mode=OneWay}" />
                             <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="•" />
-                            <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Timestamp}" />
+                            <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="{x:Bind Timestamp, Mode=OneWay}" />
                         </StackPanel>
                     </StackPanel>
-                    <StackPanel
-                        Grid.Column="2"
-                        VerticalAlignment="Center"
-                        Orientation="Horizontal"
-                        Spacing="8">
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Orientation="Horizontal" Spacing="8">
                         <Button
                             x:Name="ViewDiagnosticButton"
-                            x:Load="{x:Bind CanViewDiagnostic}"
-                            AutomationProperties.Name="{x:Bind DiagnosticAutomationName}"
-                            Click="OnViewDiagnosticClick"
-                            MinWidth="40"
+                            x:Load="{x:Bind CanViewDiagnostic, Mode=OneWay}"
+                            Width="40"
                             Height="40"
-                            Padding="10,0"
-                            CornerRadius="8"
+                            Padding="0"
+                            AutomationProperties.Name="{x:Bind DiagnosticAutomationName, Mode=OneWay}"
+                            Click="OnViewDiagnosticClick"
                             Tag="{x:Bind OperationId}"
-                            ToolTipService.ToolTip="{x:Bind DiagnosticToolTip}">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE8A5;" />
-                                <TextBlock
-                                    x:Name="LiveDiagnosticLabel"
-                                    x:Load="{x:Bind IsLiveDiagnostic}"
-                                    Style="{StaticResource PackagePilotCaptionStyle}"
-                                    Text="Live log" />
-                            </StackPanel>
+                            ToolTipService.ToolTip="{x:Bind DiagnosticToolTip, Mode=OneWay}">
+                            <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE8A5;" />
                         </Button>
                         <Button
                             x:Name="CancelOperationButton"
-                            x:Load="{x:Bind ShowCancel}"
+                            x:Load="{x:Bind ShowCancel, Mode=OneWay}"
                             MinWidth="76"
                             AutomationProperties.Name="Cancel package operation"
                             Click="OnCancelOperationClick"
                             Content="Cancel"
-                            IsEnabled="{x:Bind CanCancel}"
+                            IsEnabled="{x:Bind CanCancel, Mode=OneWay}"
                             Tag="{x:Bind OperationId}" />
                     </StackPanel>
                     <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Spacing="5">
                         <ProgressBar
                             x:Name="OperationProgressBar"
-                            x:Load="{x:Bind ShowProgress}"
+                            x:Load="{x:Bind ShowProgress, Mode=OneWay}"
                             AutomationProperties.Name="Operation progress"
-                            IsIndeterminate="{x:Bind IsIndeterminate}"
+                            IsIndeterminate="{x:Bind IsIndeterminate, Mode=OneWay}"
                             Maximum="100"
-                            Value="{x:Bind Progress}" />
+                            Value="{x:Bind Progress, Mode=OneWay}" />
                         <TextBlock
                             AutomationProperties.LiveSetting="Polite"
                             Style="{StaticResource PackagePilotCaptionStyle}"
-                            Text="{x:Bind Detail}" />
+                            Text="{x:Bind Detail, Mode=OneWay}"
+                            TextTrimming="CharacterEllipsis" />
                     </StackPanel>
                 </Grid>
             </Border>
         </DataTemplate>
+
+        <DataTemplate x:Key="DiagnosticLineTemplate" x:DataType="views:OperationDiagnosticLineViewItem">
+            <Grid Padding="8,3" ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="4" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border Background="{x:Bind SeverityBrush}" CornerRadius="2" />
+                <TextBlock
+                    Grid.Column="1"
+                    FontFamily="Cascadia Mono, Consolas"
+                    FontSize="11"
+                    Foreground="{x:Bind SeverityBrush}"
+                    IsTextSelectionEnabled="True"
+                    Text="{x:Bind Text}"
+                    TextWrapping="NoWrap" />
+            </Grid>
+        </DataTemplate>
     </Page.Resources>
 
-    <Grid x:Name="Root" Padding="24,20,24,24" RowSpacing="16">
+    <Grid x:Name="Root" Padding="24,20,24,24" RowSpacing="14">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -100,7 +108,7 @@
             </Grid.ColumnDefinitions>
             <StackPanel Spacing="4">
                 <TextBlock AutomationProperties.HeadingLevel="Level1" Style="{StaticResource PackagePilotPageTitleStyle}" Text="Activity" />
-                <TextBlock Style="{StaticResource PackagePilotSubtitleStyle}" Text="Follow active work and the 100 most recent package operations." />
+                <TextBlock Style="{StaticResource PackagePilotSubtitleStyle}" Text="Follow active work and inspect provider diagnostics without leaving the page." />
             </StackPanel>
             <Button
                 x:Name="ClearHistoryButton"
@@ -118,16 +126,12 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <Border
-                    Width="40"
-                    Height="40"
-                    Background="{ThemeResource PackagePilotAccentSoftBrush}"
-                    CornerRadius="10">
+                <Border Width="40" Height="40" Background="{ThemeResource AccentFillColorSecondaryBrush}" CornerRadius="10">
                     <FontIcon FontFamily="Segoe Fluent Icons" Glyph="&#xE8FD;" />
                 </Border>
                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
                     <TextBlock x:Name="QueueSummaryText" FontWeight="SemiBold" Text="Queue is idle" />
-                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="Only one installer runs at a time to avoid overlapping prompts." />
+                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="Package changes run sequentially to avoid overlapping installers and prompts." />
                 </StackPanel>
                 <Button
                     x:Name="CancelQueuedButton"
@@ -139,64 +143,181 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="2">
-            <ListView
-                x:Name="ActivityList"
-                Style="{StaticResource PackagePilotListViewStyle}"
-                AutomationProperties.Name="Package activity"
-                IsItemClickEnabled="False"
-                ItemTemplate="{StaticResource OperationTemplate}"
-                ItemsSource="{x:Bind Operations}"
-                SelectionMode="None"
-                Visibility="Collapsed">
-                <ListView.ItemContainerStyle>
-                    <Style TargetType="ListViewItem">
-                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                        <Setter Property="Padding" Value="0" />
-                    </Style>
-                </ListView.ItemContainerStyle>
-            </ListView>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
+            <ToggleButton x:Name="ActiveFilter" Click="OnFilterClick" Content="Active" Tag="active" />
+            <ToggleButton x:Name="AttentionFilter" Click="OnFilterClick" Content="Needs attention" Tag="attention" />
+            <ToggleButton x:Name="RecentFilter" Click="OnFilterClick" Content="Recent" IsChecked="True" Tag="recent" />
+        </StackPanel>
 
-            <StackPanel
-                x:Name="EmptyState"
-                MaxWidth="440"
-                HorizontalAlignment="Center"
-                VerticalAlignment="Center"
-                Spacing="10">
-                <Border
-                    Width="64"
-                    Height="64"
+        <Grid x:Name="ActivityContent" Grid.Row="3" ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition x:Name="DetailsColumn" Width="0" />
+            </Grid.ColumnDefinitions>
+
+            <Grid x:Name="ListSurface">
+                <ListView
+                    x:Name="ActivityList"
+                    Style="{StaticResource PackagePilotListViewStyle}"
+                    AutomationProperties.Name="Package activity"
+                    ItemTemplate="{StaticResource OperationTemplate}"
+                    ItemsSource="{x:Bind DisplayedOperations}"
+                    SelectionChanged="OnActivitySelectionChanged"
+                    Visibility="Collapsed">
+                    <ListView.ItemContainerStyle>
+                        <Style BasedOn="{StaticResource PackagePilotListItemStyle}" TargetType="ListViewItem" />
+                    </ListView.ItemContainerStyle>
+                </ListView>
+
+                <StackPanel
+                    x:Name="EmptyState"
+                    MaxWidth="440"
                     HorizontalAlignment="Center"
-                    Background="{ThemeResource PackagePilotAccentSoftBrush}"
-                    CornerRadius="18">
-                    <FontIcon FontFamily="Segoe Fluent Icons" FontSize="28" Glyph="&#xE81C;" />
-                </Border>
-                <TextBlock HorizontalAlignment="Center" Style="{StaticResource PackagePilotSectionTitleStyle}" Text="No package activity yet" />
-                <TextBlock
-                    HorizontalAlignment="Center"
-                    Style="{StaticResource PackagePilotSubtitleStyle}"
-                    Text="Installs, updates, removals, failures, and reboot requirements will appear here."
-                    TextAlignment="Center" />
-            </StackPanel>
+                    VerticalAlignment="Center"
+                    Spacing="10">
+                    <Border Width="64" Height="64" HorizontalAlignment="Center" Background="{ThemeResource AccentFillColorSecondaryBrush}" CornerRadius="18">
+                        <FontIcon FontFamily="Segoe Fluent Icons" FontSize="28" Glyph="&#xE81C;" />
+                    </Border>
+                    <TextBlock x:Name="EmptyStateTitle" HorizontalAlignment="Center" Style="{StaticResource PackagePilotSectionTitleStyle}" Text="No package activity yet" />
+                    <TextBlock
+                        x:Name="EmptyStateMessage"
+                        HorizontalAlignment="Center"
+                        Style="{StaticResource PackagePilotSubtitleStyle}"
+                        Text="Installs, updates, removals, failures, and reboot requirements will appear here."
+                        TextAlignment="Center" />
+                </StackPanel>
+            </Grid>
+
+            <Border
+                x:Name="DetailsPane"
+                Grid.Column="1"
+                Style="{StaticResource PackagePilotCardStyle}"
+                Padding="16"
+                Visibility="Collapsed">
+                <Grid RowSpacing="12">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Button
+                            x:Name="DetailsBackButton"
+                            Width="36"
+                            Height="36"
+                            Padding="0"
+                            AutomationProperties.Name="Back to activity list"
+                            Click="OnDetailsCloseClick"
+                            Visibility="Collapsed">
+                            <FontIcon Glyph="&#xE72B;" />
+                        </Button>
+                        <StackPanel Grid.Column="1" Spacing="2">
+                            <TextBlock x:Name="DetailsTitle" FontSize="18" FontWeight="SemiBold" Text="Operation details" TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="DetailsSubtitle" Style="{StaticResource PackagePilotCaptionStyle}" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                        <Button
+                            Grid.Column="2"
+                            Width="36"
+                            Height="36"
+                            Padding="0"
+                            AutomationProperties.Name="Close operation details"
+                            Click="OnDetailsCloseClick">
+                            <FontIcon Glyph="&#xE711;" />
+                        </Button>
+                    </Grid>
+
+                    <InfoBar x:Name="DiagnosticNotice" Grid.Row="1" IsClosable="False" IsOpen="False" Severity="Informational" />
+
+                    <Pivot Grid.Row="2">
+                        <PivotItem Header="Summary">
+                            <StackPanel Padding="0,12,0,0" Spacing="12">
+                                <TextBlock x:Name="SummaryStatus" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                <TextBlock x:Name="SummaryDetail" Style="{StaticResource PackagePilotSubtitleStyle}" TextWrapping="Wrap" />
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Style="{StaticResource PackagePilotCaptionStyle}" Text="Package" />
+                                    <TextBlock x:Name="SummaryPackageId" Grid.Column="1" FontFamily="Cascadia Mono, Consolas" FontSize="12" TextWrapping="Wrap" />
+                                </Grid>
+                            </StackPanel>
+                        </PivotItem>
+                        <PivotItem Header="Live log">
+                            <Grid Padding="0,12,0,0" RowSpacing="8">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <AutoSuggestBox
+                                        x:Name="LogSearchBox"
+                                        AutomationProperties.Name="Search operation log"
+                                        PlaceholderText="Search log"
+                                        QueryIcon="Find"
+                                        TextChanged="OnLogSearchChanged" />
+                                    <ToggleButton
+                                        x:Name="PauseAutoScrollButton"
+                                        Grid.Column="1"
+                                        AutomationProperties.Name="Pause log auto-scroll"
+                                        Click="OnPauseAutoScrollClick"
+                                        Content="Pause" />
+                                    <Button Grid.Column="2" AutomationProperties.Name="Copy operation log" Click="OnCopyLogClick" Content="Copy" />
+                                    <Button Grid.Column="3" AutomationProperties.Name="Export operation log" Click="OnExportLogClick" Content="Export" />
+                                </Grid>
+                                <ProgressBar x:Name="DiagnosticProgress" Grid.Row="1" Height="3" IsIndeterminate="True" Visibility="Collapsed" />
+                                <ListView
+                                    x:Name="DiagnosticLinesList"
+                                    Grid.Row="2"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                    BorderThickness="1"
+                                    ItemTemplate="{StaticResource DiagnosticLineTemplate}"
+                                    ItemsSource="{x:Bind DiagnosticLines}"
+                                    SelectionMode="None">
+                                    <ListView.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <ItemsStackPanel AreStickyGroupHeadersEnabled="False" />
+                                        </ItemsPanelTemplate>
+                                    </ListView.ItemsPanel>
+                                </ListView>
+                                <Grid Grid.Row="3" ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="DiagnosticRefreshStatus" Style="{StaticResource PackagePilotCaptionStyle}" TextWrapping="Wrap" />
+                                    <Button Grid.Column="1" Click="OnRefreshDiagnosticClick" Content="Refresh" />
+                                </Grid>
+                            </Grid>
+                        </PivotItem>
+                    </Pivot>
+                </Grid>
+            </Border>
         </Grid>
 
         <VisualStateManager.VisualStateGroups>
             <VisualStateGroup>
                 <VisualState x:Name="Narrow">
-                    <VisualState.StateTriggers>
-                        <AdaptiveTrigger MinWindowWidth="0" />
-                    </VisualState.StateTriggers>
-                    <VisualState.Setters>
-                        <Setter Target="Root.Padding" Value="16,16,16,20" />
-                    </VisualState.Setters>
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="0" /></VisualState.StateTriggers>
+                    <VisualState.Setters><Setter Target="Root.Padding" Value="16,16,16,20" /></VisualState.Setters>
                 </VisualState>
                 <VisualState x:Name="Wide">
-                    <VisualState.StateTriggers>
-                        <AdaptiveTrigger MinWindowWidth="900" />
-                    </VisualState.StateTriggers>
-                    <VisualState.Setters>
-                        <Setter Target="Root.Padding" Value="32,24,32,32" />
-                    </VisualState.Setters>
+                    <VisualState.StateTriggers><AdaptiveTrigger MinWindowWidth="900" /></VisualState.StateTriggers>
+                    <VisualState.Setters><Setter Target="Root.Padding" Value="32,24,32,32" /></VisualState.Setters>
                 </VisualState>
             </VisualStateGroup>
         </VisualStateManager.VisualStateGroups>
