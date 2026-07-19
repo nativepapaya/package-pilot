@@ -13,10 +13,21 @@
             AutomationProperties.AccessibilityView="Raw"
             FontFamily="Segoe Fluent Icons"
             FontSize="20"
-            Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+            Foreground="{ThemeResource AccentFillColorDefaultBrush}"
             Glyph="{x:Bind FallbackGlyph, Mode=OneWay}" />
+        <TextBlock
+            x:Name="FallbackMonogram"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            AutomationProperties.AccessibilityView="Raw"
+            FontFamily="{StaticResource PackagePilotDisplayFont}"
+            FontSize="17"
+            FontWeight="SemiBold"
+            Foreground="{ThemeResource AccentFillColorDefaultBrush}"
+            Visibility="Collapsed" />
         <Image
             x:Name="IconImage"
+            Margin="3"
             AutomationProperties.AccessibilityView="Raw"
             Stretch="Uniform"
             Visibility="Collapsed" />

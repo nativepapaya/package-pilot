@@ -8,10 +8,6 @@ namespace PackagePilot.Windows.Services;
 /// <summary>Enumerates current-user MSIX/Store registrations without mutating package state.</summary>
 public sealed class WindowsMsixPackageReader : IMsixPackageReader
 {
-    private static readonly HashSet<string> AllowedIconExtensions = new(
-        [".png", ".jpg", ".jpeg", ".webp", ".ico"],
-        StringComparer.OrdinalIgnoreCase);
-
     public Task<IReadOnlyList<MsixPackageRecord>> ReadCurrentUserPackagesAsync(
         CancellationToken cancellationToken = default) =>
         Task.Run(() => ReadCoreAsync(cancellationToken), cancellationToken);
@@ -82,9 +78,6 @@ public sealed class WindowsMsixPackageReader : IMsixPackageReader
     {
         try
         {
-            var root = Path.GetFullPath(package.InstalledLocation.Path)
-                .TrimEnd(Path.DirectorySeparatorChar)
-                + Path.DirectorySeparatorChar;
             var logo = package.Logo;
             if (logo is null
                 || !logo.Scheme.Equals("ms-appx", StringComparison.OrdinalIgnoreCase))
@@ -92,21 +85,12 @@ public sealed class WindowsMsixPackageReader : IMsixPackageReader
                 return null;
             }
 
-            var relative = Uri.UnescapeDataString(logo.AbsolutePath)
-                .TrimStart('/')
-                .Replace('/', Path.DirectorySeparatorChar);
-            var fullPath = Path.GetFullPath(Path.Combine(root, relative));
-            if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)
-                || !AllowedIconExtensions.Contains(Path.GetExtension(fullPath)))
-            {
-                return null;
-            }
-
-            return new AppIconReference
-            {
-                Kind = AppIconSourceKind.MsixPackageAsset,
-                ResourcePath = fullPath
-            };
+            return WindowsPackageAssetResolver.TryResolve(
+                package.InstalledLocation.Path,
+                logo.AbsolutePath,
+                out var reference)
+                    ? reference
+                    : null;
         }
         catch (Exception exception) when (
             exception is ArgumentException or IOException or UnauthorizedAccessException)

@@ -21,6 +21,7 @@ public sealed record RegistryUninstallEntry
     public string DisplayName { get; init; } = string.Empty;
     public string Publisher { get; init; } = string.Empty;
     public string Version { get; init; } = string.Empty;
+    public AppIconReference? Icon { get; init; }
     public InstallerScope Scope { get; init; } = InstallerScope.Unknown;
     public PackageArchitecture Architecture { get; init; } = PackageArchitecture.Unknown;
 }

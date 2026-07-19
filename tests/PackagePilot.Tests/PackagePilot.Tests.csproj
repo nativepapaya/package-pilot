@@ -31,6 +31,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\PackagePilot.App\Views\ViewData.cs" Link="App\ViewData.cs" />
+    <Compile Include="..\..\src\PackagePilot.App\Views\InstalledPackageVisibility.cs" Link="App\InstalledPackageVisibility.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\ActivityStateProjector.cs" Link="App\ActivityStateProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\DiscoverRowProjector.cs" Link="App\DiscoverRowProjector.cs" />
     <Compile Include="..\..\src\PackagePilot.App\Views\OperationRowProjector.cs" Link="App\OperationRowProjector.cs" />

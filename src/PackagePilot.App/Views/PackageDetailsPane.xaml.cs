@@ -38,6 +38,7 @@ public sealed partial class PackageDetailsPane : UserControl
     public static readonly DependencyProperty ReleaseNotesProperty = DependencyProperty.Register(nameof(ReleaseNotes), typeof(string), typeof(PackageDetailsPane), EmptyText);
     public static readonly DependencyProperty IconGlyphProperty = DependencyProperty.Register(nameof(IconGlyph), typeof(string), typeof(PackageDetailsPane), new PropertyMetadata("\uE896"));
     public static readonly DependencyProperty IconUriProperty = DependencyProperty.Register(nameof(IconUri), typeof(Uri), typeof(PackageDetailsPane), new PropertyMetadata(null));
+    public static readonly DependencyProperty IconReferenceProperty = DependencyProperty.Register(nameof(IconReference), typeof(AppIconReference), typeof(PackageDetailsPane), new PropertyMetadata(null));
     public static readonly DependencyProperty PrimaryActionLabelProperty = DependencyProperty.Register(nameof(PrimaryActionLabel), typeof(string), typeof(PackageDetailsPane), new PropertyMetadata("Install"));
     public static readonly DependencyProperty IsPrimaryActionEnabledProperty = DependencyProperty.Register(nameof(IsPrimaryActionEnabled), typeof(bool), typeof(PackageDetailsPane), new PropertyMetadata(true));
 
@@ -67,6 +68,7 @@ public sealed partial class PackageDetailsPane : UserControl
     public string ReleaseNotes { get => (string)GetValue(ReleaseNotesProperty); set => SetValue(ReleaseNotesProperty, value); }
     public string IconGlyph { get => (string)GetValue(IconGlyphProperty); set => SetValue(IconGlyphProperty, value); }
     public Uri? IconUri { get => (Uri?)GetValue(IconUriProperty); set => SetValue(IconUriProperty, value); }
+    public AppIconReference? IconReference { get => (AppIconReference?)GetValue(IconReferenceProperty); set => SetValue(IconReferenceProperty, value); }
     public string PrimaryActionLabel { get => (string)GetValue(PrimaryActionLabelProperty); set => SetValue(PrimaryActionLabelProperty, value); }
     public bool IsPrimaryActionEnabled { get => (bool)GetValue(IsPrimaryActionEnabledProperty); set => SetValue(IsPrimaryActionEnabledProperty, value); }
 
@@ -100,6 +102,7 @@ public sealed partial class PackageDetailsPane : UserControl
         ReleaseNotes = package.ReleaseNotes;
         IconGlyph = package.IconGlyph;
         IconUri = package.IconUri;
+        IconReference = package.IconReference;
         PrimaryActionLabel = package.ActionLabel;
         UpdatePrimaryActionEnabled();
         SetLink(HomepageLink, package.HomepageUri);

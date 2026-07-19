@@ -1,15 +1,20 @@
 using System.Collections.Concurrent;
+using System.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
 using PackagePilot.App.Services;
 using PackagePilot.Core.Models;
+using PackagePilot.Windows.Services;
 using Windows.Storage;
+using Windows.Storage.Streams;
 
 namespace PackagePilot.App.Views;
 
 public sealed partial class PackageIcon : UserControl
 {
+    private const int MaximumDecodedIconEntries = 512;
+
     public static readonly DependencyProperty IconUriProperty = DependencyProperty.Register(
         nameof(IconUri),
         typeof(Uri),
@@ -20,7 +25,12 @@ public sealed partial class PackageIcon : UserControl
         nameof(FallbackGlyph),
         typeof(string),
         typeof(PackageIcon),
-        new PropertyMetadata("\uE896"));
+        new PropertyMetadata("\uE896", OnFallbackVisualChanged));
+    public static readonly DependencyProperty FallbackTextProperty = DependencyProperty.Register(
+        nameof(FallbackText),
+        typeof(string),
+        typeof(PackageIcon),
+        new PropertyMetadata(string.Empty, OnFallbackVisualChanged));
     public static readonly DependencyProperty IconReferenceProperty = DependencyProperty.Register(
         nameof(IconReference),
         typeof(AppIconReference),
@@ -31,12 +41,19 @@ public sealed partial class PackageIcon : UserControl
         new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, byte> LocalNegativeCache =
         new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, WeakReference<BitmapImage>> DecodedImageCache =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentQueue<string> DecodedImageCacheOrder = new();
 
     private CancellationTokenSource? _loadCancellation;
     private bool _isLoaded;
     private long _loadGeneration;
 
-    public PackageIcon() => InitializeComponent();
+    public PackageIcon()
+    {
+        InitializeComponent();
+        UpdateFallbackVisual();
+    }
 
     public Uri? IconUri
     {
@@ -48,6 +65,12 @@ public sealed partial class PackageIcon : UserControl
     {
         get => (string)GetValue(FallbackGlyphProperty);
         set => SetValue(FallbackGlyphProperty, value);
+    }
+
+    public string FallbackText
+    {
+        get => (string)GetValue(FallbackTextProperty);
+        set => SetValue(FallbackTextProperty, value);
     }
 
     public AppIconReference? IconReference
@@ -69,6 +92,17 @@ public sealed partial class PackageIcon : UserControl
         if (sender is PackageIcon icon && icon._isLoaded)
         {
             icon.StartLoad(icon.IconUri, args.NewValue as AppIconReference);
+        }
+    }
+
+    private static void OnFallbackVisualChanged(
+        DependencyObject sender,
+        DependencyPropertyChangedEventArgs args)
+    {
+        if (sender is PackageIcon icon && icon.IconImage is not null
+            && icon.IconImage.Visibility != Visibility.Visible)
+        {
+            icon.UpdateFallbackVisual();
         }
     }
 
@@ -114,35 +148,12 @@ public sealed partial class PackageIcon : UserControl
     {
         try
         {
-            var cachedFile = iconReference is
-                {
-                    Kind: AppIconSourceKind.MsixPackageAsset or AppIconSourceKind.ValidatedLocalResource
-                }
-                ? await GetValidatedLocalFileAsync(iconReference, token)
-                : await PackageIconCache.Shared.GetCachedIconFileAsync(
-                    iconReference?.Uri ?? sourceUri,
-                    token);
+            var bitmap = iconReference is
+                { Kind: AppIconSourceKind.ValidatedExecutableResource }
+                    ? await LoadExecutableBitmapAsync(iconReference, token)
+                    : await LoadFileBitmapAsync(sourceUri, iconReference, token);
             token.ThrowIfCancellationRequested();
-            if (!IsCurrent(cancellation, generation) || cachedFile is null)
-            {
-                return;
-            }
-
-            using var stream = await cachedFile.OpenAsync(global::Windows.Storage.FileAccessMode.Read);
-            token.ThrowIfCancellationRequested();
-            if (!IsCurrent(cancellation, generation))
-            {
-                return;
-            }
-
-            var bitmap = new BitmapImage
-            {
-                DecodePixelType = DecodePixelType.Logical,
-                DecodePixelWidth = 64
-            };
-            await bitmap.SetSourceAsync(stream);
-            token.ThrowIfCancellationRequested();
-            if (!IsCurrent(cancellation, generation))
+            if (!IsCurrent(cancellation, generation) || bitmap is null)
             {
                 return;
             }
@@ -152,6 +163,7 @@ public sealed partial class PackageIcon : UserControl
                 IconImage.Source = bitmap;
                 IconImage.Visibility = Visibility.Visible;
                 FallbackIcon.Visibility = Visibility.Collapsed;
+                FallbackMonogram.Visibility = Visibility.Collapsed;
             }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
@@ -178,6 +190,106 @@ public sealed partial class PackageIcon : UserControl
             cancellation.Dispose();
         }
     }
+
+    private static async Task<BitmapImage?> LoadFileBitmapAsync(
+        Uri? sourceUri,
+        AppIconReference? iconReference,
+        CancellationToken cancellationToken)
+    {
+        var cachedFile = iconReference is
+            { Kind: AppIconSourceKind.MsixPackageAsset or AppIconSourceKind.ValidatedLocalResource }
+                ? await GetValidatedLocalFileAsync(iconReference, cancellationToken)
+                : await PackageIconCache.Shared.GetCachedIconFileAsync(
+                    iconReference?.Uri ?? sourceUri,
+                    cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (cachedFile is null)
+        {
+            return null;
+        }
+
+        return await LoadAndCacheBitmapAsync(
+            $"file|{cachedFile.Path}",
+            async () => await cachedFile.OpenAsync(global::Windows.Storage.FileAccessMode.Read),
+            cancellationToken);
+    }
+
+    private static async Task<BitmapImage?> LoadExecutableBitmapAsync(
+        AppIconReference iconReference,
+        CancellationToken cancellationToken)
+    {
+        var bytes = await WindowsExecutableIconExtractor.Shared.GetIconPngAsync(
+            iconReference,
+            64,
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (bytes is null)
+        {
+            return null;
+        }
+
+        var key = $"exe|{iconReference.ResourcePath}|{iconReference.ResourceIndex ?? 0}";
+        return await LoadAndCacheBitmapAsync(
+            key,
+            async () =>
+            {
+                var stream = new InMemoryRandomAccessStream();
+                using var writer = new DataWriter(stream);
+                writer.WriteBytes(bytes);
+                await writer.StoreAsync();
+                await writer.FlushAsync();
+                writer.DetachStream();
+                stream.Seek(0);
+                return stream;
+            },
+            cancellationToken);
+    }
+
+    private static async Task<BitmapImage?> LoadAndCacheBitmapAsync(
+        string key,
+        Func<Task<IRandomAccessStream>> openStreamAsync,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (DecodedImageCache.TryGetValue(key, out var weak)
+            && weak.TryGetTarget(out var cached))
+        {
+            return cached;
+        }
+
+        using var stream = await openStreamAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        var bitmap = CreateBitmap();
+        await bitmap.SetSourceAsync(stream);
+        cancellationToken.ThrowIfCancellationRequested();
+        CacheDecodedBitmap(key, bitmap);
+        return bitmap;
+    }
+
+    private static void CacheDecodedBitmap(string key, BitmapImage bitmap)
+    {
+        var weak = new WeakReference<BitmapImage>(bitmap);
+        if (DecodedImageCache.TryAdd(key, weak))
+        {
+            DecodedImageCacheOrder.Enqueue(key);
+        }
+        else
+        {
+            DecodedImageCache[key] = weak;
+        }
+
+        while (DecodedImageCache.Count > MaximumDecodedIconEntries
+               && DecodedImageCacheOrder.TryDequeue(out var oldest))
+        {
+            DecodedImageCache.TryRemove(oldest, out _);
+        }
+    }
+
+    private static BitmapImage CreateBitmap() => new()
+    {
+        DecodePixelType = DecodePixelType.Logical,
+        DecodePixelWidth = 64
+    };
 
     private static async Task<StorageFile?> GetValidatedLocalFileAsync(
         AppIconReference reference,
@@ -252,12 +364,42 @@ public sealed partial class PackageIcon : UserControl
         {
             IconImage.Source = null;
             IconImage.Visibility = Visibility.Collapsed;
-            FallbackIcon.Visibility = Visibility.Visible;
+            UpdateFallbackVisual();
         }
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             // Optional icon state must never tear down the process during navigation.
         }
+    }
+
+    private void UpdateFallbackVisual()
+    {
+        var monogram = CreateMonogram(FallbackText);
+        FallbackMonogram.Text = monogram;
+        FallbackMonogram.Visibility = string.IsNullOrEmpty(monogram)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        FallbackIcon.Visibility = string.IsNullOrEmpty(monogram)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    internal static string CreateMonogram(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        foreach (var rune in value.EnumerateRunes())
+        {
+            if (Rune.IsLetterOrDigit(rune))
+            {
+                return Rune.ToUpperInvariant(rune).ToString();
+            }
+        }
+
+        return string.Empty;
     }
 
     private void CancelPendingLoad()

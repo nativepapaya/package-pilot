@@ -149,8 +149,13 @@
                             CornerRadius="18">
                             <FontIcon FontFamily="Segoe Fluent Icons" FontSize="28" Glyph="&#xE74C;" />
                         </Border>
-                        <TextBlock HorizontalAlignment="Center" Style="{StaticResource PackagePilotSectionTitleStyle}" Text="No matching apps" />
                         <TextBlock
+                            x:Name="EmptyStateTitle"
+                            HorizontalAlignment="Center"
+                            Style="{StaticResource PackagePilotSectionTitleStyle}"
+                            Text="No matching apps" />
+                        <TextBlock
+                            x:Name="EmptyStateDescription"
                             HorizontalAlignment="Center"
                             Style="{StaticResource PackagePilotSubtitleStyle}"
                             Text="Refresh to scan installed software, or clear the filter to see all detected packages."
@@ -158,12 +163,28 @@
                     </StackPanel>
                 </Grid>
 
-                <TextBlock
-                    x:Name="PackageCountText"
-                    Grid.Row="2"
-                    Style="{StaticResource PackagePilotCaptionStyle}"
-                    AutomationProperties.LiveSetting="Polite"
-                    Text="No packages loaded" />
+                <Grid Grid.Row="2" ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock
+                        x:Name="PackageCountText"
+                        VerticalAlignment="Center"
+                        Style="{StaticResource PackagePilotCaptionStyle}"
+                        AutomationProperties.LiveSetting="Polite"
+                        TextTrimming="CharacterEllipsis"
+                        Text="No packages loaded" />
+                    <ToggleButton
+                        x:Name="ShowWindowsManagedToggle"
+                        Grid.Column="1"
+                        VerticalAlignment="Center"
+                        AutomationProperties.Name="Show Windows-managed apps"
+                        Click="OnShowWindowsManagedClick"
+                        Content="Show Windows-managed apps"
+                        ToolTipService.ToolTip="Include apps that Package Pilot can only hand off to Windows or Microsoft Store."
+                        Visibility="Collapsed" />
+                </Grid>
             </Grid>
 
             <views:PackageDetailsPane

@@ -45,6 +45,14 @@ public sealed record InstalledApp
             .FirstOrDefault(version => !string.IsNullOrWhiteSpace(version)) ?? string.Empty;
 
     public InstalledAppActionDescriptor? PrimaryAction => Actions.FirstOrDefault(action => action.IsPrimary);
+
+    /// <summary>
+    /// True when Package Pilot can perform a reviewed package mutation itself. Store and
+    /// Windows Settings handoffs remain useful actions, but Windows owns the actual change.
+    /// </summary>
+    public bool CanBeManagedByPackagePilot => Actions.Any(action =>
+        action.Kind is InstalledAppActionKind.UninstallWithWinget
+            or InstalledAppActionKind.RemoveMsix);
 }
 
 /// <summary>A concrete installation reported by one inventory provider.</summary>
@@ -94,7 +102,8 @@ public enum AppIconSourceKind
 {
     BoundedHttpsMetadata,
     MsixPackageAsset,
-    ValidatedLocalResource
+    ValidatedLocalResource,
+    ValidatedExecutableResource
 }
 
 public sealed record InstalledAppAlias(InstalledAppAliasKind Kind, string Value);

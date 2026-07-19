@@ -119,6 +119,8 @@ public sealed class PackageListItem : INotifyPropertyChanged
         get => _requiresAdministratorRetry;
         set => SetProperty(ref _requiresAdministratorRetry, value);
     }
+    public bool IsManageabilityKnown { get; set; }
+    public bool IsManageableByPackagePilot { get; set; }
     public string? InstalledAppId { get; set; }
     public InstalledAppActionKind? InstalledActionKind { get; set; }
     public PackageKey? WingetPackage { get; set; }
@@ -177,6 +179,8 @@ public sealed class PackageListItem : INotifyPropertyChanged
         PackageFullName = source.PackageFullName;
         ActionDestination = source.ActionDestination;
         RequiresElevation = source.RequiresElevation;
+        IsManageabilityKnown = source.IsManageabilityKnown;
+        IsManageableByPackagePilot = source.IsManageableByPackagePilot;
     }
 
     internal PackageListItemKey StableKey => new(
@@ -246,6 +250,8 @@ internal static class PackageListItemComparer
                         || left.RequiresAdministratorRetry != right.RequiresAdministratorRetry))
                 || !string.Equals(left.IconGlyph, right.IconGlyph, StringComparison.Ordinal)
                 || left.RequiresElevation != right.RequiresElevation
+                || left.IsManageabilityKnown != right.IsManageabilityKnown
+                || left.IsManageableByPackagePilot != right.IsManageableByPackagePilot
                 || left.RequestedOperationKind != right.RequestedOperationKind
                 || left.InstalledActionKind != right.InstalledActionKind
                 || left.WingetPackage != right.WingetPackage

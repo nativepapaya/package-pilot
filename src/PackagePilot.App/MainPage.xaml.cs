@@ -1681,7 +1681,7 @@ public sealed partial class MainPage : Page
             _installedPage.SetPackages(
                 ViewModel.InstalledAppProviders.Count > 0 || ViewModel.InstalledApps.Count > 0
                     ? ViewModel.InstalledApps.Select(ToViewItem)
-                    : ViewModel.InstalledPackages.Select(item => ToViewItem(item, "Uninstall")));
+                    : ViewModel.InstalledPackages.Select(ToInstalledFallbackViewItem));
             _installedPage.SetMutationActionsAvailable(ViewModel.CanQueuePackageMutations);
             MarkFirstContent(DestinationChangeFlags.Installed, ViewModel.InstalledApps.Count);
         }
@@ -1922,6 +1922,9 @@ public sealed partial class MainPage : Page
                 : "Cached — confirming",
             StateGlyph = inventoryIsAuthoritative ? "\uE73E" : "\uE895",
             IsPositiveState = inventoryIsAuthoritative,
+            IsManageabilityKnown = inventoryIsAuthoritative,
+            IsManageableByPackagePilot = inventoryIsAuthoritative
+                && app.CanBeManagedByPackagePilot,
             ActionLabel = inventoryIsAuthoritative
                 ? action?.Label ?? "Managed by Windows"
                 : "Refreshing…",
@@ -1944,6 +1947,14 @@ public sealed partial class MainPage : Page
                 .Where(version => !string.IsNullOrWhiteSpace(version))
                 .Distinct(StringComparer.OrdinalIgnoreCase))
         };
+    }
+
+    private PackageListItem ToInstalledFallbackViewItem(PackageSummary package)
+    {
+        var item = ToViewItem(package, "Uninstall");
+        item.IsManageabilityKnown = ViewModel.IsInstalledInventoryAuthoritative;
+        item.IsManageableByPackagePilot = true;
+        return item;
     }
 
     private static void ReplaceAll<T>(ICollection<T> target, IEnumerable<T> values)

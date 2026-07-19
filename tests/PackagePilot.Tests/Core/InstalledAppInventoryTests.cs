@@ -28,6 +28,33 @@ public sealed class InstalledAppInventoryTests
     }
 
     [Fact]
+    public void Merger_PrefersAnInstalledIconResourceOverRemoteCatalogArtwork()
+    {
+        var remote = new AppIconReference
+        {
+            Kind = AppIconSourceKind.BoundedHttpsMetadata,
+            Uri = new Uri("https://example.test/catalog.png")
+        };
+        var local = new AppIconReference
+        {
+            Kind = AppIconSourceKind.MsixPackageAsset,
+            ResourcePath = @"C:\Program Files\WindowsApps\Contoso\Assets\StoreLogo.png"
+        };
+        var winget = Winget(
+            "winget-app",
+            "Contoso",
+            new InstalledAppAlias(InstalledAppAliasKind.PackageFamilyName, FamilyName)) with
+        {
+            Icon = remote
+        };
+        var msix = Msix("msix-app", "Contoso", FamilyName) with { Icon = local };
+
+        var app = Assert.Single(new ExactInstalledAppMerger().Merge([winget, msix]));
+
+        Assert.Same(local, app.Icon);
+    }
+
+    [Fact]
     public void Merger_JoinsWingetAndRegistryByCanonicalProductCode()
     {
         var apps = new ExactInstalledAppMerger().Merge(
@@ -136,6 +163,7 @@ public sealed class InstalledAppInventoryTests
         var action = Assert.Single(app.Actions);
         Assert.Equal(InstalledAppActionKind.UninstallWithWinget, action.Kind);
         Assert.True(action.IsPrimary);
+        Assert.True(app.CanBeManagedByPackagePilot);
     }
 
     [Fact]
@@ -192,6 +220,7 @@ public sealed class InstalledAppInventoryTests
             action => action.Kind is InstalledAppActionKind.UninstallWithWinget
                 or InstalledAppActionKind.RemoveMsix);
         Assert.Equal(InstalledAppActionKind.OpenStoreUpdates, app.PrimaryAction?.Kind);
+        Assert.False(app.CanBeManagedByPackagePilot);
     }
 
     [Fact]
@@ -207,6 +236,7 @@ public sealed class InstalledAppInventoryTests
         Assert.True(remove.IsPrimary);
         Assert.True(remove.RequiresConfirmation);
         Assert.False(remove.CanCancel);
+        Assert.True(app.CanBeManagedByPackagePilot);
         Assert.False(app.Actions.Single(action =>
             action.Kind == InstalledAppActionKind.OpenStoreUpdates).IsPrimary);
     }
@@ -252,11 +282,17 @@ public sealed class InstalledAppInventoryTests
         var action = Assert.Single(app.Actions);
         Assert.Equal(InstalledAppActionKind.OpenInstalledApps, action.Kind);
         Assert.Equal("ms-settings", action.Destination?.Scheme);
+        Assert.False(app.CanBeManagedByPackagePilot);
     }
 
     [Fact]
     public async Task RegistryProvider_MapsProductCodeWithoutExposingAnUninstallAction()
     {
+        var icon = new AppIconReference
+        {
+            Kind = AppIconSourceKind.ValidatedExecutableResource,
+            ResourcePath = @"C:\Program Files\Contoso\Contoso.exe"
+        };
         var reader = new StubRegistryReader(new RegistryUninstallReadResult
         {
             Entries =
@@ -266,6 +302,7 @@ public sealed class InstalledAppInventoryTests
                     LocationId = "HKLM64",
                     SubKeyName = ProductCode,
                     DisplayName = "Contoso",
+                    Icon = icon,
                     Scope = InstallerScope.Machine
                 }
             ]
@@ -275,6 +312,7 @@ public sealed class InstalledAppInventoryTests
 
         var installation = Assert.Single(result.Installations);
         Assert.False(installation.SupportsDirectRemoval);
+        Assert.Same(icon, installation.Icon);
         Assert.Contains(installation.Aliases, alias =>
             alias.Kind == InstalledAppAliasKind.ProductCode && alias.Value == ProductCode);
     }
