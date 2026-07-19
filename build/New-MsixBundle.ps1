@@ -32,6 +32,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'NativeCommand.ps1')
 
 function Get-MsixIdentity {
     param(
@@ -216,10 +217,21 @@ try {
         Copy-Item -LiteralPath $record.Path -Destination (Join-Path $resolvedStagingDirectory $stagedName)
     }
 
-    & $makeAppx 'bundle' '/v' '/o' '/bv' $firstIdentity.Version '/d' $resolvedStagingDirectory '/p' $resolvedOutput
-    if ($LASTEXITCODE -ne 0) {
-        throw "MakeAppx bundle failed with exit code $LASTEXITCODE."
-    }
+    Invoke-NativeChecked `
+        -FilePath $makeAppx `
+        -ArgumentList @(
+            'bundle'
+            '/v'
+            '/o'
+            '/bv'
+            $firstIdentity.Version
+            '/d'
+            $resolvedStagingDirectory
+            '/p'
+            $resolvedOutput
+        ) `
+        -Activity 'Create Package Pilot MSIX bundle' `
+        -OutputMode Stream
 
     $bundleIdentity = Get-MsixBundleIdentity -Path $resolvedOutput
     if ($bundleIdentity.Name -ne $firstIdentity.Name -or

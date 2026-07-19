@@ -33,10 +33,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'NativeCommand.ps1')
 
 $script:CertificateSubject = 'CN=PackagePilot.Dev'
 $script:CertificateFriendlyName = 'Package Pilot manual release signing'
 $script:GhExecutable = $null
+$script:ReleaseJsonValidatorPath = Join-Path $PSScriptRoot 'Test-JsonSchema.ps1'
 $Repository = 'nativepapaya/package-pilot'
 $PreparedStateFileName = 'prepared-release.json'
 $PreparedStateSignatureFileName = 'prepared-release.json.sig'
@@ -75,6 +77,7 @@ $RequiredApplicationPayloadNames = @(
     'Microsoft.Windows.ApplicationModel.Background.Projection.dll'
     'Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.dll'
 )
+$ForbiddenPowerShellPayloadPattern = '(?i)(^|/)(?:powershell(?:[.]exe)?|pwsh(?:[.](?:exe|dll))?|System[.]Management[.]Automation[.]dll|Microsoft[.]PowerShell[.][^/]+|[^/]+[.](?:ps1|psm1|psd1))$'
 
 function Invoke-GhJson {
     param(
@@ -82,15 +85,19 @@ function Invoke-GhJson {
         [string[]]$Arguments
     )
 
-    $output = & $script:GhExecutable @Arguments
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) {
-        throw "gh $($Arguments -join ' ') failed with exit code $exitCode."
-    }
+    $output = @(Invoke-NativeChecked `
+        -FilePath $script:GhExecutable `
+        -ArgumentList $Arguments `
+        -Activity 'Query GitHub release data' `
+        -OutputMode Capture)
 
     $json = $output -join [Environment]::NewLine
     if ([string]::IsNullOrWhiteSpace($json)) {
         return $null
+    }
+
+    if ($PSVersionTable.PSVersion -ge [Version]'7.5') {
+        return $json | ConvertFrom-Json -DateKind String
     }
 
     return $json | ConvertFrom-Json
@@ -102,10 +109,87 @@ function Invoke-GhCommand {
         [string[]]$Arguments
     )
 
-    & $script:GhExecutable @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "gh $($Arguments -join ' ') failed with exit code $LASTEXITCODE."
+    Invoke-NativeChecked `
+        -FilePath $script:GhExecutable `
+        -ArgumentList $Arguments `
+        -Activity 'Run GitHub release command' `
+        -OutputMode Stream
+}
+
+function Get-PowerShell7Executable {
+    $currentHostPath = Join-Path $PSHOME 'pwsh.exe'
+    if ($PSVersionTable.PSVersion.Major -ge 7 -and
+        (Test-Path -LiteralPath $currentHostPath -PathType Leaf)) {
+        return $currentHostPath
     }
+
+    foreach ($commandName in @('pwsh.exe', 'pwsh')) {
+        $command = Get-Command $commandName -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $command) {
+            return $command.Source
+        }
+    }
+
+    throw 'PowerShell 7.5 or later is required for strict release JSON validation.'
+}
+
+function Assert-ReleaseJsonSchema {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('ReleaseMetadata', 'PreparedRelease')]
+        [string]$DocumentKind,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [byte[]]$Bytes
+    )
+
+    $validatorPath = $script:ReleaseJsonValidatorPath
+    if (-not (Test-Path -LiteralPath $validatorPath -PathType Leaf)) {
+        throw 'The committed strict release JSON validator is missing.'
+    }
+
+    if ($Bytes.Length -eq 0 -or $Bytes.Length -gt 16384) {
+        throw "The $DocumentKind JSON byte payload has an invalid size."
+    }
+
+    $powerShell7 = Get-PowerShell7Executable
+    Invoke-NativeChecked `
+        -FilePath $powerShell7 `
+        -ArgumentList @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-File'
+            $validatorPath
+            '-DocumentKind'
+            $DocumentKind
+            '-Base64Utf8Json'
+            [Convert]::ToBase64String($Bytes)
+        ) `
+        -Activity "Validate $DocumentKind JSON" `
+        -OutputMode Discard
+}
+
+function ConvertFrom-ReleaseJson {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [byte[]]$Bytes
+    )
+
+    try {
+        $json = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes)
+    }
+    catch {
+        throw 'The release JSON byte payload is not valid UTF-8.'
+    }
+    if ($PSVersionTable.PSVersion -ge [Version]'7.5') {
+        return $json | ConvertFrom-Json -DateKind String
+    }
+
+    return $json | ConvertFrom-Json
 }
 
 function Test-NonExportablePrivateKey {
@@ -244,6 +328,12 @@ function Get-MsixIdentityFromArchive {
             if ($null -eq $Archive.GetEntry($entryName)) {
                 throw "'$DisplayName' is missing required application payload '$entryName'."
             }
+        }
+        $forbiddenPowerShellPayload = @($Archive.Entries | Where-Object {
+            $_.FullName -match $ForbiddenPowerShellPayloadPattern
+        } | ForEach-Object FullName)
+        if ($forbiddenPowerShellPayload.Count -ne 0) {
+            throw "'$DisplayName' contains forbidden PowerShell runtime payload '$($forbiddenPowerShellPayload -join ', ')'."
         }
     }
 
@@ -704,6 +794,85 @@ function Get-NewerBlockingReleaseRuns {
     return @($blockingRuns)
 }
 
+function Get-ReleaseChecksumLines {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Directory,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$FileNames
+    )
+
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $checksumRecords = @(
+            $FileNames | ForEach-Object -Parallel {
+                $fileName = $_
+                try {
+                    $hash = Get-FileHash `
+                        -LiteralPath (Join-Path $using:Directory $fileName) `
+                        -Algorithm SHA256 `
+                        -ErrorAction Stop
+                    [pscustomobject]@{
+                        Name = $fileName
+                        Sha256 = $hash.Hash.ToLowerInvariant()
+                        Error = $null
+                    }
+                }
+                catch {
+                    [pscustomobject]@{
+                        Name = $fileName
+                        Sha256 = $null
+                        Error = $_.Exception.Message
+                    }
+                }
+            } -ThrottleLimit 4
+        )
+    }
+    else {
+        $checksumRecords = @(
+            foreach ($fileName in $FileNames) {
+                try {
+                    $hash = Get-FileHash `
+                        -LiteralPath (Join-Path $Directory $fileName) `
+                        -Algorithm SHA256 `
+                        -ErrorAction Stop
+                    [pscustomobject]@{
+                        Name = $fileName
+                        Sha256 = $hash.Hash.ToLowerInvariant()
+                        Error = $null
+                    }
+                }
+                catch {
+                    [pscustomobject]@{
+                        Name = $fileName
+                        Sha256 = $null
+                        Error = $_.Exception.Message
+                    }
+                }
+            }
+        )
+    }
+
+    $checksumFailures = @($checksumRecords | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_.Error)
+    } | Sort-Object Name)
+    $actualNames = @($checksumRecords | ForEach-Object Name | Sort-Object)
+    $expectedNames = @($FileNames | Sort-Object)
+    if ($checksumRecords.Count -ne $FileNames.Count -or
+        ($actualNames -join ',') -ne ($expectedNames -join ',') -or
+        $checksumFailures.Count -ne 0) {
+        $failureSummary = $checksumFailures | ForEach-Object {
+            "$($_.Name): $($_.Error)"
+        }
+        throw "Release checksum generation failed: $($failureSummary -join ' | ')"
+    }
+
+    return @($checksumRecords | Sort-Object Name | ForEach-Object {
+        "$($_.Sha256) *$($_.Name)"
+    })
+}
+
 function New-PreparedFileRecord {
     param(
         [Parameter(Mandatory)]
@@ -746,10 +915,13 @@ function Write-SignedPreparedState {
     }
 
     $json = $State | ConvertTo-Json -Depth 8
-    [IO.File]::WriteAllText(
-        $statePath,
-        $json + [Environment]::NewLine,
-        [Text.UTF8Encoding]::new($false))
+    $stateBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        $json + [Environment]::NewLine)
+    [IO.File]::WriteAllBytes($statePath, $stateBytes)
+
+    Assert-ReleaseJsonSchema `
+        -DocumentKind PreparedRelease `
+        -Bytes $stateBytes
 
     $privateKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey(
         $Certificate)
@@ -759,7 +931,7 @@ function Write-SignedPreparedState {
 
     try {
         $signature = $privateKey.SignData(
-            [IO.File]::ReadAllBytes($statePath),
+            $stateBytes,
             [Security.Cryptography.HashAlgorithmName]::SHA256,
             [Security.Cryptography.RSASignaturePadding]::Pkcs1)
         [IO.File]::WriteAllText(
@@ -788,6 +960,7 @@ function Read-AndVerifyPreparedState {
         throw 'The prepared release state or its detached signature is missing.'
     }
 
+    $stateBytes = [IO.File]::ReadAllBytes($statePath)
     try {
         $signature = [Convert]::FromBase64String(
             (Get-Content -LiteralPath $signaturePath -Raw).Trim())
@@ -804,7 +977,7 @@ function Read-AndVerifyPreparedState {
 
     try {
         $isValid = $publicKey.VerifyData(
-            [IO.File]::ReadAllBytes($statePath),
+            $stateBytes,
             $signature,
             [Security.Cryptography.HashAlgorithmName]::SHA256,
             [Security.Cryptography.RSASignaturePadding]::Pkcs1)
@@ -816,7 +989,10 @@ function Read-AndVerifyPreparedState {
         throw 'The prepared release state signature is invalid.'
     }
 
-    return Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    Assert-ReleaseJsonSchema `
+        -DocumentKind PreparedRelease `
+        -Bytes $stateBytes
+    return ConvertFrom-ReleaseJson -Bytes $stateBytes
 }
 
 function Assert-PreparedDirectory {
@@ -1032,9 +1208,17 @@ if ($null -eq $ghCommand) {
 }
 $script:GhExecutable = $ghCommand.Source
 
-& $script:GhExecutable 'auth' 'status' '--hostname' 'github.com' *> $null
-if ($LASTEXITCODE -ne 0) {
-    throw 'GitHub CLI is not authenticated. Run gh auth login before publishing.'
+try {
+    Invoke-NativeChecked `
+        -FilePath $script:GhExecutable `
+        -ArgumentList @('auth', 'status', '--hostname', 'github.com') `
+        -Activity 'Verify GitHub CLI authentication' `
+        -OutputMode Discard
+}
+catch {
+    throw [InvalidOperationException]::new(
+        'GitHub CLI is not authenticated. Run gh auth login before publishing.',
+        $_.Exception)
 }
 
 $workflowDefinition = Invoke-GhJson -Arguments @(
@@ -1275,7 +1459,11 @@ try {
     if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
         throw 'The downloaded artifact does not contain release-metadata.json.'
     }
-    $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+    $metadataBytes = [IO.File]::ReadAllBytes($metadataPath)
+    Assert-ReleaseJsonSchema `
+        -DocumentKind ReleaseMetadata `
+        -Bytes $metadataBytes
+    $metadata = ConvertFrom-ReleaseJson -Bytes $metadataBytes
     foreach ($propertyName in @(
         'schemaVersion'
         'packageVersion'
@@ -1431,14 +1619,29 @@ try {
             throw 'SignTool.exe was not found in the Windows 10/11 SDK.'
         }
 
-        & $signTool.FullName 'sign' '/fd' 'SHA256' '/sha1' $certificate.Thumbprint '/s' 'My' '/tr' 'http://timestamp.acs.microsoft.com' '/td' 'SHA256' $packagePath
-        if ($LASTEXITCODE -ne 0) {
-            throw "SignTool bundle signing failed with exit code $LASTEXITCODE."
-        }
-        & $signTool.FullName 'verify' '/pa' '/all' '/v' $packagePath
-        if ($LASTEXITCODE -ne 0) {
-            throw "SignTool bundle verification failed with exit code $LASTEXITCODE."
-        }
+        Invoke-NativeChecked `
+            -FilePath $signTool.FullName `
+            -ArgumentList @(
+                'sign'
+                '/fd'
+                'SHA256'
+                '/sha1'
+                $certificate.Thumbprint
+                '/s'
+                'My'
+                '/tr'
+                'http://timestamp.acs.microsoft.com'
+                '/td'
+                'SHA256'
+                $packagePath
+            ) `
+            -Activity 'Sign Package Pilot MSIX bundle' `
+            -OutputMode Stream
+        Invoke-NativeChecked `
+            -FilePath $signTool.FullName `
+            -ArgumentList @('verify', '/pa', '/all', '/v', $packagePath) `
+            -Activity 'Verify Package Pilot MSIX bundle signature' `
+            -OutputMode Stream
 
         Export-Certificate -Cert $certificate -FilePath $certificatePath | Out-Null
         $checksumNames = @(
@@ -1448,10 +1651,9 @@ try {
             'PackagePilot.cer'
             'PackagePilot.appinstaller'
         )
-        $checksumLines = foreach ($fileName in $checksumNames) {
-            $hash = Get-FileHash -LiteralPath (Join-Path $resolvedWorkingDirectory $fileName) -Algorithm SHA256
-            "$($hash.Hash.ToLowerInvariant()) *$fileName"
-        }
+        $checksumLines = Get-ReleaseChecksumLines `
+            -Directory $resolvedWorkingDirectory `
+            -FileNames $checksumNames
         $checksumLines | Set-Content -LiteralPath $checksumPath -Encoding ascii
     }
 

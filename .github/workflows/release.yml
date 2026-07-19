@@ -36,6 +36,14 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Verify PowerShell tooling
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSVersion -lt [Version]'7.5') {
+              throw 'Package Pilot repository tooling requires PowerShell 7.5 or later.'
+          }
+          Write-Host "Using PowerShell $($PSVersionTable.PSVersion)."
+
       - name: Calculate release version
         id: version
         shell: pwsh
@@ -84,12 +92,23 @@ jobs:
         run: |
           ./build/tests/New-AppInstaller.Tests.ps1
           ./build/tests/New-MsixBundle.Tests.ps1
+          ./build/tests/JsonSchema.Tests.ps1
+          ./build/tests/NativeCommand.Tests.ps1
+          ./build/tests/ParallelPackageBuild.Tests.ps1
           ./build/tests/PackagingArchitecture.Tests.ps1
           ./build/tests/Set-PackageVersion.Tests.ps1
+          ./build/tests/StageUnsignedRelease.Tests.ps1
+
+      - name: Test manual release security on PowerShell 7
+        shell: pwsh
+        run: ./build/tests/ManualReleaseSecurity.Tests.ps1
 
       - name: Test manual release security on Windows PowerShell 5.1
         shell: powershell
-        run: ./build/tests/ManualReleaseSecurity.Tests.ps1
+        run: |
+          ./build/tests/New-MsixBundle.Tests.ps1
+          ./build/tests/NativeCommand.Tests.ps1
+          ./build/tests/ManualReleaseSecurity.Tests.ps1
 
       - name: Set package version
         shell: pwsh
@@ -101,36 +120,20 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($build in @(
-              @{ Platform = 'x64'; Runtime = 'win-x64' }
-              @{ Platform = 'ARM64'; Runtime = 'win-arm64' }
-          )) {
-              $packageOutput = Join-Path $env:RUNNER_TEMP "AppPackages\$($build.Platform.ToLowerInvariant())"
-              $packageOutputWithSeparator = $packageOutput + [IO.Path]::DirectorySeparatorChar
-              $arguments = @(
-                  'publish'
-                  'src/PackagePilot.App/PackagePilot.App.csproj'
-                  '--configuration'
-                  'Release'
-                  '--runtime'
-                  $build.Runtime
-                  '--self-contained'
-                  'false'
-                  "-p:Platform=$($build.Platform)"
-                  '-p:GenerateAppxPackageOnBuild=true'
-                  '-p:AppxPackageSigningEnabled=false'
-                  '-p:AppxBundle=Never'
-                  '-p:AppxSymbolPackageEnabled=false'
-                  '-p:UapAppxPackageBuildMode=SideloadOnly'
-                  '-p:WindowsAppSDKSelfContained=false'
-                  "-p:AppxPackageDir=$packageOutputWithSeparator"
-              )
+          ./build/Build-UnsignedPackages.ps1 `
+              -ArtifactsRoot (Join-Path $env:RUNNER_TEMP 'PackagePilotBuild') `
+              -PackageOutputRoot (Join-Path $env:RUNNER_TEMP 'AppPackages') `
+              -LogDirectory (Join-Path $env:RUNNER_TEMP 'PackagePilotBuildLogs') |
+              Format-Table -AutoSize
 
-              & dotnet @arguments
-              if ($LASTEXITCODE -ne 0) {
-                  throw "dotnet publish failed for $($build.Platform) with exit code $LASTEXITCODE."
-              }
-          }
+      - name: Upload package build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-pilot-build-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\PackagePilotBuildLogs
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Stage unsigned release assets
         shell: pwsh
@@ -138,140 +141,13 @@ jobs:
           PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
         run: |
           $ErrorActionPreference = 'Stop'
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-          function Get-MsixIdentity {
-              param([Parameter(Mandatory)][string]$Path)
-
-              $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
-              try {
-                  $manifestEntry = $archive.GetEntry('AppxManifest.xml')
-                  if ($null -eq $manifestEntry) {
-                      throw "'$Path' does not contain AppxManifest.xml."
-                  }
-
-                  $reader = [System.IO.StreamReader]::new($manifestEntry.Open())
-                  try {
-                      [xml]$manifest = $reader.ReadToEnd()
-                  }
-                  finally {
-                      $reader.Dispose()
-                  }
-
-                  $identity = $manifest.Package.Identity
-                  [pscustomobject]@{
-                      Name = [string]$identity.Name
-                      Publisher = [string]$identity.Publisher
-                      Version = [string]$identity.Version
-                      ProcessorArchitecture = [string]$identity.ProcessorArchitecture
-                      HasSignature = $null -ne $archive.GetEntry('AppxSignature.p7x')
-                  }
-              }
-              finally {
-                  $archive.Dispose()
-              }
-          }
-
-          function Assert-PackagePayload {
-              param([Parameter(Mandatory)][string]$Path)
-
-              $requiredEntries = @(
-                  'PackagePilot.Windows.ReadOnly.dll'
-                  'PackagePilot.Background.exe'
-                  'PackagePilot.Background.dll'
-                  'PackagePilot.Background.deps.json'
-                  'PackagePilot.Background.runtimeconfig.json'
-                  'PackagePilot.Background.pri'
-                  'PackagePilot.PackageAdmin.exe'
-                  'PackagePilot.PackageAdmin.dll'
-                  'PackagePilot.PackageAdmin.deps.json'
-                  'PackagePilot.PackageAdmin.runtimeconfig.json'
-                  'PackagePilot.SourceAdmin.exe'
-                  'PackagePilot.SourceAdmin.dll'
-                  'PackagePilot.SourceAdmin.deps.json'
-                  'PackagePilot.SourceAdmin.runtimeconfig.json'
-                  'Microsoft.Management.Deployment.CsWinRTProjection.dll'
-                  'Microsoft.Management.Deployment.dll'
-                  'Microsoft.Management.Deployment.winmd'
-                  'Microsoft.Windows.ApplicationModel.Background.Projection.dll'
-                  'Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.dll'
-              )
-
-              $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
-              try {
-                  foreach ($entryName in $requiredEntries) {
-                      if ($null -eq $archive.GetEntry($entryName)) {
-                          throw "'$Path' is missing packaged companion payload '$entryName'."
-                      }
-                  }
-              }
-              finally {
-                  $archive.Dispose()
-              }
-          }
-
           $packageOutput = Join-Path $env:RUNNER_TEMP 'AppPackages'
           $stagingDirectory = Join-Path $env:RUNNER_TEMP 'package-pilot-unsigned'
-          [IO.Directory]::CreateDirectory($stagingDirectory) | Out-Null
-
-          $payloads = @{}
-          foreach ($architecture in @('x64', 'arm64')) {
-              $architectureOutput = Join-Path $packageOutput $architecture
-              $mainPackages = @()
-              $runtimePackages = @()
-              foreach ($package in Get-ChildItem -LiteralPath $architectureOutput -Recurse -File -Filter '*.msix') {
-                  $identity = Get-MsixIdentity -Path $package.FullName
-                  if ($identity.Name -eq 'PackagePilot.Desktop' -and
-                      $identity.ProcessorArchitecture -eq $architecture) {
-                      $mainPackages += [pscustomobject]@{ File = $package; Identity = $identity }
-                  }
-                  elseif ($identity.Name -eq 'Microsoft.WindowsAppRuntime.2' -and
-                      $identity.ProcessorArchitecture -eq $architecture) {
-                      $runtimePackages += [pscustomobject]@{ File = $package; Identity = $identity }
-                  }
-              }
-
-              if ($mainPackages.Count -ne 1) {
-                  throw "Expected one $architecture PackagePilot.Desktop MSIX, but found $($mainPackages.Count)."
-              }
-              if ($runtimePackages.Count -ne 1) {
-                  throw "Expected one $architecture Microsoft.WindowsAppRuntime.2 dependency MSIX, but found $($runtimePackages.Count)."
-              }
-
-              $mainPackage = $mainPackages[0]
-              $runtimePackage = $runtimePackages[0]
-              Assert-PackagePayload -Path $mainPackage.File.FullName
-              if ($mainPackage.Identity.Version -ne $env:PACKAGE_VERSION -or
-                  $mainPackage.Identity.Publisher -ne 'CN=PackagePilot.Dev' -or
-                  $mainPackage.Identity.HasSignature) {
-                  throw "The $architecture Package Pilot package identity, publisher, version, or signature state is invalid."
-              }
-              if ($runtimePackage.Identity.Version -ne '2.2.0.0' -or
-                  $runtimePackage.Identity.Publisher -ne 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US' -or
-                  -not $runtimePackage.Identity.HasSignature) {
-                  throw "The $architecture Windows App Runtime dependency identity or signature state is invalid."
-              }
-
-              $payloads[$architecture] = [pscustomobject]@{
-                  Main = $mainPackage
-                  Runtime = $runtimePackage
-              }
-          }
-
-          & ./build/New-MsixBundle.ps1 `
-              -X64PackagePath $payloads.x64.Main.File.FullName `
-              -Arm64PackagePath $payloads.arm64.Main.File.FullName `
-              -OutputPath (Join-Path $stagingDirectory 'PackagePilot.msixbundle') | Out-Null
-
-          Copy-Item -LiteralPath $payloads.x64.Runtime.File.FullName `
-              -Destination (Join-Path $stagingDirectory 'Microsoft.WindowsAppRuntime.2.x64.msix')
-          Copy-Item -LiteralPath $payloads.arm64.Runtime.File.FullName `
-              -Destination (Join-Path $stagingDirectory 'Microsoft.WindowsAppRuntime.2.arm64.msix')
-
-          & ./build/New-AppInstaller.ps1 `
+          ./build/Stage-UnsignedRelease.ps1 `
+              -PackageOutputDirectory $packageOutput `
+              -StagingDirectory $stagingDirectory `
               -Version $env:PACKAGE_VERSION `
-              -OutputPath (Join-Path $stagingDirectory 'PackagePilot.appinstaller') `
-              -Repository $env:GITHUB_REPOSITORY | Out-Null
+              -Repository $env:GITHUB_REPOSITORY
 
       - name: Create release metadata
         shell: pwsh
@@ -289,6 +165,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Set-StrictMode -Version Latest
+          if ($PSVersionTable.PSVersion -lt [Version]'7.5') {
+              throw 'Release metadata generation requires PowerShell 7.5 or later.'
+          }
 
           [uint64]$releaseSequence = 0
           if (-not [uint64]::TryParse($env:RELEASE_SEQUENCE, [ref]$releaseSequence) -or $releaseSequence -lt 5) {
@@ -373,7 +252,28 @@ jobs:
               $metadataJson + [Environment]::NewLine,
               [Text.UTF8Encoding]::new($false))
 
-          $validatedMetadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+          $metadataBytes = [IO.File]::ReadAllBytes($metadataPath)
+          ./build/Test-JsonSchema.ps1 `
+              -DocumentKind ReleaseMetadata `
+              -Base64Utf8Json ([Convert]::ToBase64String($metadataBytes)) | Out-Null
+
+          $expectedStagedNames = @(
+              'Microsoft.WindowsAppRuntime.2.arm64.msix'
+              'Microsoft.WindowsAppRuntime.2.x64.msix'
+              'PackagePilot.appinstaller'
+              'PackagePilot.msixbundle'
+              'release-metadata.json'
+          )
+          $stagedItems = @(Get-ChildItem -LiteralPath $stagingDirectory -Force)
+          $actualStagedNames = @($stagedItems | ForEach-Object Name | Sort-Object)
+          if ($stagedItems.Count -ne $expectedStagedNames.Count -or
+              ($actualStagedNames -join ',') -ne ($expectedStagedNames -join ',') -or
+              @($stagedItems | Where-Object { -not $_.PSIsContainer }).Count -ne $expectedStagedNames.Count) {
+              throw "The unsigned release artifact contains an unexpected file or directory: '$($actualStagedNames -join ',')'."
+          }
+
+          $validatedMetadata = [Text.UTF8Encoding]::new($false, $true).GetString($metadataBytes) |
+              ConvertFrom-Json -AsHashtable -DateKind String
           if ($validatedMetadata.schemaVersion -ne 2 -or
               $validatedMetadata.packageVersion -ne $env:PACKAGE_VERSION -or
               ($validatedMetadata.architectures -join ',') -ne 'x64,arm64' -or

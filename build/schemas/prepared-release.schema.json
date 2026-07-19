@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:packagepilot:schema:prepared-release:1",
+  "title": "Package Pilot signed prepared release state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "repository",
+    "workflowName",
+    "workflowDatabaseId",
+    "runId",
+    "runNumber",
+    "runAttempt",
+    "artifactId",
+    "artifactName",
+    "commitSha",
+    "releaseSequence",
+    "tagName",
+    "packageVersion",
+    "signerThumbprint",
+    "preparedAtUtc",
+    "sourceMetadata",
+    "assets"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "repository": {
+      "type": "string",
+      "const": "nativepapaya/package-pilot"
+    },
+    "workflowName": {
+      "type": "string",
+      "const": "Release"
+    },
+    "workflowDatabaseId": {
+      "$ref": "#/$defs/positiveUInt64"
+    },
+    "runId": {
+      "$ref": "#/$defs/positiveUInt64"
+    },
+    "runNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967291
+    },
+    "runAttempt": {
+      "$ref": "#/$defs/positiveUInt64"
+    },
+    "artifactId": {
+      "$ref": "#/$defs/positiveUInt64"
+    },
+    "artifactName": {
+      "type": "string",
+      "pattern": "^package-pilot-unsigned-[1-9][0-9]{0,19}-[1-9][0-9]{0,19}$"
+    },
+    "commitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "releaseSequence": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 4294967295
+    },
+    "tagName": {
+      "type": "string",
+      "pattern": "^v1[.]0[.]([5-9]|[1-9][0-9]{1,9})$"
+    },
+    "packageVersion": {
+      "type": "string",
+      "pattern": "^1[.]0[.](0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])[.](0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$"
+    },
+    "signerThumbprint": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{40}$"
+    },
+    "preparedAtUtc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9][.][0-9]{7}[+]00:00$"
+    },
+    "sourceMetadata": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fileRecord"
+        },
+        {
+          "properties": {
+            "name": {
+              "const": "release-metadata.json"
+            }
+          }
+        }
+      ]
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/fileRecord"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "PackagePilot.msixbundle"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/fileRecord"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "Microsoft.WindowsAppRuntime.2.x64.msix"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/fileRecord"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "Microsoft.WindowsAppRuntime.2.arm64.msix"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/fileRecord"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "PackagePilot.cer"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/fileRecord"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "PackagePilot.appinstaller"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/fileRecord"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "SHA256SUMS.txt"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "positiveUInt64": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "fileRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "size",
+        "sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

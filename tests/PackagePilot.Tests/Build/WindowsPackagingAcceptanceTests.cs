@@ -90,6 +90,103 @@ public sealed class WindowsPackagingAcceptanceTests
     }
 
     [Fact]
+    public void RepositoryToolingPrefersPowerShell7AndRetainsWindowsPowerShellSecurityGate()
+    {
+        string repositoryRoot = FindRepositoryRoot();
+        string releaseGuide = File.ReadAllText(Path.Combine(repositoryRoot, "docs", "releasing.md"));
+
+        Assert.Contains("pwsh -NoProfile -File", releaseGuide, StringComparison.Ordinal);
+        Assert.Contains("PowerShell 7.5 or later", releaseGuide, StringComparison.Ordinal);
+
+        Assert.True(File.Exists(Path.Combine(repositoryRoot, "build", "NativeCommand.ps1")));
+        Assert.True(File.Exists(Path.Combine(repositoryRoot, "build", "Build-UnsignedPackages.ps1")));
+        Assert.True(File.Exists(Path.Combine(repositoryRoot, "build", "Stage-UnsignedRelease.ps1")));
+        Assert.True(File.Exists(Path.Combine(repositoryRoot, "build", "schemas", "release-metadata.schema.json")));
+        Assert.True(File.Exists(Path.Combine(repositoryRoot, "build", "schemas", "prepared-release.schema.json")));
+
+        foreach ((string workflowPath, string toolingStepName) in new[]
+        {
+            (Path.Combine(repositoryRoot, ".github", "workflows", "ci.yml"), "Test release tooling"),
+            (Path.Combine(repositoryRoot, ".github", "workflows", "release.yml"), "Test release scripts"),
+        })
+        {
+            string workflow = File.ReadAllText(workflowPath);
+            string versionStep = ExtractWorkflowStep(workflow, "Verify PowerShell tooling");
+            Assert.Contains("shell: pwsh", versionStep, StringComparison.Ordinal);
+            Assert.Contains("[Version]'7.5'", versionStep, StringComparison.Ordinal);
+
+            string powershell7SecurityStep = ExtractWorkflowStep(
+                workflow,
+                "Test manual release security on PowerShell 7");
+            Assert.Contains("shell: pwsh", powershell7SecurityStep, StringComparison.Ordinal);
+            Assert.Contains("ManualReleaseSecurity.Tests.ps1", powershell7SecurityStep, StringComparison.Ordinal);
+
+            string windowsPowerShellSecurityStep = ExtractWorkflowStep(
+                workflow,
+                "Test manual release security on Windows PowerShell 5.1");
+            Assert.Contains("shell: powershell", windowsPowerShellSecurityStep, StringComparison.Ordinal);
+            Assert.Contains("New-MsixBundle.Tests.ps1", windowsPowerShellSecurityStep, StringComparison.Ordinal);
+            Assert.Contains("NativeCommand.Tests.ps1", windowsPowerShellSecurityStep, StringComparison.Ordinal);
+            Assert.Contains("ManualReleaseSecurity.Tests.ps1", windowsPowerShellSecurityStep, StringComparison.Ordinal);
+
+            string toolingStep = ExtractWorkflowStep(workflow, toolingStepName);
+            Assert.Contains("shell: pwsh", toolingStep, StringComparison.Ordinal);
+            foreach (string testScript in new[]
+            {
+                "New-AppInstaller.Tests.ps1",
+                "New-MsixBundle.Tests.ps1",
+                "JsonSchema.Tests.ps1",
+                "NativeCommand.Tests.ps1",
+                "ParallelPackageBuild.Tests.ps1",
+                "PackagingArchitecture.Tests.ps1",
+                "Set-PackageVersion.Tests.ps1",
+                "StageUnsignedRelease.Tests.ps1",
+            })
+            {
+                Assert.Contains(testScript, toolingStep, StringComparison.Ordinal);
+            }
+        }
+
+        string releaseWorkflow = File.ReadAllText(
+            Path.Combine(repositoryRoot, ".github", "workflows", "release.yml"));
+        Assert.Contains("Build-UnsignedPackages.ps1", releaseWorkflow, StringComparison.Ordinal);
+        Assert.Contains("Stage-UnsignedRelease.ps1", releaseWorkflow, StringComparison.Ordinal);
+        Assert.Contains("Test-JsonSchema.ps1", releaseWorkflow, StringComparison.Ordinal);
+
+        List<string> packagedProjectConfiguration = Directory.GetFiles(
+            Path.Combine(repositoryRoot, "src"),
+            "*.csproj",
+            SearchOption.AllDirectories).ToList();
+        foreach (string sharedBuildFileName in new[] { "Directory.Build.props", "Directory.Build.targets" })
+        {
+            string sharedBuildPath = Path.Combine(repositoryRoot, sharedBuildFileName);
+            if (File.Exists(sharedBuildPath))
+            {
+                packagedProjectConfiguration.Add(sharedBuildPath);
+            }
+        }
+
+        foreach (string projectPath in packagedProjectConfiguration)
+        {
+            string project = File.ReadAllText(projectPath);
+            Assert.DoesNotContain("System.Management.Automation", project, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Microsoft.PowerShell", project, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(".ps1", project, StringComparison.OrdinalIgnoreCase);
+        }
+
+        foreach (string releaseBoundaryPath in new[]
+        {
+            Path.Combine(repositoryRoot, "build", "Stage-UnsignedRelease.ps1"),
+            Path.Combine(repositoryRoot, "build", "Publish-ManualRelease.ps1"),
+        })
+        {
+            string releaseBoundary = File.ReadAllText(releaseBoundaryPath);
+            Assert.Contains("forbidden PowerShell runtime payload", releaseBoundary, StringComparison.Ordinal);
+            Assert.Contains("System[.]Management[.]Automation[.]dll", releaseBoundary, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void ManifestRegistersReadOnlyShellNotificationAndBackgroundIntegrations()
     {
         XDocument manifest = LoadManifest(FindRepositoryRoot());
@@ -596,6 +693,17 @@ public sealed class WindowsPackagingAcceptanceTests
             "PackagePilot.App",
             "Package.appxmanifest"));
 
+    private static string ExtractWorkflowStep(string workflow, string stepName)
+    {
+        string normalized = workflow.Replace("\r\n", "\n", StringComparison.Ordinal);
+        string marker = $"      - name: {stepName}\n";
+        int start = normalized.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"Workflow step '{stepName}' was not found.");
+
+        int next = normalized.IndexOf("\n      - name: ", start + marker.Length, StringComparison.Ordinal);
+        return next < 0 ? normalized[start..] : normalized[start..next];
+    }
+
     private static string FindRepositoryRoot()
     {
         string? configuredRoot = Environment.GetEnvironmentVariable("PACKAGEPILOT_REPO_ROOT");
@@ -625,12 +733,7 @@ public sealed class WindowsPackagingAcceptanceTests
 
     private static void RunPowerShellScript(string scriptPath, params string[] arguments)
     {
-        string windowsPowerShell = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System),
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
-        string executable = File.Exists(windowsPowerShell) ? windowsPowerShell : "pwsh";
+        (string executable, bool isWindowsPowerShell) = ResolvePowerShellHost();
 
         ProcessStartInfo startInfo = new(executable)
         {
@@ -641,7 +744,7 @@ public sealed class WindowsPackagingAcceptanceTests
         };
         startInfo.ArgumentList.Add("-NoLogo");
         startInfo.ArgumentList.Add("-NoProfile");
-        if (File.Exists(windowsPowerShell))
+        if (isWindowsPowerShell)
         {
             startInfo.ArgumentList.Add("-ExecutionPolicy");
             startInfo.ArgumentList.Add("Bypass");
@@ -665,5 +768,52 @@ public sealed class WindowsPackagingAcceptanceTests
             $"App Installer generation failed with exit code {process.ExitCode}.{Environment.NewLine}" +
             $"stdout:{Environment.NewLine}{standardOutput}{Environment.NewLine}" +
             $"stderr:{Environment.NewLine}{standardError}");
+    }
+
+    private static (string Executable, bool IsWindowsPowerShell) ResolvePowerShellHost()
+    {
+        string installedPowerShell7 = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "PowerShell",
+            "7",
+            "pwsh.exe");
+        if (File.Exists(installedPowerShell7))
+        {
+            return (installedPowerShell7, false);
+        }
+
+        foreach (string pathEntry in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string candidate;
+            try
+            {
+                candidate = Path.Combine(
+                    Environment.ExpandEnvironmentVariables(pathEntry.Trim('"')),
+                    "pwsh.exe");
+            }
+            catch (ArgumentException)
+            {
+                continue;
+            }
+
+            if (File.Exists(candidate))
+            {
+                return (candidate, false);
+            }
+        }
+
+        string windowsPowerShell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        if (File.Exists(windowsPowerShell))
+        {
+            return (windowsPowerShell, true);
+        }
+
+        throw new FileNotFoundException(
+            "PowerShell 7 or Windows PowerShell 5.1 is required for packaging acceptance tests.");
     }
 }

@@ -71,7 +71,9 @@ function New-TestApplicationMsixBytes {
 
         [switch]$OmitReadOnlyPayload,
 
-        [switch]$Signed
+        [switch]$Signed,
+
+        [switch]$IncludePowerShellPayload
     )
 
     $memory = [IO.MemoryStream]::new()
@@ -101,6 +103,12 @@ function New-TestApplicationMsixBytes {
                 -Archive $archive `
                 -Name $payloadName `
                 -Content ([Text.UTF8Encoding]::new($false).GetBytes("test:$payloadName"))
+        }
+        if ($IncludePowerShellPayload) {
+            Add-TestZipEntry `
+                -Archive $archive `
+                -Name 'tools/pwsh.exe' `
+                -Content ([byte[]](1, 2, 3, 4))
         }
         if ($Signed) {
             Add-TestZipEntry `
@@ -136,7 +144,9 @@ function New-TestMsixBundle {
 
         [switch]$Signed,
 
-        [switch]$OmitArm64Signature
+        [switch]$OmitArm64Signature,
+
+        [switch]$IncludePowerShellPayload
     )
 
     $packageRecords = @(
@@ -197,7 +207,8 @@ $packageXml
             $packageBytes = New-TestApplicationMsixBytes `
                 -Architecture $packageRecord.InnerArchitecture `
                 -OmitReadOnlyPayload:$packageRecord.OmitReadOnlyPayload `
-                -Signed:$packageSigned
+                -Signed:$packageSigned `
+                -IncludePowerShellPayload:$IncludePowerShellPayload
             Add-TestZipEntry `
                 -Archive $archive `
                 -Name $packageRecord.FileName `
@@ -220,12 +231,19 @@ $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $buildRoot '..')).Path
 $initializerPath = Join-Path $buildRoot 'Initialize-ManualReleaseCertificate.ps1'
 $publisherPath = Join-Path $buildRoot 'Publish-ManualRelease.ps1'
 $workflowPath = Join-Path $repositoryRoot '.github\workflows\release.yml'
+$parallelBuildPath = Join-Path $buildRoot 'Build-UnsignedPackages.ps1'
+$stageUnsignedReleasePath = Join-Path $buildRoot 'Stage-UnsignedRelease.ps1'
 
 $initializerAst = Assert-PowerShellParses -Path $initializerPath
 $publisherAst = Assert-PowerShellParses -Path $publisherPath
 $initializer = Get-Content -LiteralPath $initializerPath -Raw
 $publisher = Get-Content -LiteralPath $publisherPath -Raw
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
+$releaseTooling = @(
+    $workflow
+    (Get-Content -LiteralPath $parallelBuildPath -Raw)
+    (Get-Content -LiteralPath $stageUnsignedReleasePath -Raw)
+) -join [Environment]::NewLine
 
 $forbiddenPfxCommands = @($initializerAst, $publisherAst).ForEach({
     $_.FindAll(
@@ -282,6 +300,10 @@ Assert-True -Condition (
     $publisher -match [regex]::Escape('SignData(') -and
     $publisher -match [regex]::Escape('VerifyData(')) `
     -Message 'The durable prepared state must be signed and verified with the release certificate.'
+Assert-True -Condition (
+    $publisher -match [regex]::Escape(". (Join-Path `$PSScriptRoot 'NativeCommand.ps1')") -and
+    $publisher -match [regex]::Escape('Invoke-NativeChecked')) `
+    -Message 'The manual publisher must route native tools through the checked command boundary.'
 Assert-True -Condition (
     $publisher -match [regex]::Escape("'--draft'") -and
     $publisher -match [regex]::Escape("'--latest=false'") -and
@@ -409,11 +431,11 @@ Assert-True -Condition ($workflow -notmatch '(?i)PACKAGEPILOT_SIGNING_PFX|secret
 Assert-True -Condition ($workflow -match 'release-metadata\.json') `
     -Message 'The hosted Release workflow must include release-metadata.json.'
 Assert-True -Condition (
-    $workflow -match [regex]::Escape('New-MsixBundle.ps1') -and
-    $workflow -match [regex]::Escape('win-x64') -and
-    $workflow -match [regex]::Escape('win-arm64')) `
+    $releaseTooling -match [regex]::Escape('New-MsixBundle.ps1') -and
+    $releaseTooling -match [regex]::Escape('win-x64') -and
+    $releaseTooling -match [regex]::Escape('win-arm64')) `
     -Message 'The hosted Release workflow must build both architectures and create the bundle.'
-Assert-True -Condition ($workflow -match [regex]::Escape('PackagePilot.Windows.ReadOnly.dll')) `
+Assert-True -Condition ($releaseTooling -match [regex]::Escape('PackagePilot.Windows.ReadOnly.dll')) `
     -Message 'The hosted Release workflow must assert the read-only WinGet infrastructure payload.'
 foreach ($packageAdminPayload in @(
     'PackagePilot.PackageAdmin.exe'
@@ -423,7 +445,7 @@ foreach ($packageAdminPayload in @(
 )) {
     Assert-True -Condition (
         $publisher -match [regex]::Escape($packageAdminPayload) -and
-        $workflow -match [regex]::Escape($packageAdminPayload)) `
+        $releaseTooling -match [regex]::Escape($packageAdminPayload)) `
         -Message "Both release paths must require the privileged package helper payload '$packageAdminPayload'."
 }
 foreach ($requiredWinGetRuntimePayload in @(
@@ -433,7 +455,7 @@ foreach ($requiredWinGetRuntimePayload in @(
 )) {
     Assert-True -Condition (
         $publisher -match [regex]::Escape($requiredWinGetRuntimePayload) -and
-        $workflow -match [regex]::Escape($requiredWinGetRuntimePayload)) `
+        $releaseTooling -match [regex]::Escape($requiredWinGetRuntimePayload)) `
         -Message "Both release paths must assert the background WinGet runtime payload '$requiredWinGetRuntimePayload'."
 }
 Assert-True -Condition ($workflow -match '(?m)^\s*retention-days:\s*30\s*$') `
@@ -524,6 +546,42 @@ $readPreparedStateFunction = $publisherAst.Find(
             $node.Name -eq 'Read-AndVerifyPreparedState'
     },
     $true)
+$forbiddenPowerShellPayloadAssignment = $publisherAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Left.VariablePath.UserPath -eq 'ForbiddenPowerShellPayloadPattern'
+    },
+    $true)
+$getReleaseChecksumLinesFunction = $publisherAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-ReleaseChecksumLines'
+    },
+    $true)
+$getPowerShell7Function = $publisherAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-PowerShell7Executable'
+    },
+    $true)
+$assertReleaseJsonSchemaFunction = $publisherAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Assert-ReleaseJsonSchema'
+    },
+    $true)
+$convertFromReleaseJsonFunction = $publisherAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'ConvertFrom-ReleaseJson'
+    },
+    $true)
 $assertPreparedDirectoryFunction = $publisherAst.Find(
     {
         param($node)
@@ -543,17 +601,44 @@ Assert-True -Condition (
     $null -ne $assertCertificateFunction -and
     $null -ne $getReleaseCertificateFunction -and
     $null -ne $requiredPayloadAssignment -and
+    $null -ne $forbiddenPowerShellPayloadAssignment -and
     $null -ne $getMsixIdentityFromArchiveFunction -and
     $null -ne $getMsixBundleIdentityFunction -and
     $null -ne $assertEmbeddedSignaturesFunction -and
     $null -ne $getNewerBlockingRunsFunction -and
     $null -ne $assertPromotionPreconditionsFunction -and
     $null -ne $newPreparedFileRecordFunction -and
+    $null -ne $getReleaseChecksumLinesFunction -and
     $null -ne $writePreparedStateFunction -and
     $null -ne $readPreparedStateFunction -and
+    $null -ne $getPowerShell7Function -and
+    $null -ne $assertReleaseJsonSchemaFunction -and
+    $null -ne $convertFromReleaseJsonFunction -and
     $null -ne $assertPreparedDirectoryFunction -and
     $null -ne $assertGitHubAssetsFunction) `
     -Message 'The certificate validation functions could not be loaded for a runtime compatibility test.'
+$writePreparedStateText = $writePreparedStateFunction.Extent.Text
+$writeStateIndex = $writePreparedStateText.IndexOf('[IO.File]::WriteAllBytes(', [StringComparison]::Ordinal)
+$writeSchemaIndex = $writePreparedStateText.IndexOf('Assert-ReleaseJsonSchema', [StringComparison]::Ordinal)
+$signStateIndex = $writePreparedStateText.IndexOf('.SignData(', [StringComparison]::Ordinal)
+Assert-True -Condition (
+    $writeStateIndex -ge 0 -and
+    $writeSchemaIndex -gt $writeStateIndex -and
+    $signStateIndex -gt $writeSchemaIndex -and
+    $writePreparedStateText -match [regex]::Escape('-Bytes $stateBytes') -and
+    $writePreparedStateText -match [regex]::Escape('$stateBytes,')) `
+    -Message 'Prepared state must validate and sign the same exact bytes after they are written.'
+$readPreparedStateText = $readPreparedStateFunction.Extent.Text
+$verifyStateIndex = $readPreparedStateText.IndexOf('.VerifyData(', [StringComparison]::Ordinal)
+$readSchemaIndex = $readPreparedStateText.IndexOf('Assert-ReleaseJsonSchema', [StringComparison]::Ordinal)
+$parseStateIndex = $readPreparedStateText.IndexOf('ConvertFrom-ReleaseJson', [StringComparison]::Ordinal)
+Assert-True -Condition (
+    $verifyStateIndex -ge 0 -and
+    $readSchemaIndex -gt $verifyStateIndex -and
+    $parseStateIndex -gt $readSchemaIndex -and
+    $readPreparedStateText -match [regex]::Escape('-Bytes $stateBytes') -and
+    $readPreparedStateText -match [regex]::Escape('ConvertFrom-ReleaseJson -Bytes $stateBytes')) `
+    -Message 'Prepared state must verify, validate, and parse one exact byte array.'
 Assert-True -Condition (
     $assertEmbeddedSignaturesFunction.Extent.Text -match 'Get-AuthenticodeSignature' -and
     $assertEmbeddedSignaturesFunction.Extent.Text -match 'SignerCertificate\.Thumbprint' -and
@@ -566,15 +651,27 @@ Invoke-Expression $nonExportableFunction.Extent.Text
 Invoke-Expression $assertCertificateFunction.Extent.Text
 Invoke-Expression $getReleaseCertificateFunction.Extent.Text
 Invoke-Expression $requiredPayloadAssignment.Extent.Text
+Invoke-Expression $forbiddenPowerShellPayloadAssignment.Extent.Text
 Invoke-Expression $getMsixIdentityFromArchiveFunction.Extent.Text
 Invoke-Expression $getMsixBundleIdentityFunction.Extent.Text
 Invoke-Expression $getNewerBlockingRunsFunction.Extent.Text
 Invoke-Expression $assertPromotionPreconditionsFunction.Extent.Text
 Invoke-Expression $newPreparedFileRecordFunction.Extent.Text
+Invoke-Expression $getReleaseChecksumLinesFunction.Extent.Text
 Invoke-Expression $writePreparedStateFunction.Extent.Text
 Invoke-Expression $readPreparedStateFunction.Extent.Text
+Invoke-Expression $getPowerShell7Function.Extent.Text
+Invoke-Expression $assertReleaseJsonSchemaFunction.Extent.Text
+Invoke-Expression $convertFromReleaseJsonFunction.Extent.Text
 Invoke-Expression $assertPreparedDirectoryFunction.Extent.Text
 Invoke-Expression $assertGitHubAssetsFunction.Extent.Text
+. (Join-Path $buildRoot 'NativeCommand.ps1')
+$script:ReleaseJsonValidatorPath = Join-Path $buildRoot 'Test-JsonSchema.ps1'
+Assert-True -Condition (
+    $getReleaseChecksumLinesFunction.Extent.Text -match 'ForEach-Object\s+-Parallel' -and
+    $getReleaseChecksumLinesFunction.Extent.Text -match '-ThrottleLimit\s+4' -and
+    $getReleaseChecksumLinesFunction.Extent.Text -match 'Sort-Object\s+Name') `
+    -Message 'PowerShell 7 checksum work must be bounded and serialized deterministically by file name.'
 
 $Repository = 'nativepapaya/package-pilot'
 $firstWorkflowRunPage = @(1..100 | ForEach-Object {
@@ -791,6 +888,21 @@ try {
                 "*missing required application payload 'PackagePilot.Windows.ReadOnly.dll'*") `
         -Message "An embedded package without the read-only WinGet client was not rejected: '$expectedPayloadFailure'"
 
+    $powerShellPayloadBundlePath = Join-Path $bundleTestDirectory 'powershell-runtime.msixbundle'
+    New-TestMsixBundle `
+        -Path $powerShellPayloadBundlePath `
+        -IncludePowerShellPayload
+    $expectedPowerShellPayloadFailure = $null
+    try {
+        [void](Get-MsixBundleIdentity -Path $powerShellPayloadBundlePath)
+    }
+    catch {
+        $expectedPowerShellPayloadFailure = $_.Exception.Message
+    }
+    Assert-True `
+        -Condition ($expectedPowerShellPayloadFailure -like '*contains forbidden PowerShell runtime payload*tools/pwsh.exe*') `
+        -Message "An embedded PowerShell runtime payload was not rejected: '$expectedPowerShellPayloadFailure'"
+
     $wrongArchitectureBundlePath = Join-Path $bundleTestDirectory 'wrong-architecture.msixbundle'
     New-TestMsixBundle `
         -Path $wrongArchitectureBundlePath `
@@ -826,7 +938,65 @@ try {
             "test payload for $fileName",
             [Text.UTF8Encoding]::new($false))
     }
+    $checksumTestNames = @(
+        'SHA256SUMS.txt'
+        'PackagePilot.appinstaller'
+        'PackagePilot.cer'
+    )
+    $checksumTestLines = @(Get-ReleaseChecksumLines `
+        -Directory $preparedTestDirectory `
+        -FileNames $checksumTestNames)
+    $checksumLineNames = @($checksumTestLines | ForEach-Object {
+        ($_ -split ' \*', 2)[1]
+    })
+    Assert-True `
+        -Condition (($checksumLineNames -join ',') -eq 'PackagePilot.appinstaller,PackagePilot.cer,SHA256SUMS.txt') `
+        -Message 'Release checksum lines were not returned in deterministic file-name order.'
+    foreach ($checksumLine in $checksumTestLines) {
+        $parts = $checksumLine -split ' \*', 2
+        $expectedHash = (Get-FileHash `
+            -LiteralPath (Join-Path $preparedTestDirectory $parts[1]) `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+        Assert-True `
+            -Condition ($parts[0] -eq $expectedHash) `
+            -Message "Release checksum content was incorrect for '$($parts[1])'."
+    }
+    $checksumFailureMessage = $null
+    try {
+        [void](Get-ReleaseChecksumLines `
+            -Directory $preparedTestDirectory `
+            -FileNames @('z-missing.bin', 'a-missing.bin', 'm-missing.bin'))
+    }
+    catch {
+        $checksumFailureMessage = $_.Exception.Message
+    }
+    Assert-True `
+        -Condition (
+            -not [string]::IsNullOrWhiteSpace($checksumFailureMessage) -and
+            $checksumFailureMessage.Contains('a-missing.bin') -and
+            $checksumFailureMessage.Contains('m-missing.bin') -and
+            $checksumFailureMessage.Contains('z-missing.bin') -and
+            $checksumFailureMessage.IndexOf('a-missing.bin', [StringComparison]::Ordinal) -lt
+                $checksumFailureMessage.IndexOf('m-missing.bin', [StringComparison]::Ordinal) -and
+            $checksumFailureMessage.IndexOf('m-missing.bin', [StringComparison]::Ordinal) -lt
+                $checksumFailureMessage.IndexOf('z-missing.bin', [StringComparison]::Ordinal)) `
+        -Message 'Parallel checksum failures were not reported in deterministic file-name order.'
     $testState = [ordered]@{
+        schemaVersion = 1
+        repository = 'nativepapaya/package-pilot'
+        workflowName = 'Release'
+        workflowDatabaseId = [uint64]77
+        runId = [uint64]123456789
+        runNumber = [uint64]995
+        runAttempt = [uint64]1
+        artifactId = [uint64]987654321
+        artifactName = 'package-pilot-unsigned-123456789-1'
+        commitSha = '0123456789abcdef0123456789abcdef01234567'
+        releaseSequence = [uint64]999
+        tagName = 'v1.0.999'
+        packageVersion = '1.0.0.999'
+        signerThumbprint = $testCertificate.Thumbprint
+        preparedAtUtc = '2026-07-19T12:35:56.1234567+00:00'
         sourceMetadata = New-PreparedFileRecord `
             -Directory $preparedTestDirectory `
             -FileName 'release-metadata.json'

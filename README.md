@@ -36,7 +36,9 @@ Open `PackagePilot.appinstaller` to install the correct x64 or ARM64 package and
 
 - Windows 11 x64 or ARM64, build 22000 or later
 - A current App Installer/WinGet release with deployment API contract 6 or later
-- .NET 10 SDK and Developer Mode for local development
+- .NET 10 SDK, PowerShell 7.5 or later, and Developer Mode for local development
+
+PowerShell is used only by repository tooling. The installed app has no PowerShell dependency.
 
 ## Build and test
 
