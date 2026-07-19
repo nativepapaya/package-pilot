@@ -42,6 +42,8 @@ $solutionPath = Join-Path $repositoryRoot 'PackagePilot.slnx'
 $workflowPath = Join-Path $repositoryRoot '.github\workflows\release.yml'
 $ciPath = Join-Path $repositoryRoot '.github\workflows\ci.yml'
 $bundleScriptPath = Join-Path $repositoryRoot 'build\New-MsixBundle.ps1'
+$parallelBuildScriptPath = Join-Path $repositoryRoot 'build\Build-UnsignedPackages.ps1'
+$stageScriptPath = Join-Path $repositoryRoot 'build\Stage-UnsignedRelease.ps1'
 
 [xml]$appProject = Get-Content -LiteralPath $appProjectPath -Raw
 $platforms = $appProject.SelectSingleNode('/Project/PropertyGroup/Platforms')
@@ -114,6 +116,11 @@ Assert-True -Condition (
 
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $ci = Get-Content -LiteralPath $ciPath -Raw
+$releaseTooling = @(
+    $workflow
+    (Get-Content -LiteralPath $parallelBuildScriptPath -Raw)
+    (Get-Content -LiteralPath $stageScriptPath -Raw)
+) -join [Environment]::NewLine
 foreach ($requiredText in @(
     'win-x64'
     'win-arm64'
@@ -121,7 +128,7 @@ foreach ($requiredText in @(
     'Microsoft.WindowsAppRuntime.2.x64.msix'
     'Microsoft.WindowsAppRuntime.2.arm64.msix'
     'New-MsixBundle.ps1'
-    'Assert-PackagePayload'
+    'MissingPayload'
     'PackagePilot.Windows.ReadOnly.dll'
     'PackagePilot.PackageAdmin.exe'
     'PackagePilot.PackageAdmin.dll'
@@ -132,12 +139,18 @@ foreach ($requiredText in @(
     'Microsoft.Management.Deployment.winmd'
     'Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.dll'
 )) {
-    Assert-True -Condition ($workflow.Contains($requiredText)) `
-        -Message "Release workflow is missing '$requiredText'."
+    Assert-True -Condition ($releaseTooling.Contains($requiredText)) `
+        -Message "Release tooling is missing '$requiredText'."
 }
+Assert-True -Condition (
+    $workflow.Contains('Build-UnsignedPackages.ps1') -and
+    $workflow.Contains('Stage-UnsignedRelease.ps1')) `
+    -Message 'The Release workflow must call the isolated parallel build and staging scripts.'
 Assert-True -Condition ($ci.Contains('-p:Platform=ARM64') -and $ci.Contains('win-arm64')) `
     -Message 'CI must compile the ARM64 application graph.'
 
-Assert-PowerShellParses -Path $bundleScriptPath
+foreach ($scriptPath in @($bundleScriptPath, $parallelBuildScriptPath, $stageScriptPath)) {
+    Assert-PowerShellParses -Path $scriptPath
+}
 
 Write-Output 'Packaging architecture tests passed.'

@@ -27,9 +27,16 @@
     <!-- A solution build uses AnyCPU as its orchestration platform, while explicit
          package builds use x64 or ARM64 and therefore gain a platform folder. -->
     <CompanionPlatformDirectory Condition="'$(Platform)' == 'x64' or '$(Platform)' == 'ARM64'">$(Platform)\</CompanionPlatformDirectory>
-    <BackgroundOutputDirectory>$(MSBuildProjectDirectory)\..\PackagePilot.Background\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</BackgroundOutputDirectory>
-    <PackageAdminOutputDirectory>$(MSBuildProjectDirectory)\..\PackagePilot.PackageAdmin\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</PackageAdminOutputDirectory>
-    <SourceAdminOutputDirectory>$(MSBuildProjectDirectory)\..\PackagePilot.SourceAdmin\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</SourceAdminOutputDirectory>
+    <!-- The SDK calculates ArtifactsPivots after this project is evaluated. These
+         single-target projects use its configuration_runtime layout, so compute
+         that same stable pivot while declaring the companion content paths. -->
+    <CompanionArtifactsPivot Condition="'$(UseArtifactsOutput)' == 'true'">$(Configuration.ToLowerInvariant())_$(RuntimeIdentifier.ToLowerInvariant())</CompanionArtifactsPivot>
+    <BackgroundOutputDirectory Condition="'$(UseArtifactsOutput)' != 'true'">$(MSBuildProjectDirectory)\..\PackagePilot.Background\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</BackgroundOutputDirectory>
+    <PackageAdminOutputDirectory Condition="'$(UseArtifactsOutput)' != 'true'">$(MSBuildProjectDirectory)\..\PackagePilot.PackageAdmin\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</PackageAdminOutputDirectory>
+    <SourceAdminOutputDirectory Condition="'$(UseArtifactsOutput)' != 'true'">$(MSBuildProjectDirectory)\..\PackagePilot.SourceAdmin\bin\$(CompanionPlatformDirectory)$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\</SourceAdminOutputDirectory>
+    <BackgroundOutputDirectory Condition="'$(UseArtifactsOutput)' == 'true'">$(ArtifactsPath)\bin\PackagePilot.Background\$(CompanionArtifactsPivot)\</BackgroundOutputDirectory>
+    <PackageAdminOutputDirectory Condition="'$(UseArtifactsOutput)' == 'true'">$(ArtifactsPath)\bin\PackagePilot.PackageAdmin\$(CompanionArtifactsPivot)\</PackageAdminOutputDirectory>
+    <SourceAdminOutputDirectory Condition="'$(UseArtifactsOutput)' == 'true'">$(ArtifactsPath)\bin\PackagePilot.SourceAdmin\$(CompanionArtifactsPivot)\</SourceAdminOutputDirectory>
   </PropertyGroup>
 
   <ItemGroup>

@@ -33,6 +33,14 @@ jobs:
         with:
           global-json-file: global.json
 
+      - name: Verify PowerShell tooling
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSVersion -lt [Version]'7.5') {
+              throw 'Package Pilot repository tooling requires PowerShell 7.5 or later.'
+          }
+          Write-Host "Using PowerShell $($PSVersionTable.PSVersion)."
+
       - name: Restore
         shell: pwsh
         run: dotnet restore PackagePilot.slnx
@@ -63,12 +71,23 @@ jobs:
         run: |
           ./build/tests/New-AppInstaller.Tests.ps1
           ./build/tests/New-MsixBundle.Tests.ps1
+          ./build/tests/JsonSchema.Tests.ps1
+          ./build/tests/NativeCommand.Tests.ps1
+          ./build/tests/ParallelPackageBuild.Tests.ps1
           ./build/tests/PackagingArchitecture.Tests.ps1
           ./build/tests/Set-PackageVersion.Tests.ps1
+          ./build/tests/StageUnsignedRelease.Tests.ps1
+
+      - name: Test manual release security on PowerShell 7
+        shell: pwsh
+        run: ./build/tests/ManualReleaseSecurity.Tests.ps1
 
       - name: Test manual release security on Windows PowerShell 5.1
         shell: powershell
-        run: ./build/tests/ManualReleaseSecurity.Tests.ps1
+        run: |
+          ./build/tests/New-MsixBundle.Tests.ps1
+          ./build/tests/NativeCommand.Tests.ps1
+          ./build/tests/ManualReleaseSecurity.Tests.ps1
 
       - name: Smoke test signed packaged UI
         shell: powershell
