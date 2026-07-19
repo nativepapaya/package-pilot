@@ -52,9 +52,6 @@ public static class PackagedSmokeNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetForegroundWindow(IntPtr window);
 
-    [DllImport("user32.dll")]
-    private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
-
     [DllImport("dwmapi.dll")]
     public static extern int DwmFlush();
 
@@ -65,13 +62,6 @@ public static class PackagedSmokeNative
         return manager.ActivateApplication(appUserModelId, string.Empty, 0, out processId);
     }
 
-    public static void PressEnter()
-    {
-        const byte Enter = 0x0D;
-        const uint KeyUp = 0x0002;
-        keybd_event(Enter, 0, 0, UIntPtr.Zero);
-        keybd_event(Enter, 0, KeyUp, UIntPtr.Zero);
-    }
 }
 
 [ComImport]
@@ -217,7 +207,25 @@ function Submit-DiscoverSearch {
     $edit.SetFocus()
     ([System.Windows.Automation.ValuePattern]$pattern).SetValue($Query)
     Start-Sleep -Milliseconds 100
-    [PackagedSmokeNative]::PressEnter()
+
+    $queryButtonCondition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        'QueryButton')
+    $queryButton = $search.FindFirst(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        $queryButtonCondition)
+    if ($null -eq $queryButton) {
+        throw 'The packaged Discover query button is not available to UI Automation.'
+    }
+
+    $invokePattern = $null
+    if (-not $queryButton.TryGetCurrentPattern(
+        [System.Windows.Automation.InvokePattern]::Pattern,
+        [ref]$invokePattern)) {
+        throw 'The packaged Discover query button cannot be invoked through UI Automation.'
+    }
+
+    ([System.Windows.Automation.InvokePattern]$invokePattern).Invoke()
 }
 
 function Wait-DiscoverInstalledAction {
@@ -249,7 +257,21 @@ function Wait-DiscoverInstalledAction {
         Start-Sleep -Milliseconds 200
     } while ([DateTimeOffset]::Now -lt $deadline)
 
-    throw "Discover did not recognize the runner's preinstalled 7zip.7zip package within 30 seconds."
+    $observedActions = @(
+        $Root.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            $condition) |
+            ForEach-Object {
+                "'{0}' (enabled={1}, offscreen={2})" -f
+                    $_.Current.Name,
+                    $_.Current.IsEnabled,
+                    $_.Current.IsOffscreen
+            } |
+            Select-Object -First 30
+    ) -join ', '
+    throw (
+        "Discover did not recognize the runner's preinstalled 7zip.7zip package within 30 seconds. " +
+        "Observed buttons: $observedActions")
 }
 
 function Save-WindowScreenshot {
@@ -371,7 +393,17 @@ try {
             -MarkerName $destinations[$destination]
         if ($destination -eq 'Discover') {
             Submit-DiscoverSearch -Root $automationRoot -Query '7zip.7zip'
-            Wait-DiscoverInstalledAction -Root $automationRoot
+            try {
+                Wait-DiscoverInstalledAction -Root $automationRoot
+            }
+            catch {
+                [void][PackagedSmokeNative]::DwmFlush()
+                $failureScreenshot = Join-Path $resolvedScreenshots 'discover-failure.png'
+                Save-WindowScreenshot `
+                    -Window $process.MainWindowHandle `
+                    -Path $failureScreenshot
+                throw
+            }
         }
         Start-Sleep -Milliseconds 500
         [void][PackagedSmokeNative]::DwmFlush()
