@@ -264,11 +264,17 @@ try {
         throw 'UI Automation could not bind to the packaged Package Pilot window.'
     }
 
+    # Hosted Windows runners can expose the UI Automation tree before DWM has
+    # committed the first complete WinUI surface. This delay is for artifact
+    # capture only and is not part of application startup logic.
+    Start-Sleep -Milliseconds 2500
+    [void][PackagedSmokeNative]::DwmFlush()
+
     $destinations = [ordered]@{
         Discover = 'Search packages'
         Installed = 'Filter installed packages'
         Updates = 'Check for updates'
-        Activity = 'Package activity'
+        Activity = 'Clear completed activity'
         Sources = 'Configured package sources'
         Settings = 'App theme'
     }
