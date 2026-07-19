@@ -209,9 +209,9 @@ function Submit-DiscoverSearch {
     Start-Sleep -Milliseconds 100
 
     $queryButtonCondition = [System.Windows.Automation.PropertyCondition]::new(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
-        'QueryButton')
-    $queryButton = $search.FindFirst(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        'Search packages now')
+    $queryButton = $Root.FindFirst(
         [System.Windows.Automation.TreeScope]::Descendants,
         $queryButtonCondition)
     if ($null -eq $queryButton) {
@@ -392,8 +392,8 @@ try {
             -Destination $destination `
             -MarkerName $destinations[$destination]
         if ($destination -eq 'Discover') {
-            Submit-DiscoverSearch -Root $automationRoot -Query '7zip.7zip'
             try {
+                Submit-DiscoverSearch -Root $automationRoot -Query '7zip.7zip'
                 Wait-DiscoverInstalledAction -Root $automationRoot
             }
             catch {
